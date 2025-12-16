@@ -1,0 +1,20 @@
+
+# Ignore uploads
+backend/uploads/
+!backend/uploads/.gitkeep
+backend/.env
+.env
+/.git_old/
+frontend/.next
+frontend/node_modules
+test_api.py
+__pycache__/
+*.pyc
+.DS_Store
+*.log
+connection_test_result.txt
+debug_*.py
+test_*.py
+temp_*.py
+fix_*.py
+update_*.py

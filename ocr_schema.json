@@ -1,0 +1,22 @@
+{
+    "type": "object",
+    "properties": {
+        "full_name": {
+            "type": "string",
+            "description": "ชื่อ-นามสกุล"
+        },
+        "address": {
+            "type": "string",
+            "description": "ที่อยู่"
+        },
+        "phone_number": {
+            "type": "string",
+            "description": "เบอร์โทรศัพท์"
+        }
+    },
+    "required": [
+        "full_name",
+        "address",
+        "phone_number"
+    ]
+}
