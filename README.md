@@ -1,6 +1,6 @@
-# Softnix InsightOCR
+# InsightOCR
 
-A modern document processing system with OCR (Optical Character Recognition) and structured data extraction capabilities. Built with FastAPI backend and Next.js frontend.
+A modern document processing system with OCR (Optical Character Recognition) and structured data extraction capabilities. Built with FastAPI backend and Next.js (App Router) frontend.
 
 ![Softnix InsightOCR Dashboard](assets/dashboard_preview.png)
 
@@ -34,23 +34,41 @@ A modern document processing system with OCR (Optical Character Recognition) and
 - Docker & Docker Compose
 - Git
 
-### Installation
+### Installation (Docker, recommended)
 
-1. Clone the repository:
+1) Clone the repository:
 ```bash
-git clone https://github.com/rujirapongsn2/SoftnixInsightOCR.git
-cd SoftnixInsightOCR
+git clone https://github.com/rujirapongsn2/InsightOCRv2.git
+cd InsightOCRv2
 ```
 
-2. Start the application:
-```bash
-docker compose up -d
+2) Create environment files:
+- `backend/.env` (see sample below)
+- `frontend/.env.local` (optional, e.g. `NEXT_PUBLIC_API_URL=http://localhost:8000`)
+
+Sample `backend/.env`:
+```env
+SECRET_KEY=change-me
+DATABASE_URL=postgresql://postgres:postgres@db:5432/softnix_ocr
+REDIS_URL=redis://redis:6379/0
+STORAGE_TYPE=local
+# If using MinIO:
+# MINIO_ENDPOINT=minio:9000
+# MINIO_ACCESS_KEY=minioadmin
+# MINIO_SECRET_KEY=minioadmin
+# MINIO_BUCKET=insightocr
+# MINIO_SECURE=False
 ```
 
-3. Access the application:
+3) Start the stack:
+```bash
+docker compose up --build
+```
+
+4) Access the application:
 - Frontend: http://localhost:3000
 - Backend API: http://localhost:8000
-- API Documentation: http://localhost:8000/docs
+- API Docs: http://localhost:8000/docs
 
 ### Default Credentials
 
@@ -163,7 +181,7 @@ Navigate to `/settings` and configure:
 ## Project Structure
 
 ```
-SoftnixInsightOCR/
+InsightOCRv2/
 ├── backend/
 │   ├── app/
 │   │   ├── api/          # API endpoints
@@ -195,22 +213,27 @@ SoftnixInsightOCR/
 
 ## Environment Variables
 
-### Backend
+### Backend (required)
+- `SECRET_KEY` - JWT/crypto secret
 - `DATABASE_URL` - PostgreSQL connection string
-- `BACKEND_CORS_ORIGINS` - Allowed CORS origins
+- `REDIS_URL` - Redis connection string
+- `STORAGE_TYPE` - `local` | `minio` | `s3`
+- `MINIO_*` / `AWS_*` - required if using `minio` or `s3`
 
 ### Frontend
-- `NEXT_PUBLIC_API_URL` - Backend API URL
+- `NEXT_PUBLIC_API_URL` - Backend API URL (defaults to relative calls when served by Docker)
 
 ## Development
 
 ### Running Tests
 
-See `QUICKWIN-TEST.md` for detailed testing procedures.
+Tests are not yet automated. When adding coverage, colocate:
+- Backend: `backend/tests/test_*.py` with `pytest`
+- Frontend: `frontend/**/*.test.tsx` with React Testing Library/Jest
 
 ### Database Migrations
 
-The application uses automatic migrations on startup. New columns are added via `ALTER TABLE IF NOT EXISTS` statements in `backend/app/main.py`.
+Automatic schema alignment occurs on startup via guarded `ALTER TABLE` in `backend/app/main.py`. Add explicit migrations if introducing breaking schema changes.
 
 ## Security
 
