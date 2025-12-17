@@ -6,6 +6,7 @@ from app.api import deps
 from app.models.job import Job
 from app.schemas.job import Job as JobSchema
 from app.schemas.job import JobCreate
+from app.utils.activity_logger import log_activity, Actions
 
 router = APIRouter()
 
@@ -45,6 +46,17 @@ def create_job(
     db.add(db_job)
     db.commit()
     db.refresh(db_job)
+
+    # Log activity
+    log_activity(
+        db=db,
+        user_id=current_user.id,
+        action=Actions.CREATE_JOB,
+        resource_type="job",
+        resource_id=db_job.id,
+        details={"job_name": db_job.name}
+    )
+
     return db_job
 
 @router.get("/{job_id}", response_model=JobSchema)
@@ -76,3 +88,36 @@ def read_job(
         "user_name": job.user.email if job.user else None
     }
     return job_dict
+
+@router.delete("/{job_id}")
+def delete_job(
+    *,
+    db: Session = Depends(deps.get_db),
+    job_id: str,
+    current_user: User = Depends(deps.get_current_active_user),
+) -> Any:
+    """
+    Delete a job and all its associated documents.
+    """
+    job = db.query(Job).filter(Job.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    # Check permissions
+    if not current_user.is_superuser and job.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not enough permissions")
+
+    # Log activity before deletion
+    log_activity(
+        db=db,
+        user_id=current_user.id,
+        action=Actions.DELETE_JOB,
+        resource_type="job",
+        resource_id=job.id,
+        details={"job_name": job.name, "status": job.status}
+    )
+
+    db.delete(job)
+    db.commit()
+
+    return {"message": "Job deleted successfully", "id": job_id}

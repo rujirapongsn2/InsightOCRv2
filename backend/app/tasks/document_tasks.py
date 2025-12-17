@@ -13,6 +13,7 @@ from app.models import Document, Job, User, DocumentSchema as SchemaModel
 from app.services.ocr import process_ocr, count_pdf_pages
 from app.services.structure import extract_structure
 from app.services.storage import get_storage_service
+from app.utils.activity_logger import log_activity, Actions
 import requests
 import re
 from typing import Any, List
@@ -321,6 +322,21 @@ def process_document_task(self, document_id: str, schema_id: str):
 
         db.add(document)
         db.commit()
+
+        # Log activity
+        if document.job and document.job.user_id:
+            log_activity(
+                db=db,
+                user_id=document.job.user_id,
+                action=Actions.PROCESS_DOCUMENT,
+                resource_type="document",
+                resource_id=document.id,
+                details={
+                    "filename": document.filename,
+                    "status": document.status,
+                    "schema_id": str(schema_id) if schema_id else None
+                }
+            )
 
         logger.info(f"Document {document_id} processing completed with status: {document.status}")
         return {

@@ -7,6 +7,7 @@ from app.api import deps
 from app.core import security
 from app.models.user import User
 from app.schemas.user import User as UserSchema, UserCreate, UserUpdate, UserSelfUpdate
+from app.utils.activity_logger import log_activity, Actions
 
 router = APIRouter()
 
@@ -50,6 +51,21 @@ def create_user(
     db.add(db_user)
     db.commit()
     db.refresh(db_user)
+
+    # Log activity
+    log_activity(
+        db=db,
+        user_id=current_user.id,
+        action=Actions.CREATE_USER,
+        resource_type="user",
+        resource_id=db_user.id,
+        details={
+            "email": db_user.email,
+            "full_name": db_user.full_name,
+            "role": db_user.role
+        }
+    )
+
     return db_user
 
 @router.get("/me", response_model=UserSchema)
@@ -139,6 +155,20 @@ def update_user(
     db.add(user)
     db.commit()
     db.refresh(user)
+
+    # Log activity
+    log_activity(
+        db=db,
+        user_id=current_user.id,
+        action=Actions.UPDATE_USER,
+        resource_type="user",
+        resource_id=user.id,
+        details={
+            "email": user.email,
+            "updated_fields": list(update_data.keys())
+        }
+    )
+
     return user
 
 @router.delete("/{user_id}", response_model=UserSchema)
@@ -162,6 +192,20 @@ def delete_user(
             status_code=400,
             detail="You cannot delete your own account.",
         )
+
+    # Log activity before deletion
+    log_activity(
+        db=db,
+        user_id=current_user.id,
+        action=Actions.DELETE_USER,
+        resource_type="user",
+        resource_id=user.id,
+        details={
+            "email": user.email,
+            "full_name": user.full_name,
+            "role": user.role
+        }
+    )
 
     db.delete(user)
     db.commit()

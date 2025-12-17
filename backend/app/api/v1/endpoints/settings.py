@@ -7,6 +7,7 @@ from app.api import deps
 from app.models.user import User
 from app.models.setting import Setting
 from app.schemas.setting import Setting as SettingSchema, SettingUpdate
+from app.utils.activity_logger import log_activity, Actions
 
 router = APIRouter()
 
@@ -82,6 +83,22 @@ def update_settings(
     db.add(setting)
     db.commit()
     db.refresh(setting)
+
+    # Log activity
+    log_activity(
+        db=db,
+        user_id=current_user.id,
+        action=Actions.UPDATE_SETTINGS,
+        resource_type="settings",
+        resource_id=setting.id,
+        details={
+            "ocr_engine": payload.ocr_engine,
+            "model": payload.model,
+            "ocr_endpoint": payload.ocr_endpoint,
+            "test_endpoint": payload.test_endpoint
+        }
+    )
+
     return setting
 
 

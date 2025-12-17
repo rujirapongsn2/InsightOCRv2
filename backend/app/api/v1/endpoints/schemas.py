@@ -6,6 +6,7 @@ from app.models.schema import DocumentSchema
 from app.schemas.schema import DocumentSchema as DocumentSchemaSchema
 from app.schemas.schema import DocumentSchemaCreate, DocumentSchemaUpdate
 from app.models.user import User
+from app.utils.activity_logger import log_activity, Actions
 
 router = APIRouter()
 
@@ -79,6 +80,17 @@ def create_schema(
     db.add(db_schema)
     db.commit()
     db.refresh(db_schema)
+
+    # Log activity
+    log_activity(
+        db=db,
+        user_id=current_user.id,
+        action=Actions.CREATE_SCHEMA,
+        resource_type="schema",
+        resource_id=db_schema.id,
+        details={"schema_name": db_schema.name, "document_type": db_schema.document_type}
+    )
+
     return db_schema
 
 @router.get("/{schema_id}", response_model=DocumentSchemaSchema)
@@ -135,6 +147,17 @@ def update_schema(
     db.add(schema)
     db.commit()
     db.refresh(schema)
+
+    # Log activity
+    log_activity(
+        db=db,
+        user_id=current_user.id,
+        action=Actions.UPDATE_SCHEMA,
+        resource_type="schema",
+        resource_id=schema.id,
+        details={"schema_name": schema.name}
+    )
+
     return schema
 
 @router.delete("/{schema_id}", response_model=DocumentSchemaSchema)
@@ -154,6 +177,16 @@ def delete_schema(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schema not found")
 
     _ensure_can_manage(schema, current_user)
+
+    # Log activity before deletion
+    log_activity(
+        db=db,
+        user_id=current_user.id,
+        action=Actions.DELETE_SCHEMA,
+        resource_type="schema",
+        resource_id=schema.id,
+        details={"schema_name": schema.name}
+    )
 
     db.delete(schema)
     db.commit()
