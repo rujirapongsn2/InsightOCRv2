@@ -52,23 +52,25 @@ def process_ocr(file_path: str, db: Session, page_number: int = 1) -> dict:
     if not setting:
         raise ValueError(
             "API Settings not configured. Please configure the following in /settings page:\n"
-            "- API Endpoint\n"
+            "- OCR Endpoint\n"
             "- API Token\n"
             "- OCR Engine (optional)\n"
             "- Model (optional)"
         )
-    
-    if not setting.api_endpoint or not setting.api_token:
+
+    # Use ocr_endpoint, fallback to legacy api_endpoint if not set
+    ocr_api_url = setting.ocr_endpoint or setting.api_endpoint
+
+    if not ocr_api_url or not setting.api_token:
         raise ValueError(
-            "API Endpoint and Token are required. Please configure them in /settings page."
+            "OCR Endpoint and API Token are required. Please configure them in /settings page."
         )
-    
-    ocr_api_url = setting.api_endpoint
     api_key = setting.api_token
     verify_ssl = setting.verify_ssl if setting.verify_ssl is not None else False
-    # Use 'tesseract' as default if not specified
-    ocr_engine = setting.ocr_engine if setting.ocr_engine else 'tesseract'
-    model = setting.model if setting.model else ''
+
+    # If 'default', send empty string to let External API use its own default
+    ocr_engine = '' if not setting.ocr_engine or setting.ocr_engine == 'default' else setting.ocr_engine
+    model = '' if not setting.model or setting.model == 'default' else setting.model
 
     headers = {
         'accept': 'application/json',
@@ -86,20 +88,38 @@ def process_ocr(file_path: str, db: Session, page_number: int = 1) -> dict:
         # Determine file content type based on extension
         file_ext = os.path.splitext(file_path)[1].lower()
         content_type = 'application/pdf' if file_ext == '.pdf' else f'image/{file_ext[1:]}'
-        
+
+        # Debug logging
+        print("=" * 80)
+        print("OCR REQUEST DEBUG:")
+        print(f"URL: {ocr_api_url}")
+        print(f"File: {os.path.basename(file_path)}")
+        print(f"Content-Type: {content_type}")
+        print(f"Headers: {headers}")
+        print(f"Data: {data}")
+        print("=" * 80)
+
         with open(file_path, 'rb') as f:
             files = {
                 'file': (os.path.basename(file_path), f, content_type)
             }
-            
+
             response = requests.post(
-                ocr_api_url, 
-                headers=headers, 
-                data=data, 
-                files=files, 
+                ocr_api_url,
+                headers=headers,
+                data=data,
+                files=files,
                 verify=verify_ssl
             )
-            
+
+            # Log response details before raising error
+            print("=" * 80)
+            print("OCR RESPONSE DEBUG:")
+            print(f"Status Code: {response.status_code}")
+            print(f"Response Headers: {dict(response.headers)}")
+            print(f"Response Body: {response.text[:500]}")  # First 500 chars
+            print("=" * 80)
+
             response.raise_for_status()
             result = response.json()
             

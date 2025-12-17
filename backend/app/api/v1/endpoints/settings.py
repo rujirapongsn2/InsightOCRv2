@@ -27,12 +27,31 @@ def get_settings(
         db.add(setting)
         db.commit()
         db.refresh(setting)
-    # Backfill defaults if missing
-    if not setting.api_endpoint:
-        setting.api_endpoint = "https://111.223.37.41:9001/ai-process-file"
+
+    # Migrate legacy api_endpoint to new fields if needed
+    if setting.api_endpoint and (not setting.ocr_endpoint or not setting.test_endpoint):
+        # If api_endpoint exists but new fields don't, migrate
+        if not setting.ocr_endpoint:
+            setting.ocr_endpoint = setting.api_endpoint
+        if not setting.test_endpoint:
+            # Assume test endpoint is /me on same base URL
+            setting.test_endpoint = "https://111.223.37.41:9001/me"
         db.add(setting)
         db.commit()
         db.refresh(setting)
+
+    # Backfill defaults if missing
+    if not setting.ocr_endpoint:
+        setting.ocr_endpoint = "https://111.223.37.41:9001/ai-process-file"
+        db.add(setting)
+        db.commit()
+        db.refresh(setting)
+    if not setting.test_endpoint:
+        setting.test_endpoint = "https://111.223.37.41:9001/me"
+        db.add(setting)
+        db.commit()
+        db.refresh(setting)
+
     return setting
 
 
@@ -47,11 +66,19 @@ def update_settings(
     if not setting:
         setting = Setting()
         db.add(setting)
+
+    # Update all fields
     setting.ocr_engine = payload.ocr_engine
     setting.model = payload.model
-    setting.api_endpoint = payload.api_endpoint
+    setting.ocr_endpoint = payload.ocr_endpoint
+    setting.test_endpoint = payload.test_endpoint
     setting.api_token = payload.api_token
     setting.verify_ssl = payload.verify_ssl
+
+    # Keep legacy api_endpoint in sync with ocr_endpoint for backward compatibility
+    if payload.ocr_endpoint:
+        setting.api_endpoint = payload.ocr_endpoint
+
     db.add(setting)
     db.commit()
     db.refresh(setting)

@@ -23,9 +23,16 @@ Base.metadata.create_all(bind=engine)
 # Ensure new columns exist without full migrations for development environments
 with engine.connect() as conn:
     conn.execute(text("ALTER TABLE IF EXISTS document_schemas ADD COLUMN IF NOT EXISTS created_by uuid NULL"))
+
+    # Settings table columns
     conn.execute(text("ALTER TABLE IF EXISTS settings ADD COLUMN IF NOT EXISTS api_endpoint varchar"))
     conn.execute(text("ALTER TABLE IF EXISTS settings ADD COLUMN IF NOT EXISTS api_token varchar"))
     conn.execute(text("ALTER TABLE IF EXISTS settings ADD COLUMN IF NOT EXISTS verify_ssl boolean DEFAULT false"))
+
+    # New separate endpoint columns
+    conn.execute(text("ALTER TABLE IF EXISTS settings ADD COLUMN IF NOT EXISTS ocr_endpoint varchar DEFAULT 'https://111.223.37.41:9001/ai-process-file'"))
+    conn.execute(text("ALTER TABLE IF EXISTS settings ADD COLUMN IF NOT EXISTS test_endpoint varchar DEFAULT 'https://111.223.37.41:9001/me'"))
+
     # Add schema_id to documents table for per-document schema selection
     conn.execute(text("ALTER TABLE IF EXISTS documents ADD COLUMN IF NOT EXISTS schema_id uuid NULL"))
     # Add template_id to document_schemas table for template reference
@@ -36,6 +43,16 @@ with engine.connect() as conn:
     conn.execute(text("ALTER TABLE IF EXISTS documents ADD COLUMN IF NOT EXISTS processing_error varchar NULL"))
     # Ensure job ownership column exists for dashboard queries
     conn.execute(text("ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS user_id uuid NULL"))
+
+    # Migrate existing data: if api_endpoint exists but ocr_endpoint doesn't, copy it
+    conn.execute(text("""
+        UPDATE settings
+        SET ocr_endpoint = api_endpoint
+        WHERE ocr_endpoint IS NULL
+          AND api_endpoint IS NOT NULL
+          AND api_endpoint != ''
+    """))
+
     conn.commit()
 
 # Seed an initial admin user if none exists

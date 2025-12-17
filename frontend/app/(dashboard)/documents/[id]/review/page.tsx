@@ -1,9 +1,9 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useEffect, useState, useMemo } from "react"
 import { useParams, useRouter } from "next/navigation"
 import Link from "next/link"
-import { ArrowLeft, Save, CheckCircle, AlertTriangle } from "lucide-react"
+import { ArrowLeft, Save, CheckCircle, AlertTriangle, FileText, Image as ImageIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 
@@ -15,6 +15,7 @@ interface Document {
     extracted_data: any
     reviewed_data: any
     job_id: string
+    mime_type?: string
 }
 type ExtractedEntry = Record<string, any>
 
@@ -26,6 +27,7 @@ export default function ReviewDocumentPage() {
     const [formData, setFormData] = useState<ExtractedEntry[]>([])
     const [loading, setLoading] = useState(true)
     const [saving, setSaving] = useState(false)
+    const [fileObjectUrl, setFileObjectUrl] = useState<string | null>(null)
 
     const normalizeExtractedData = (data: any): ExtractedEntry[] => {
         if (!data) return []
@@ -74,6 +76,38 @@ export default function ReviewDocumentPage() {
         fetchDocument()
     }, [documentId])
 
+    // Fetch file with authentication and create object URL
+    useEffect(() => {
+        if (!document) return
+
+        const fetchFile = async () => {
+            try {
+                const token = typeof window !== "undefined" ? localStorage.getItem("token") : null
+                const baseUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1'
+                const res = await fetch(`${baseUrl}/documents/${documentId}/file`, {
+                    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+                })
+
+                if (res.ok) {
+                    const blob = await res.blob()
+                    const objectUrl = URL.createObjectURL(blob)
+                    setFileObjectUrl(objectUrl)
+                }
+            } catch (error) {
+                console.error("Failed to fetch file", error)
+            }
+        }
+
+        fetchFile()
+
+        // Cleanup: revoke object URL when component unmounts
+        return () => {
+            if (fileObjectUrl) {
+                URL.revokeObjectURL(fileObjectUrl)
+            }
+        }
+    }, [document, documentId])
+
     const handleFieldChange = (index: number, key: string, value: any) => {
         setFormData((prev) => {
             const next = [...prev]
@@ -118,6 +152,18 @@ export default function ReviewDocumentPage() {
         }
     }
 
+    const isPDF = useMemo(() => {
+        return document?.mime_type === 'application/pdf' || document?.filename.toLowerCase().endsWith('.pdf')
+    }, [document])
+
+    const isImage = useMemo(() => {
+        if (!document) return false
+        const imageTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp']
+        const imageExts = ['.jpg', '.jpeg', '.png', '.gif', '.webp']
+        return imageTypes.includes(document.mime_type || '') ||
+               imageExts.some(ext => document.filename.toLowerCase().endsWith(ext))
+    }, [document])
+
     if (loading) return <div>Loading...</div>
     if (!document) return <div>Document not found</div>
 
@@ -152,14 +198,58 @@ export default function ReviewDocumentPage() {
 
             {/* Content */}
             <div className="flex-1 flex overflow-hidden">
-                {/* Left: Document Viewer (Placeholder) */}
-                <div className="w-1/2 bg-slate-100 p-4 border-r overflow-auto flex items-center justify-center">
-                    <div className="text-center text-slate-500">
-                        <p>Document Viewer Placeholder</p>
-                        <p className="text-xs mt-2">PDF/Image rendering would go here.</p>
-                        <div className="mt-8 p-4 bg-white rounded shadow text-left max-w-md mx-auto text-xs font-mono whitespace-pre-wrap max-h-96 overflow-auto">
-                            {document.ocr_text || "No OCR text available"}
+                {/* Left: Document Viewer */}
+                <div className="w-1/2 bg-slate-100 border-r overflow-auto">
+                    <div className="h-full flex flex-col">
+                        {/* Document Display */}
+                        <div className="flex-1 overflow-auto bg-slate-900 flex items-center justify-center p-4">
+                            {!fileObjectUrl ? (
+                                <div className="text-center text-slate-400">
+                                    <FileText className="h-16 w-16 mx-auto mb-4 opacity-50 animate-pulse" />
+                                    <p className="text-sm">Loading document...</p>
+                                </div>
+                            ) : isImage ? (
+                                <img
+                                    src={fileObjectUrl}
+                                    alt={document.filename}
+                                    className="max-w-full max-h-full object-contain"
+                                    onError={(e) => {
+                                        console.error('Failed to load image:', e)
+                                    }}
+                                />
+                            ) : isPDF ? (
+                                <div className="w-full h-full bg-white">
+                                    <iframe
+                                        src={fileObjectUrl}
+                                        className="w-full h-full border-0"
+                                        title={document.filename}
+                                    />
+                                </div>
+                            ) : (
+                                <div className="text-center text-slate-400">
+                                    <FileText className="h-16 w-16 mx-auto mb-4 opacity-50" />
+                                    <p className="text-sm">
+                                        {document.mime_type ? `Unsupported file type: ${document.mime_type}` : 'Unknown file type'}
+                                    </p>
+                                    <p className="text-xs mt-2">{document.filename}</p>
+                                </div>
+                            )}
                         </div>
+
+                        {/* OCR Text Panel (Collapsible) */}
+                        {document.ocr_text && (
+                            <details className="bg-white border-t">
+                                <summary className="px-4 py-3 cursor-pointer hover:bg-slate-50 flex items-center gap-2 text-sm font-medium">
+                                    <FileText className="h-4 w-4" />
+                                    OCR Extracted Text ({document.ocr_text.length} characters)
+                                </summary>
+                                <div className="px-4 py-3 max-h-48 overflow-auto">
+                                    <pre className="text-xs whitespace-pre-wrap text-slate-600 font-mono">
+                                        {document.ocr_text}
+                                    </pre>
+                                </div>
+                            </details>
+                        )}
                     </div>
                 </div>
 

@@ -197,19 +197,115 @@ InsightOCRv2/
 └── docker-compose.yml
 ```
 
-## API Services
+## External API Configuration
 
-### OCR Service
-- Endpoint: `/ai-process-file`
-- Purpose: Extract text from PDF/images
-- Input: File (PDF/Image)
-- Output: OCR text with AI processing
+InsightOCR integrates with an external AI service for OCR processing and structured data extraction. The external API provides the following endpoints:
 
-### Structure Service
-- Endpoint: `/structured-output`
-- Purpose: Convert text to structured JSON
-- Input: OCR text + JSON Schema
-- Output: Structured data
+### 1. Authentication Test Endpoint
+- **URL**: `https://111.223.37.41:9001/me`
+- **Purpose**: Test API authentication and verify endpoint connectivity
+- **Method**: GET
+- **Headers**: `Authorization: Bearer <API_TOKEN>`
+- **Response**: User/service information
+- **Usage**: Used by the Settings page "Test Endpoint" button
+
+### 2. OCR Extraction Endpoint
+- **URL**: `https://111.223.37.41:9001/ai-process-file`
+- **Purpose**: Extract text from PDF/image documents using OCR
+- **Method**: POST
+- **Input**: File (PDF, JPG, PNG)
+- **Output**: Extracted OCR text
+- **Usage**: Core OCR processing for document text extraction
+
+### 3. Structured Output Endpoint
+- **URL**: `https://111.223.37.41:9001/structured-output`
+- **Purpose**: Convert OCR text to structured JSON based on a defined schema
+- **Method**: POST
+- **Input**:
+  - OCR text content
+  - JSON Schema definition (fields, types, descriptions)
+- **Output**: Structured JSON data matching the schema
+- **Usage**: Transform extracted text into structured data for review and export
+
+### Configuration in Settings
+
+Navigate to `/settings` and configure the external API endpoints:
+
+1. **OCR Processing Endpoint**: `https://111.223.37.41:9001/ai-process-file`
+   - Used for extracting text from uploaded documents
+   - POST request with file upload
+
+2. **Test Connection Endpoint**: `https://111.223.37.41:9001/me`
+   - Used to verify API authentication
+   - GET request to test connectivity
+
+3. **Bearer Token**: Your API authentication token (e.g., `ocr_ai_key_987654321fedcba`)
+   - Used for authenticating requests to both endpoints
+
+4. Click **"Test Connection"** to verify connectivity
+5. Click **"Save Connection Settings"** to persist configuration
+
+**Note**: The system now uses separate endpoints for different operations:
+- Test connection → `test_endpoint` (/me)
+- OCR extraction → `ocr_endpoint` (/ai-process-file)
+- Data structuring → `/structured-output` (called during document processing)
+
+### AI Field Suggestion Configuration (Optional)
+
+The system includes an **AI-Assisted Field Suggestion** feature for automatically suggesting schema fields from sample documents. This feature is **separate** from the core OCR processing and requires additional configuration.
+
+**Important**: The AI Field Suggestion feature requires a compatible AI provider API (e.g., Dify.ai, OpenAI) that can analyze OCR content and suggest structured fields. This is NOT the same as the OCR extraction endpoint above.
+
+To configure AI Field Suggestion:
+1. Navigate to `/settings`
+2. Scroll to **"AI Field Suggestion"** section (below the API Endpoint section)
+3. Click **"Add Provider"**
+4. Configure your AI provider:
+   - **Provider Name**: Unique identifier (e.g., "dify-ai")
+   - **Display Name**: Human-readable name
+   - **API URL**: Your AI provider's API endpoint (e.g., `https://api.dify.ai/v1/workflows/run`)
+   - **API Key**: Authentication key from your AI provider
+   - **Is Active**: Enable the provider
+   - **Is Default**: Set as default provider
+5. Click **"Test Connection"** to verify
+6. Click **"Save"**
+
+**Usage**:
+- When creating a schema via **Simple Mode** (`/schemas/new/simple`)
+- Upload a sample document
+- The system will extract OCR text and send it to the configured AI provider
+- AI will suggest relevant fields based on the document content
+
+**Troubleshooting**:
+- If you see "OCR extraction failed: 400 Client Error", check that your AI provider URL is correct
+- The AI provider endpoint must support field suggestion from OCR content
+- If no AI provider is configured, use **Advanced Mode** to create schemas manually
+
+### Common Issues and Solutions
+
+**Error: "OCR extraction failed: 500 Internal Server Error"**
+- **Cause**: OCR endpoint not configured or incorrect endpoint URL
+- **Solution**:
+  1. Go to `/settings`
+  2. Verify **OCR Processing Endpoint** is set to `/ai-process-file` (not `/me`)
+  3. Verify **Bearer Token** is correct
+  4. Click "Save Connection Settings"
+  5. Click "Test Connection" to verify
+
+**Error: "API Settings not configured"**
+- **Cause**: No settings saved in database
+- **Solution**:
+  1. Login as admin user
+  2. Go to `/settings`
+  3. Configure both OCR and Test endpoints
+  4. Save settings
+
+**Error: "400 Bad Request" when testing connection**
+- **Cause**: Using wrong endpoint for the operation
+- **Solution**:
+  - Test Connection uses GET request to `/me`
+  - OCR Processing uses POST request to `/ai-process-file`
+  - Ensure you're using the correct endpoint for each purpose
 
 ## Environment Variables
 

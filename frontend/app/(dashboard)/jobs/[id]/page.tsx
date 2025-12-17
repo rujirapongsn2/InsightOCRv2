@@ -711,7 +711,8 @@ export default function JobDetailPage() {
                                                             onClick={() => handleProcess(doc.id)}
                                                             disabled={!doc.schema_id || isProcessing}
                                                             size="sm"
-                                                            variant={doc.status === "failed" ? "destructive" : "default"}
+                                                            variant={doc.status === "failed" ? "outline" : "default"}
+                                                            className={doc.status === "failed" ? "bg-[rgba(243,144,63,0.1)] text-[rgb(243,144,63)] border-[rgb(243,144,63)] hover:bg-[rgba(243,144,63,0.2)]" : ""}
                                                         >
                                                             {isProcessing ? (
                                                                 <>

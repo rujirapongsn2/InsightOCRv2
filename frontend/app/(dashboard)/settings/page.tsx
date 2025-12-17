@@ -15,7 +15,9 @@ export default function SettingsPage() {
     return user.role === "documents_admin" ? "manager" : user.role
   }, [user?.role])
 
-  const [endpoint, setEndpoint] = useState("https://111.223.37.41:9001/me")
+  // Separate endpoints for different purposes
+  const [ocrEndpoint, setOcrEndpoint] = useState("https://111.223.37.41:9001/ai-process-file")
+  const [testEndpoint, setTestEndpoint] = useState("https://111.223.37.41:9001/me")
   const [token, setToken] = useState("ocr_ai_key_987654321fedcba")
   const [ocrEngine, setOcrEngine] = useState("default")
   const [model, setModel] = useState("default")
@@ -32,9 +34,11 @@ export default function SettingsPage() {
         })
         if (res.ok) {
           const data = await res.json()
-          if (data.ocr_engine) setOcrEngine(data.ocr_engine)
-          if (data.model) setModel(data.model)
-          if (data.api_endpoint) setEndpoint(data.api_endpoint)
+          // Show 'default' in UI if empty string is stored
+          setOcrEngine(data.ocr_engine || 'default')
+          setModel(data.model || 'default')
+          if (data.ocr_endpoint) setOcrEndpoint(data.ocr_endpoint)
+          if (data.test_endpoint) setTestEndpoint(data.test_endpoint)
           // Don't show the full token validation/security might be better, but for now show what's saved
           if (data.api_token) setToken(data.api_token)
         }
@@ -50,6 +54,11 @@ export default function SettingsPage() {
     setError(null)
     try {
       const authToken = typeof window !== "undefined" ? localStorage.getItem("token") : null
+
+      // Convert 'default' to empty string for OCR engine and model
+      const finalOcrEngine = ocrEngine === 'default' ? '' : ocrEngine
+      const finalModel = model === 'default' ? '' : model
+
       const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1'}/settings/config`, {
         method: "PUT",
         headers: {
@@ -57,10 +66,12 @@ export default function SettingsPage() {
           ...(authToken ? { Authorization: `Bearer ${authToken}` } : {})
         },
         body: JSON.stringify({
-          ocr_engine: ocrEngine,
-          model: model,
-          api_endpoint: endpoint,
-          api_token: token
+          ocr_engine: finalOcrEngine,
+          model: finalModel,
+          ocr_endpoint: ocrEndpoint,
+          test_endpoint: testEndpoint,
+          api_token: token,
+          verify_ssl: false
         })
       })
       const data = await res.json()
@@ -86,7 +97,7 @@ export default function SettingsPage() {
           "Content-Type": "application/json",
           ...(authToken ? { Authorization: `Bearer ${authToken}` } : {})
         },
-        body: JSON.stringify({ url: endpoint, token })
+        body: JSON.stringify({ url: testEndpoint, token })
       })
       const data = await res.json()
       if (res.ok) {
@@ -119,16 +130,42 @@ export default function SettingsPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle>API Endpoint</CardTitle>
+          <CardTitle>External API Configuration</CardTitle>
+          <p className="text-sm text-slate-600 mt-1">
+            Configure connection to your external AI service
+          </p>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="space-y-2">
-            <label className="text-sm font-medium">Endpoint URL</label>
-            <Input value={endpoint} onChange={(e) => setEndpoint(e.target.value)} />
+            <label className="text-sm font-medium">OCR Processing Endpoint</label>
+            <Input
+              value={ocrEndpoint}
+              onChange={(e) => setOcrEndpoint(e.target.value)}
+              placeholder="https://111.223.37.41:9001/ai-process-file"
+            />
+            <p className="text-xs text-slate-500">
+              Used for extracting text from documents (POST with file upload)
+            </p>
           </div>
+
+          <div className="space-y-2">
+            <label className="text-sm font-medium">Test Connection Endpoint</label>
+            <Input
+              value={testEndpoint}
+              onChange={(e) => setTestEndpoint(e.target.value)}
+              placeholder="https://111.223.37.41:9001/me"
+            />
+            <p className="text-xs text-slate-500">
+              Used to verify API authentication (GET request)
+            </p>
+          </div>
+
           <div className="space-y-2">
             <label className="text-sm font-medium">Bearer Token</label>
             <Input value={token} onChange={(e) => setToken(e.target.value)} />
+            <p className="text-xs text-slate-500">
+              API authentication token for both endpoints
+            </p>
           </div>
 
           <div className="flex gap-2">
@@ -137,7 +174,7 @@ export default function SettingsPage() {
             </Button>
             <Button type="button" onClick={handleTest} disabled={loading}>
               {loading && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
-              Test Endpoint
+              Test Connection
             </Button>
           </div>
 
@@ -158,13 +195,23 @@ export default function SettingsPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle>Sample cURL</CardTitle>
+          <CardTitle>Sample cURL Commands</CardTitle>
         </CardHeader>
-        <CardContent>
-          <pre className="bg-slate-900 text-slate-100 text-xs p-3 rounded-md overflow-auto">{`curl -X 'GET' \\
-  '${endpoint}' \\
+        <CardContent className="space-y-4">
+          <div>
+            <p className="text-sm font-medium mb-2">Test Connection:</p>
+            <pre className="bg-slate-900 text-slate-100 text-xs p-3 rounded-md overflow-auto">{`curl -X 'GET' \\
+  '${testEndpoint}' \\
   -H 'accept: application/json' \\
   -H 'Authorization: Bearer ${token}'`}</pre>
+          </div>
+          <div>
+            <p className="text-sm font-medium mb-2">OCR Processing:</p>
+            <pre className="bg-slate-900 text-slate-100 text-xs p-3 rounded-md overflow-auto">{`curl -X 'POST' \\
+  '${ocrEndpoint}' \\
+  -H 'Authorization: Bearer ${token}' \\
+  -F 'file=@document.pdf'`}</pre>
+          </div>
         </CardContent>
       </Card>
 
