@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState, useRef } from "react"
+import { useEffect, useState, useRef, useMemo } from "react"
 import { useParams } from "next/navigation"
 import Link from "next/link"
 import { ArrowLeft, Upload, FileText, Loader2, Eye, X, Trash2 } from "lucide-react"
@@ -625,6 +625,11 @@ export default function JobDetailPage() {
     }
     const allDocsReviewed = documents.length > 0 && documents.every(d => d.status === "reviewed")
 
+    // Memoize PDF URL to prevent unnecessary reloads
+    const pdfFileUrl = useMemo(() => {
+        return reviewDoc ? `${apiBase}/documents/${reviewDoc.id}/file` : ""
+    }, [reviewDoc?.id, apiBase])
+
     return (
         <div className="space-y-6">
             <div className="flex items-center space-x-4">
@@ -884,7 +889,7 @@ export default function JobDetailPage() {
                                         // Display PDF
                                         return (
                                             <PDFViewer
-                                                fileUrl={`${apiBase}/documents/${reviewDoc.id}/file`}
+                                                fileUrl={pdfFileUrl}
                                             />
                                         )
                                     }

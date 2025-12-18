@@ -2,8 +2,17 @@
 # Ignore uploads
 backend/uploads/
 !backend/uploads/.gitkeep
+# Environment files with actual credentials (DO NOT COMMIT)
 backend/.env
+backend/.env.local
+frontend/.env.local
 .env
+
+# Allow example env files to be committed
+!backend/.env.example
+!backend/.env*.example
+!frontend/.env.example
+!frontend/.env*.example
 /.git_old/
 frontend/.next
 frontend/node_modules

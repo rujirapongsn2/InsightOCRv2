@@ -43,37 +43,43 @@ cd InsightOCRv2
 ```
 
 2) Create environment files:
-   - `backend/.env`
-   - `frontend/.env.local`
 
-Dev sample (`backend/.env`):
-```env
-SECRET_KEY=change-me
-DATABASE_URL=postgresql://postgres:postgres@db:5432/softnix_ocr
-REDIS_URL=redis://redis:6379/0
-STORAGE_TYPE=local
-BACKEND_CORS_ORIGINS=http://localhost:3000,http://localhost:8000
-# Extra origins to allow besides BACKEND_CORS_ORIGINS (comma-separated)
-BACKEND_EXTRA_CORS_ORIGINS=
-# If using MinIO:
-# MINIO_ENDPOINT=minio:9000
-# MINIO_ACCESS_KEY=minioadmin
-# MINIO_SECRET_KEY=minioadmin
-# MINIO_BUCKET=insightocr
-# MINIO_SECURE=False
+**For Development:**
+```bash
+# Backend
+cd backend
+cp .env.dev.example .env
+# Edit .env and update OCR_ENDPOINT, TEST_ENDPOINT as needed
+
+# Frontend
+cd ../frontend
+cp .env.development.example .env.local
 ```
 
-Dev sample (`frontend/.env.local`):
-```env
-NEXT_PUBLIC_API_URL=http://localhost:8000/api/v1
+**For Production:**
+```bash
+# Backend
+cd backend
+cp .env.prod.example .env
+# IMPORTANT: Edit .env and update all values (SECRET_KEY, DATABASE_URL, etc.)
+
+# Frontend
+cd ../frontend
+cp .env.production.example .env.local
+# Update NEXT_PUBLIC_API_URL to your production backend URL
 ```
 
-Production hints:
-- Set `BACKEND_CORS_ORIGINS` to your internal/front-end hosts if you serve via the same domain; otherwise put only the canonical origins, and add public UI hosts to `BACKEND_EXTRA_CORS_ORIGINS`, e.g.  
-  `BACKEND_EXTRA_CORS_ORIGINS=http://env-1805534.th2.proen.cloud:3000`
-- Set `NEXT_PUBLIC_API_URL` to the public API host, e.g.  
-  `NEXT_PUBLIC_API_URL=http://env-1805534.th2.proen.cloud:8000/api/v1`
-- Rebuild the frontend after changing `NEXT_PUBLIC_API_URL` (env is baked at build time).
+**Quick Reference:**
+- See `backend/.env.example` for all available configuration options
+- See `ENV_SETUP.md` for detailed environment configuration guide
+- Development uses `localhost` URLs by default
+- Production requires updating database, CORS, and OCR endpoints
+
+**Important Notes:**
+- Generate a strong `SECRET_KEY` for production: `openssl rand -hex 32`
+- Update `BACKEND_CORS_ORIGINS` to match your frontend domain
+- Configure `OCR_ENDPOINT` and `TEST_ENDPOINT` for your OCR service
+- Rebuild frontend after changing `NEXT_PUBLIC_API_URL` (env is baked at build time)
 
 3) Start the stack:
 ```bash
@@ -324,15 +330,52 @@ To configure AI Field Suggestion:
 
 ## Environment Variables
 
-### Backend (required)
-- `SECRET_KEY` - JWT/crypto secret
-- `DATABASE_URL` - PostgreSQL connection string
-- `REDIS_URL` - Redis connection string
-- `STORAGE_TYPE` - `local` | `minio` | `s3`
-- `MINIO_*` / `AWS_*` - required if using `minio` or `s3`
+### Quick Start
+Use the provided `.env.example` templates to get started:
 
-### Frontend
-- `NEXT_PUBLIC_API_URL` - Backend API URL (defaults to relative calls when served by Docker)
+**Development:**
+- `backend/.env.dev.example` → `backend/.env`
+- `frontend/.env.development.example` → `frontend/.env.local`
+
+**Production:**
+- `backend/.env.prod.example` → `backend/.env`
+- `frontend/.env.production.example` → `frontend/.env.local`
+
+### Backend Variables
+
+#### Required
+- `SECRET_KEY` - JWT token signing key (generate with `openssl rand -hex 32`)
+- `DATABASE_URL` - PostgreSQL connection string
+- `REDIS_URL` - Redis connection string for Celery task queue
+- `BACKEND_CORS_ORIGINS` - Allowed frontend origins (comma-separated)
+
+#### Storage
+- `STORAGE_TYPE` - Options: `local`, `minio`, `s3`
+- `MINIO_*` - Required if `STORAGE_TYPE=minio`
+- `AWS_*` - Required if `STORAGE_TYPE=s3`
+
+#### OCR Service (New!)
+- `OCR_ENDPOINT` - External OCR service endpoint for document processing
+- `TEST_ENDPOINT` - OCR service health check endpoint
+
+**Note:** These provide default values when no database setting exists. Can be overridden via UI Settings page.
+
+#### Optional
+- `BACKEND_EXTRA_CORS_ORIGINS` - Additional CORS origins
+- `OPENAI_API_KEY` - OpenAI API key (optional)
+- `AI_PROVIDER_URL` - Custom AI provider endpoint (optional)
+- `AI_PROVIDER_KEY` - Custom AI provider API key (optional)
+
+### Frontend Variables
+- `NEXT_PUBLIC_API_URL` - Backend API URL (must include `/api/v1`)
+
+### Detailed Configuration
+See [ENV_SETUP.md](ENV_SETUP.md) for:
+- Complete variable descriptions
+- Environment-specific configurations
+- Common issues and troubleshooting
+- Testing configuration
+- Security best practices
 
 ## Development
 
