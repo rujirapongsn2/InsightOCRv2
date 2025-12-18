@@ -8,6 +8,7 @@ import { TemplateGallery } from "./TemplateGallery"
 import { AISuggestionUpload } from "./AISuggestionUpload"
 import { useSchemaWizard } from "@/contexts/SchemaWizardContext"
 import { Template, StartingPoint } from "@/types/schema"
+import { getApiBaseUrl } from "@/lib/api"
 
 export function WizardStep1() {
   const { setStartingPoint, setFields, updateSchemaData, nextStep } = useSchemaWizard()
@@ -28,7 +29,7 @@ export function WizardStep1() {
     try {
       const token = typeof window !== "undefined" ? localStorage.getItem("token") : null
       await fetch(
-        `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1"}/templates/${template.id}/use`,
+        `${getApiBaseUrl()}/templates/${template.id}/use`,
         {
           method: "POST",
           headers: {

@@ -43,15 +43,18 @@ cd InsightOCRv2
 ```
 
 2) Create environment files:
-- `backend/.env` (see sample below)
-- `frontend/.env.local` (optional, e.g. `NEXT_PUBLIC_API_URL=http://localhost:8000`)
+   - `backend/.env`
+   - `frontend/.env.local`
 
-Sample `backend/.env`:
+Dev sample (`backend/.env`):
 ```env
 SECRET_KEY=change-me
 DATABASE_URL=postgresql://postgres:postgres@db:5432/softnix_ocr
 REDIS_URL=redis://redis:6379/0
 STORAGE_TYPE=local
+BACKEND_CORS_ORIGINS=http://localhost:3000,http://localhost:8000
+# Extra origins to allow besides BACKEND_CORS_ORIGINS (comma-separated)
+BACKEND_EXTRA_CORS_ORIGINS=
 # If using MinIO:
 # MINIO_ENDPOINT=minio:9000
 # MINIO_ACCESS_KEY=minioadmin
@@ -59,6 +62,18 @@ STORAGE_TYPE=local
 # MINIO_BUCKET=insightocr
 # MINIO_SECURE=False
 ```
+
+Dev sample (`frontend/.env.local`):
+```env
+NEXT_PUBLIC_API_URL=http://localhost:8000/api/v1
+```
+
+Production hints:
+- Set `BACKEND_CORS_ORIGINS` to your internal/front-end hosts if you serve via the same domain; otherwise put only the canonical origins, and add public UI hosts to `BACKEND_EXTRA_CORS_ORIGINS`, e.g.  
+  `BACKEND_EXTRA_CORS_ORIGINS=http://env-1805534.th2.proen.cloud:3000`
+- Set `NEXT_PUBLIC_API_URL` to the public API host, e.g.  
+  `NEXT_PUBLIC_API_URL=http://env-1805534.th2.proen.cloud:8000/api/v1`
+- Rebuild the frontend after changing `NEXT_PUBLIC_API_URL` (env is baked at build time).
 
 3) Start the stack:
 ```bash

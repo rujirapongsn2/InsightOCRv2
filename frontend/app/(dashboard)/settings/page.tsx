@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { AlertCircle, CheckCircle2, Loader2 } from "lucide-react"
 import { AISettingsCard } from "@/components/settings/AISettingsCard"
+import { getApiBaseUrl } from "@/lib/api"
 
 export default function SettingsPage() {
   const { user } = useAuth()
@@ -29,7 +30,7 @@ export default function SettingsPage() {
     const fetchConfig = async () => {
       try {
         const authToken = typeof window !== "undefined" ? localStorage.getItem("token") : null
-        const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1'}/settings/config`, {
+        const res = await fetch(`${getApiBaseUrl()}/settings/config`, {
           headers: authToken ? { Authorization: `Bearer ${authToken}` } : undefined,
         })
         if (res.ok) {
@@ -59,7 +60,7 @@ export default function SettingsPage() {
       const finalOcrEngine = ocrEngine === 'default' ? '' : ocrEngine
       const finalModel = model === 'default' ? '' : model
 
-      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1'}/settings/config`, {
+      const res = await fetch(`${getApiBaseUrl()}/settings/config`, {
         method: "PUT",
         headers: {
           "Content-Type": "application/json",
@@ -91,7 +92,7 @@ export default function SettingsPage() {
     setError(null)
     try {
       const authToken = typeof window !== "undefined" ? localStorage.getItem("token") : null
-      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1'}/settings/test`, {
+      const res = await fetch(`${getApiBaseUrl()}/settings/test`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",

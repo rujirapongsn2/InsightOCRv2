@@ -9,6 +9,7 @@ import { Textarea } from "@/components/ui/textarea"
 import { Modal } from "@/components/ui/modal"
 import Link from "next/link"
 import { useAuth } from "@/components/auth-provider"
+import { getApiBaseUrl } from "@/lib/api"
 
 interface SchemaField {
     name: string
@@ -89,7 +90,7 @@ export default function CreateSchemaPage() {
             }
 
             const token = typeof window !== "undefined" ? localStorage.getItem("token") : null
-            const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1'}/schemas/`, {
+            const res = await fetch(`${getApiBaseUrl()}/schemas/`, {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",

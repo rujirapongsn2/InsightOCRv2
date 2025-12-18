@@ -6,6 +6,7 @@ import { ArrowLeft } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import Link from "next/link"
+import { getApiBaseUrl } from "@/lib/api"
 
 interface Schema {
     id: string
@@ -28,7 +29,7 @@ export default function CreateJobPage() {
 
         try {
             const token = typeof window !== "undefined" ? localStorage.getItem("token") : null
-            const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1'}/jobs/`, {
+            const res = await fetch(`${getApiBaseUrl()}/jobs/`, {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",

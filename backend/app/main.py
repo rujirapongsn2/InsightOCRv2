@@ -90,6 +90,7 @@ app = FastAPI(
 
 # Set all CORS enabled origins
 raw_origins = [origin.strip() for origin in settings.BACKEND_CORS_ORIGINS.split(",") if origin.strip()]
+extra_origins = [origin.strip() for origin in settings.BACKEND_EXTRA_CORS_ORIGINS.split(",") if origin.strip()]
 
 # Always allow common local origins to avoid CORS failures when switching between localhost and 127.0.0.1 during dev
 default_local_origins = {
@@ -103,6 +104,9 @@ if raw_origins:
     origins = list(set(raw_origins) | default_local_origins)
 else:
     origins = list(default_local_origins)
+
+if extra_origins:
+    origins = list(set(origins) | set(extra_origins))
 
 app.add_middleware(
     CORSMiddleware,

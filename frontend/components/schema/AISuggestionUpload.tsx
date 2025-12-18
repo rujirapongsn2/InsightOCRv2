@@ -7,6 +7,7 @@ import { InfoCard } from "@/components/ui/info-card"
 import { SuggestedFieldCard } from "./SuggestedFieldCard"
 import { useSchemaWizard } from "@/contexts/SchemaWizardContext"
 import { SuggestedField } from "@/types/schema"
+import { getApiBaseUrl } from "@/lib/api"
 
 export function AISuggestionUpload() {
   const { schemaData, setFields, updateSchemaData, nextStep } = useSchemaWizard()
@@ -56,7 +57,7 @@ export function AISuggestionUpload() {
       formData.append("file", file)
 
       const uploadRes = await fetch(
-        `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1"}/documents/extract-ocr`,
+        `${getApiBaseUrl()}/documents/extract-ocr`,
         {
           method: "POST",
           headers: token ? { Authorization: `Bearer ${token}` } : {},
@@ -86,7 +87,7 @@ export function AISuggestionUpload() {
 
       // Step 2: Get AI field suggestions
       const suggestionRes = await fetch(
-        `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1"}/ai-settings/suggest-fields`,
+        `${getApiBaseUrl()}/ai-settings/suggest-fields`,
         {
           method: "POST",
           headers: {

@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation"
 import { Plus, FileText, Receipt, FileSignature, File, Search, ScrollText } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { useAuth } from "@/components/auth-provider"
+import { getApiBaseUrl } from "@/lib/api"
 
 interface Schema {
     id: string
@@ -61,7 +62,7 @@ export default function SchemasPage() {
         const fetchSchemas = async () => {
             try {
                 const token = typeof window !== "undefined" ? localStorage.getItem("token") : null
-                const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1'}/schemas/`, {
+                const res = await fetch(`${getApiBaseUrl()}/schemas/`, {
                     headers: token ? { Authorization: `Bearer ${token}` } : undefined,
                 })
                 if (res.ok) {

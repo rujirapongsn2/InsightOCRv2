@@ -4,8 +4,7 @@ import { useState, useEffect } from "react"
 import { useAuth } from "@/components/auth-provider"
 import { Button } from "@/components/ui/button"
 import { ChevronLeft, ChevronRight, RefreshCw, LogIn, LogOut, FileText, Users, Settings, Folder, Eye, Edit, Trash2, Plus, Send, Download, Database } from "lucide-react"
-
-const apiBase = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1"
+import { getApiBaseUrl } from "@/lib/api"
 
 interface ActivityLog {
     id: string
@@ -106,6 +105,7 @@ const actionColors: Record<string, string> = {
 
 export default function ActivityLogsPage() {
     const { user } = useAuth()
+    const apiBase = getApiBaseUrl()
     const [logs, setLogs] = useState<ActivityLog[]>([])
     const [loading, setLoading] = useState(true)
     const [total, setTotal] = useState(0)

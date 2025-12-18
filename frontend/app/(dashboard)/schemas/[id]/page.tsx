@@ -6,6 +6,7 @@ import Link from "next/link"
 import { ArrowLeft, FileText, Shield, Trash2, Pencil } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { useAuth } from "@/components/auth-provider"
+import { getApiBaseUrl } from "@/lib/api"
 
 interface SchemaField {
   name: string
@@ -84,7 +85,7 @@ export default function SchemaDetailPage() {
     const fetchSchema = async () => {
       try {
         const token = typeof window !== "undefined" ? localStorage.getItem("token") : null
-        const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1'}/schemas/${schemaId}`, {
+        const res = await fetch(`${getApiBaseUrl()}/schemas/${schemaId}`, {
           headers: token ? { Authorization: `Bearer ${token}` } : undefined,
         })
         if (res.ok) {

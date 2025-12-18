@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { AlertCircle, Save } from "lucide-react"
+import { getApiBaseUrl } from "@/lib/api"
 
 export default function ProfilePage() {
   const { user, refreshUser } = useAuth()
@@ -38,7 +39,7 @@ export default function ProfilePage() {
       const payload: Record<string, any> = { full_name: fullName }
       if (password) payload.password = password
 
-      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1'}/users/me`, {
+      const res = await fetch(`${getApiBaseUrl()}/users/me`, {
         method: "PUT",
         headers: {
           "Content-Type": "application/json",

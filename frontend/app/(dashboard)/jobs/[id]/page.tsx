@@ -9,6 +9,7 @@ import { Modal } from "@/components/ui/modal"
 import { Textarea } from "@/components/ui/textarea"
 import { Input } from "@/components/ui/input"
 import { PDFViewer } from "@/components/document/PDFViewer"
+import { getApiBaseUrl } from "@/lib/api"
 
 interface Job {
     id: string
@@ -97,7 +98,7 @@ export default function JobDetailPage() {
     // Image viewer state
     const [imageUrl, setImageUrl] = useState<string | null>(null)
 
-    const apiBase = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1'
+    const apiBase = getApiBaseUrl()
 
     useEffect(() => {
         if (typeof window === "undefined") return

@@ -4,6 +4,7 @@ import { useEffect, useState } from "react"
 import Link from "next/link"
 import { Plus, FileText, Calendar } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import { getApiBaseUrl } from "@/lib/api"
 
 interface Job {
     id: string
@@ -22,7 +23,7 @@ export default function JobsPage() {
         const fetchJobs = async () => {
             try {
                 const token = typeof window !== "undefined" ? localStorage.getItem("token") : null
-                const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1'}/jobs/`, {
+                const res = await fetch(`${getApiBaseUrl()}/jobs/`, {
                     headers: token ? { Authorization: `Bearer ${token}` } : undefined,
                 })
                 if (res.ok) {

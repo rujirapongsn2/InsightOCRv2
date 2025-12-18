@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button"
 import { AISettingsList } from "./AISettingsList"
 import { AISettingForm } from "./AISettingForm"
 import { AISettingsPublic, AISettingsCreate, AISettingsUpdate } from "@/types/ai-settings"
+import { getApiBaseUrl } from "@/lib/api"
 
 export function AISettingsCard() {
   const [settings, setSettings] = useState<AISettingsPublic[]>([])
@@ -24,7 +25,7 @@ export function AISettingsCard() {
     try {
       const token = localStorage.getItem("token")
       const res = await fetch(
-        `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1"}/ai-settings/`,
+        `${getApiBaseUrl()}/ai-settings/`,
         {
           headers: token ? { Authorization: `Bearer ${token}` } : {}
         }
@@ -60,7 +61,7 @@ export function AISettingsCard() {
 
   const handleSubmit = async (data: AISettingsCreate | AISettingsUpdate) => {
     const token = localStorage.getItem("token")
-    const url = `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1"}/ai-settings/${
+    const url = `${getApiBaseUrl()}/ai-settings/${
       editingSetting ? editingSetting.id : ""
     }`
 
@@ -93,7 +94,7 @@ export function AISettingsCard() {
 
     try {
       const res = await fetch(
-        `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1"}/ai-settings/${id}`,
+        `${getApiBaseUrl()}/ai-settings/${id}`,
         {
           method: "DELETE",
           headers: token ? { Authorization: `Bearer ${token}` } : {}
@@ -116,7 +117,7 @@ export function AISettingsCard() {
 
     try {
       const res = await fetch(
-        `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1"}/ai-settings/${id}/set-default`,
+        `${getApiBaseUrl()}/ai-settings/${id}/set-default`,
         {
           method: "POST",
           headers: token ? { Authorization: `Bearer ${token}` } : {}
@@ -139,7 +140,7 @@ export function AISettingsCard() {
 
     try {
       const res = await fetch(
-        `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1"}/ai-settings/test-connection`,
+        `${getApiBaseUrl()}/ai-settings/test-connection`,
         {
           method: "POST",
           headers: {

@@ -4,6 +4,7 @@ import { useState } from "react"
 // import Image from "next/image" -> Removing unused Image import
 import { Logo } from "@/components/logo"
 import { useAuth } from "@/components/auth-provider"
+import { getApiBaseUrl } from "@/lib/api"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { AlertCircle } from "lucide-react"
@@ -25,7 +26,7 @@ export default function LoginPage() {
             formData.append("username", email)
             formData.append("password", password)
 
-            const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1'}/login/access-token`, {
+            const res = await fetch(`${getApiBaseUrl()}/login/access-token`, {
                 method: "POST",
                 headers: { "Content-Type": "application/x-www-form-urlencoded" },
                 body: formData

@@ -5,6 +5,7 @@ import { useAuth } from "@/components/auth-provider"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Plus, User as UserIcon, Shield, Pencil, Trash2 } from "lucide-react"
+import { getApiBaseUrl } from "@/lib/api"
 
 interface User {
     id: string
@@ -31,7 +32,7 @@ export default function UsersPage() {
     const fetchUsers = async () => {
         try {
             const token = localStorage.getItem("token")
-            const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1'}/users/`, {
+            const res = await fetch(`${getApiBaseUrl()}/users/`, {
                 headers: { Authorization: `Bearer ${token}` }
             })
             if (res.ok) {
@@ -53,7 +54,7 @@ export default function UsersPage() {
         e.preventDefault()
         try {
             const token = localStorage.getItem("token")
-            const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1'}/users/`, {
+            const res = await fetch(`${getApiBaseUrl()}/users/`, {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",
@@ -86,7 +87,7 @@ export default function UsersPage() {
             }
             if (editPassword) payload.password = editPassword
 
-            const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1'}/users/${editingUser.id}`, {
+            const res = await fetch(`${getApiBaseUrl()}/users/${editingUser.id}`, {
                 method: "PUT",
                 headers: {
                     "Content-Type": "application/json",
@@ -111,7 +112,7 @@ export default function UsersPage() {
         if (!confirm("Delete this user?")) return
         try {
             const token = localStorage.getItem("token")
-            const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1'}/users/${userId}`, {
+            const res = await fetch(`${getApiBaseUrl()}/users/${userId}`, {
                 method: "DELETE",
                 headers: { Authorization: `Bearer ${token}` }
             })

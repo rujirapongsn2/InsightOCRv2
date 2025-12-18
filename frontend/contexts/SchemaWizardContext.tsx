@@ -13,6 +13,7 @@ import {
   TestResults
 } from "@/types/schema"
 import { validateSchema, hasErrors } from "@/lib/schema-validation"
+import { getApiBaseUrl } from "@/lib/api"
 
 // Helper function to generate unique IDs
 const generateId = () => {
@@ -159,7 +160,7 @@ export function SchemaWizardProvider({ children }: { children: ReactNode }) {
       }
 
       const res = await fetch(
-        `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1"}/schemas/`,
+        `${getApiBaseUrl()}/schemas/`,
         {
           method: "POST",
           headers: {

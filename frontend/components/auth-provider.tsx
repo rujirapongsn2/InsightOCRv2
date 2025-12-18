@@ -2,6 +2,7 @@
 
 import React, { createContext, useContext, useEffect, useState } from "react"
 import { useRouter, usePathname } from "next/navigation"
+import { getApiBaseUrl } from "@/lib/api"
 
 interface User {
     id: string
@@ -44,7 +45,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
             }
 
             try {
-                const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1'}/login/test-token`, {
+                const res = await fetch(`${getApiBaseUrl()}/login/test-token`, {
                     method: 'POST',
                     headers: { Authorization: `Bearer ${token}` }
                 })
@@ -70,7 +71,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
         localStorage.setItem("token", token)
         // Fetch user data immediately
         try {
-            const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1'}/login/test-token`, {
+            const res = await fetch(`${getApiBaseUrl()}/login/test-token`, {
                 method: 'POST',
                 headers: { Authorization: `Bearer ${token}` }
             })
@@ -91,10 +92,10 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
             return
         }
         try {
-            const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1'}/login/test-token`, {
-                method: 'POST',
-                headers: { Authorization: `Bearer ${token}` }
-            })
+        const res = await fetch(`${getApiBaseUrl()}/login/test-token`, {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${token}` }
+        })
             if (res.ok) {
                 const userData = await res.json()
                 setUser(userData)

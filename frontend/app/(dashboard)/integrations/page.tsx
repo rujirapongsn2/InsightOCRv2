@@ -8,6 +8,7 @@ import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { Modal } from "@/components/ui/modal"
 import { Plus, Pencil, Trash2, Plug, Eye, ShieldCheck } from "lucide-react"
+import { getApiBaseUrl } from "@/lib/api"
 
 type IntegrationType = "api" | "workflow" | "llm"
 
@@ -496,7 +497,7 @@ export default function IntegrationsPage() {
                                             setTestLoading(true)
                                             setTestResult(null)
                                             try {
-                                                const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1'}/integrations/test-llm`, {
+                                                const response = await fetch(`${getApiBaseUrl()}/integrations/test-llm`, {
                                                     method: "POST",
                                                     headers: {
                                                         "Content-Type": "application/json",

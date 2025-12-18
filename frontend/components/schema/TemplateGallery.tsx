@@ -4,6 +4,7 @@ import { useState, useEffect } from "react"
 import { Template } from "@/types/schema"
 import { Sparkles, FileText, FileCheck, FileClock } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import { getApiBaseUrl } from "@/lib/api"
 
 interface TemplateGalleryProps {
   onSelectTemplate: (template: Template) => void
@@ -30,7 +31,7 @@ export function TemplateGallery({ onSelectTemplate }: TemplateGalleryProps) {
     try {
       const token = typeof window !== "undefined" ? localStorage.getItem("token") : null
       const res = await fetch(
-        `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1"}/templates/`,
+        `${getApiBaseUrl()}/templates/`,
         {
           headers: {
             ...(token ? { Authorization: `Bearer ${token}` } : {})

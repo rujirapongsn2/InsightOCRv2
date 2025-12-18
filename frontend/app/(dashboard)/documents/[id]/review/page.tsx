@@ -6,6 +6,7 @@ import Link from "next/link"
 import { ArrowLeft, Save, CheckCircle, AlertTriangle, FileText, Image as ImageIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { getApiBaseUrl } from "@/lib/api"
 
 interface Document {
     id: string
@@ -58,7 +59,7 @@ export default function ReviewDocumentPage() {
         const fetchDocument = async () => {
             try {
                 const token = typeof window !== "undefined" ? localStorage.getItem("token") : null
-                const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1'}/documents/${documentId}`, {
+                const res = await fetch(`${getApiBaseUrl()}/documents/${documentId}`, {
                     headers: token ? { Authorization: `Bearer ${token}` } : undefined,
                 })
                 if (res.ok) {
@@ -83,8 +84,7 @@ export default function ReviewDocumentPage() {
         const fetchFile = async () => {
             try {
                 const token = typeof window !== "undefined" ? localStorage.getItem("token") : null
-                const baseUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1'
-                const res = await fetch(`${baseUrl}/documents/${documentId}/file`, {
+                const res = await fetch(`${getApiBaseUrl()}/documents/${documentId}/file`, {
                     headers: token ? { Authorization: `Bearer ${token}` } : undefined,
                 })
 
@@ -125,7 +125,7 @@ export default function ReviewDocumentPage() {
             }
 
             const token = typeof window !== "undefined" ? localStorage.getItem("token") : null
-            const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1'}/documents/${documentId}`, {
+            const res = await fetch(`${getApiBaseUrl()}/documents/${documentId}`, {
                 method: "PUT",
                 headers: {
                     "Content-Type": "application/json",

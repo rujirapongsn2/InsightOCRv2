@@ -37,9 +37,11 @@ class Settings(BaseSettings):
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
 
+    # Extra CORS origins (comma-separated) to append beyond BACKEND_CORS_ORIGINS
+    BACKEND_EXTRA_CORS_ORIGINS: str = ""
+
     class Config:
         case_sensitive = True
         env_file = ".env"
 
 settings = Settings()
-

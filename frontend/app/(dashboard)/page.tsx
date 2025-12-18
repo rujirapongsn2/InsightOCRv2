@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react"
 import Link from "next/link"
 import { useAuth } from "@/components/auth-provider"
+import { getApiBaseUrl } from "@/lib/api"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { ArrowRight, FileText, LayoutDashboard, Plug, Settings } from "lucide-react"
@@ -43,7 +44,7 @@ export default function DashboardPage() {
                 setLoading(false)
                 return
             }
-            const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1"
+            const apiUrl = getApiBaseUrl()
             try {
                 const res = await fetch(`${apiUrl}/dashboard/stats`, {
                     headers: { Authorization: `Bearer ${token}` },
