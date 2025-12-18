@@ -31,6 +31,8 @@ class Settings(BaseSettings):
     AWS_BUCKET_NAME: Optional[str] = None
     # AI
     OPENAI_API_KEY: str = "" # Set via env var
+    OCR_ENDPOINT: Optional[str] = None
+    TEST_ENDPOINT: Optional[str] = None
 
     # JWT
     SECRET_KEY: str # Set via env var
