@@ -8,8 +8,16 @@ import { Button } from "@/components/ui/button"
 import { Modal } from "@/components/ui/modal"
 import { Textarea } from "@/components/ui/textarea"
 import { Input } from "@/components/ui/input"
-import { PDFViewer } from "@/components/document/PDFViewer"
+import dynamic from "next/dynamic"
 import { getApiBaseUrl } from "@/lib/api"
+
+const PDFViewer = dynamic(
+    () => import("@/components/document/PDFViewer").then(mod => mod.PDFViewer),
+    {
+        ssr: false,
+        loading: () => <div className="flex items-center justify-center h-full text-sm text-slate-500">Loading document...</div>
+    }
+)
 
 interface Job {
     id: string
@@ -588,6 +596,11 @@ export default function JobDetailPage() {
         }
     }, [reviewDoc])
 
+    // Memoize PDF URL to prevent unnecessary reloads; must stay before any early returns to keep hook order stable
+    const pdfFileUrl = useMemo(() => {
+        return reviewDoc ? `${apiBase}/documents/${reviewDoc.id}/file` : ""
+    }, [reviewDoc?.id, apiBase])
+
     if (loading) return <div>Loading...</div>
     if (!job) return <div>Job not found</div>
 
@@ -624,11 +637,6 @@ export default function JobDetailPage() {
         reviewed: documents.filter(d => d.status === 'reviewed').length
     }
     const allDocsReviewed = documents.length > 0 && documents.every(d => d.status === "reviewed")
-
-    // Memoize PDF URL to prevent unnecessary reloads
-    const pdfFileUrl = useMemo(() => {
-        return reviewDoc ? `${apiBase}/documents/${reviewDoc.id}/file` : ""
-    }, [reviewDoc?.id, apiBase])
 
     return (
         <div className="space-y-6">

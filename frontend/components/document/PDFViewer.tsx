@@ -30,6 +30,9 @@ export function PDFViewer({ fileUrl, className = "" }: PDFViewerProps) {
       try {
         setLoading(true)
         setError(null)
+        setPdfData(null)
+        setNumPages(0)
+        setPageNumber(1)
 
         const token = typeof window !== "undefined" ? localStorage.getItem("token") : null
 
@@ -46,7 +49,17 @@ export function PDFViewer({ fileUrl, className = "" }: PDFViewerProps) {
         const arrayBuffer = await response.arrayBuffer()
         // Convert to Uint8Array to avoid detached buffer issues
         const uint8Array = new Uint8Array(arrayBuffer)
-        setPdfData(uint8Array)
+        setPdfData(prev => {
+          if (
+            prev &&
+            prev.length === uint8Array.length &&
+            !prev.some((byte, idx) => byte !== uint8Array[idx])
+          ) {
+            // Avoid needless updates so react-pdf doesn't warn about equal file prop changes
+            return prev
+          }
+          return uint8Array
+        })
       } catch (err) {
         console.error("PDF fetch error:", err)
         setError("Failed to load PDF. Please try again.")
