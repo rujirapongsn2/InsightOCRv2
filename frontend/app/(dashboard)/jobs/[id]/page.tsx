@@ -108,7 +108,8 @@ export default function JobDetailPage() {
 
     const apiBase = getApiBaseUrl()
 
-    useEffect(() => {
+    // Function to load integrations from localStorage
+    const loadIntegrations = () => {
         if (typeof window === "undefined") return
         const stored = localStorage.getItem("integrations")
         if (stored) {
@@ -146,7 +147,19 @@ export default function JobDetailPage() {
             },
         ]
         setIntegrations(seeds.filter(int => int.status === "active"))
+    }
+
+    // Load integrations on mount
+    useEffect(() => {
+        loadIntegrations()
     }, [])
+
+    // Reload integrations when integration modal opens to get latest data
+    useEffect(() => {
+        if (showIntegrationModal) {
+            loadIntegrations()
+        }
+    }, [showIntegrationModal])
 
     const fetchJobData = async () => {
         try {
