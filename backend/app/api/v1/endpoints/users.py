@@ -1,5 +1,5 @@
 from typing import Any, List
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from pydantic.networks import EmailStr
 from sqlalchemy.orm import Session
@@ -102,6 +102,7 @@ def read_user_by_id(
 @router.put("/me", response_model=UserSchema)
 def update_user_me(
     *,
+    request: Request,
     db: Session = Depends(deps.get_db),
     user_in: UserSelfUpdate,
     current_user: User = Depends(deps.get_current_active_user),
@@ -109,11 +110,18 @@ def update_user_me(
     """
     Update current user's profile (name/password).
     """
+    # Get client info for logging
+    client_ip = request.client.host if request.client else None
+    user_agent = request.headers.get("user-agent")
+
     update_data = user_in.dict(exclude_unset=True)
+    password_changed = False
+
     if "password" in update_data and update_data["password"]:
         hashed_password = security.get_password_hash(update_data["password"])
         del update_data["password"]
         update_data["hashed_password"] = hashed_password
+        password_changed = True
 
     if "full_name" in update_data:
         current_user.full_name = update_data["full_name"]
@@ -123,11 +131,26 @@ def update_user_me(
     db.add(current_user)
     db.commit()
     db.refresh(current_user)
+
+    # Log password change activity
+    if password_changed:
+        log_activity(
+            db=db,
+            user_id=current_user.id,
+            action=Actions.CHANGE_PASSWORD,
+            resource_type="user",
+            resource_id=current_user.id,
+            details={"email": current_user.email},
+            ip_address=client_ip,
+            user_agent=user_agent
+        )
+
     return current_user
 
 @router.put("/{user_id}", response_model=UserSchema)
 def update_user(
     *,
+    request: Request,
     db: Session = Depends(deps.get_db),
     user_id: str,
     user_in: UserUpdate,
@@ -136,27 +159,50 @@ def update_user(
     """
     Update a user.
     """
+    # Get client info for logging
+    client_ip = request.client.host if request.client else None
+    user_agent = request.headers.get("user-agent")
+
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(
             status_code=404,
             detail="The user with this username does not exist in the system",
         )
-    
+
     update_data = user_in.dict(exclude_unset=True)
+    password_changed = False
+
     if "password" in update_data and update_data["password"]:
         hashed_password = security.get_password_hash(update_data["password"])
         del update_data["password"]
         update_data["hashed_password"] = hashed_password
-        
+        password_changed = True
+
     for field, value in update_data.items():
         setattr(user, field, value)
-        
+
     db.add(user)
     db.commit()
     db.refresh(user)
 
-    # Log activity
+    # Log password change activity if password was changed
+    if password_changed:
+        log_activity(
+            db=db,
+            user_id=current_user.id,
+            action=Actions.CHANGE_PASSWORD,
+            resource_type="user",
+            resource_id=user.id,
+            details={
+                "email": user.email,
+                "changed_by_admin": True
+            },
+            ip_address=client_ip,
+            user_agent=user_agent
+        )
+
+    # Log general user update activity
     log_activity(
         db=db,
         user_id=current_user.id,
@@ -165,8 +211,10 @@ def update_user(
         resource_id=user.id,
         details={
             "email": user.email,
-            "updated_fields": list(update_data.keys())
-        }
+            "updated_fields": [f for f in list(update_data.keys()) if f != "hashed_password"]
+        },
+        ip_address=client_ip,
+        user_agent=user_agent
     )
 
     return user

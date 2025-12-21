@@ -88,6 +88,7 @@ class Actions:
     VIEW_USER = "view_user"
     UPDATE_USER = "update_user"
     DELETE_USER = "delete_user"
+    CHANGE_PASSWORD = "change_password"
 
     # Settings actions
     VIEW_SETTINGS = "view_settings"
