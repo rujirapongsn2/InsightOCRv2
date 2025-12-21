@@ -176,6 +176,111 @@ export default function ActivityLogsPage() {
         return action.replace(/_/g, " ").replace(/\b\w/g, l => l.toUpperCase())
     }
 
+    const formatDetails = (log: ActivityLog) => {
+        if (!log.details) return null
+
+        // Format specific action types
+        switch (log.action) {
+            case "process_document":
+                return (
+                    <div className="space-y-1 text-xs">
+                        {log.details.job_name && (
+                            <div><span className="font-medium">Job:</span> {log.details.job_name}</div>
+                        )}
+                        {log.details.filename && (
+                            <div><span className="font-medium">File:</span> {log.details.filename}</div>
+                        )}
+                        {log.details.extraction_status && (
+                            <div>
+                                <span className="font-medium">Extraction:</span>{" "}
+                                <span className={`px-1.5 py-0.5 rounded ${
+                                    log.details.extraction_status === "completed"
+                                        ? "bg-green-100 text-green-800"
+                                        : log.details.extraction_status === "failed"
+                                        ? "bg-red-100 text-red-800"
+                                        : "bg-yellow-100 text-yellow-800"
+                                }`}>
+                                    {log.details.extraction_status}
+                                </span>
+                            </div>
+                        )}
+                        {log.details.review_status && (
+                            <div>
+                                <span className="font-medium">Review:</span>{" "}
+                                <span className={`px-1.5 py-0.5 rounded ${
+                                    log.details.review_status === "reviewed"
+                                        ? "bg-blue-100 text-blue-800"
+                                        : "bg-slate-100 text-slate-600"
+                                }`}>
+                                    {log.details.review_status}
+                                </span>
+                            </div>
+                        )}
+                        {log.details.integration_status !== undefined && log.details.integration_status !== null && (
+                            <div>
+                                <span className="font-medium">Integration:</span>{" "}
+                                <span className="px-1.5 py-0.5 rounded bg-purple-100 text-purple-800">
+                                    {log.details.integration_status}
+                                </span>
+                            </div>
+                        )}
+                    </div>
+                )
+
+            case "send_to_integration":
+                return (
+                    <div className="space-y-1 text-xs">
+                        {log.details.integration_name && (
+                            <div><span className="font-medium">Integration:</span> {log.details.integration_name}</div>
+                        )}
+                        {log.details.document_count !== undefined && (
+                            <div>
+                                <span className="font-medium">Documents:</span> {log.details.document_count}
+                                {log.details.successful_count !== undefined && (
+                                    <span className="text-green-600"> ({log.details.successful_count} success</span>
+                                )}
+                                {log.details.failed_count !== undefined && log.details.failed_count > 0 && (
+                                    <span className="text-red-600">, {log.details.failed_count} failed</span>
+                                )}
+                                {(log.details.successful_count !== undefined || log.details.failed_count !== undefined) && ")"}
+                            </div>
+                        )}
+                    </div>
+                )
+
+            case "change_password":
+                return (
+                    <div className="text-xs">
+                        {log.details.email && (
+                            <div><span className="font-medium">User:</span> {log.details.email}</div>
+                        )}
+                        {log.details.changed_by_admin && (
+                            <div className="text-amber-600">Changed by admin</div>
+                        )}
+                    </div>
+                )
+
+            default:
+                // Default formatting for other actions
+                const entries = Object.entries(log.details)
+                if (entries.length === 0) return null
+
+                return (
+                    <div className="text-xs space-y-0.5">
+                        {entries.slice(0, 3).map(([k, v]) => (
+                            <div key={k}>
+                                <span className="font-medium">{k}:</span> {String(v).substring(0, 50)}
+                                {String(v).length > 50 && "..."}
+                            </div>
+                        ))}
+                        {entries.length > 3 && (
+                            <div className="text-slate-400">+{entries.length - 3} more</div>
+                        )}
+                    </div>
+                )
+        }
+    }
+
     const totalPages = Math.ceil(total / limit)
 
     return (
@@ -268,14 +373,8 @@ export default function ActivityLogsPage() {
                                                 <span className="text-slate-400">-</span>
                                             )}
                                         </td>
-                                        <td className="px-4 py-3 text-slate-600 max-w-[200px] truncate">
-                                            {log.details ? (
-                                                <span title={JSON.stringify(log.details)}>
-                                                    {Object.entries(log.details).map(([k, v]) => `${k}: ${v}`).join(", ")}
-                                                </span>
-                                            ) : (
-                                                <span className="text-slate-400">-</span>
-                                            )}
+                                        <td className="px-4 py-3 text-slate-600">
+                                            {formatDetails(log) || <span className="text-slate-400">-</span>}
                                         </td>
                                         <td className="px-4 py-3 text-slate-500 font-mono text-xs">
                                             {log.ip_address || "-"}

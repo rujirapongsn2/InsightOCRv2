@@ -325,6 +325,12 @@ def process_document_task(self, document_id: str, schema_id: str):
 
         # Log activity
         if document.job and document.job.user_id:
+            # Determine extraction status
+            extraction_status = "completed" if document.status in ["extraction_completed", "reviewed"] else "failed" if document.status == "failed" else "processing"
+
+            # Determine review status
+            review_status = "reviewed" if document.reviewed_data or document.status == "reviewed" else "pending"
+
             log_activity(
                 db=db,
                 user_id=document.job.user_id,
@@ -332,9 +338,13 @@ def process_document_task(self, document_id: str, schema_id: str):
                 resource_type="document",
                 resource_id=document.id,
                 details={
+                    "job_name": document.job.name or f"Job-{str(document.job.id)[:8]}",
                     "filename": document.filename,
-                    "status": document.status,
-                    "schema_id": str(schema_id) if schema_id else None
+                    "extraction_status": extraction_status,
+                    "review_status": review_status,
+                    "integration_status": None,  # Will be updated when sent to integration
+                    "schema_id": str(schema_id) if schema_id else None,
+                    "document_status": document.status
                 }
             )
 

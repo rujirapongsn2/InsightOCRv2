@@ -1023,9 +1023,20 @@ export default function JobDetailPage() {
                     )}
 
                     <div className="flex justify-end gap-2">
-                        <Button variant="outline" onClick={() => setShowIntegrationModal(false)}>Cancel</Button>
-                        <Button onClick={handleSendToIntegration} disabled={!selectedIntegration || sendingIntegration}>
-                            {sendingIntegration ? "Sending..." : "Send"}
+                        <Button
+                            variant="outline"
+                            onClick={() => {
+                                setShowIntegrationModal(false)
+                                setIntegrationMessage(null)
+                            }}
+                        >
+                            {integrationMessage === "Sent successfully" ? "Close" : "Cancel"}
+                        </Button>
+                        <Button
+                            onClick={handleSendToIntegration}
+                            disabled={!selectedIntegration || sendingIntegration}
+                        >
+                            {sendingIntegration ? "Sending..." : integrationMessage === "Sent successfully" ? "Retry" : "Send"}
                         </Button>
                     </div>
                 </div>
