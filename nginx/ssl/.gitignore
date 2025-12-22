@@ -1,0 +1,9 @@
+# Ignore SSL certificates and keys
+*.pem
+*.key
+*.crt
+*.csr
+
+# Keep the directory structure
+!.gitignore
+!generate-certs.sh

@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.api.api import api_router
+from app.middleware.proxy import ProxyHeaderMiddleware
 from app.db.base_class import Base
 from app.db.session import engine, SessionLocal
 from app.models.schema import DocumentSchema
@@ -93,11 +94,14 @@ raw_origins = [origin.strip() for origin in settings.BACKEND_CORS_ORIGINS.split(
 extra_origins = [origin.strip() for origin in settings.BACKEND_EXTRA_CORS_ORIGINS.split(",") if origin.strip()]
 
 # Always allow common local origins to avoid CORS failures when switching between localhost and 127.0.0.1 during dev
+# Include HTTPS origins for Nginx reverse proxy
 default_local_origins = {
     "http://localhost:3000",
     "http://127.0.0.1:3000",
     "http://localhost:8000",
     "http://127.0.0.1:8000",
+    "https://localhost",
+    "https://127.0.0.1",
 }
 
 if raw_origins:
@@ -108,12 +112,16 @@ else:
 if extra_origins:
     origins = list(set(origins) | set(extra_origins))
 
+# Add proxy header middleware BEFORE CORS
+app.add_middleware(ProxyHeaderMiddleware)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 app.include_router(api_router, prefix=settings.API_V1_STR)
