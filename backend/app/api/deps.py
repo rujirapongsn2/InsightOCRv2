@@ -54,3 +54,10 @@ def get_current_active_superuser(
             status_code=400, detail="The user doesn't have enough privileges"
         )
     return current_user
+
+
+def _normalize_role(role: str | None) -> str:
+    """Normalize role for permission checks."""
+    if not role:
+        return "user"
+    return "manager" if role == "documents_admin" else role

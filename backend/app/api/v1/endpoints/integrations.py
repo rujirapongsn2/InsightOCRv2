@@ -32,19 +32,24 @@ async def get_integrations(
     current_user: User = Depends(deps.get_current_user)
 ):
     """
-    Get all integrations for the current user.
+    Get all integrations (all users can view all integrations).
 
     Query parameters:
     - skip: Number of integrations to skip (pagination)
     - limit: Maximum number of integrations to return
     - status: Filter by status (active/paused)
     """
-    integrations = crud_integration.get_by_user(
+    integrations = crud_integration.get_all(
         db=db,
-        user_id=current_user.id,
         skip=skip,
         limit=limit,
         status=status
+    )
+    total = crud_integration.count_all(db=db)
+
+    return IntegrationListResponse(
+        integrations=integrations,
+        total=total
     )
     total = crud_integration.count_by_user(db=db, user_id=current_user.id)
 
@@ -59,8 +64,8 @@ async def get_active_integrations(
     db: Session = Depends(deps.get_db),
     current_user: User = Depends(deps.get_current_user)
 ):
-    """Get all active integrations for the current user."""
-    integrations = crud_integration.get_active_by_user(db=db, user_id=current_user.id)
+    """Get all active integrations (all users can view all integrations)."""
+    integrations = crud_integration.get_all_active(db=db)
     return integrations
 
 
@@ -70,15 +75,11 @@ async def get_integration(
     db: Session = Depends(deps.get_db),
     current_user: User = Depends(deps.get_current_user)
 ):
-    """Get a specific integration by ID."""
+    """Get a specific integration by ID (all users can view all integrations for LLM usage)."""
     integration = crud_integration.get(db=db, integration_id=integration_id)
 
     if not integration:
         raise HTTPException(status_code=404, detail="Integration not found")
-
-    # Check if user owns this integration
-    if integration.user_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Not authorized to access this integration")
 
     return integration
 
@@ -89,7 +90,14 @@ async def create_integration(
     db: Session = Depends(deps.get_db),
     current_user: User = Depends(deps.get_current_user)
 ):
-    """Create a new integration."""
+    """Create a new integration (only managers and admins can create)."""
+    role_value = str(current_user.role) if current_user.role else None
+    normalized = deps._normalize_role(role_value)
+    is_admin = current_user.is_superuser or normalized == "admin"
+
+    if normalized != "manager" and not is_admin:
+        raise HTTPException(status_code=403, detail="Only managers and admins can create integrations")
+
     integration = crud_integration.create(
         db=db,
         integration=integration_data,
@@ -120,14 +128,19 @@ async def update_integration(
     db: Session = Depends(deps.get_db),
     current_user: User = Depends(deps.get_current_user)
 ):
-    """Update an existing integration."""
-    # Check if integration exists and user owns it
+    """Update an existing integration (only managers and admins can update their own integrations)."""
+    role_value = str(current_user.role) if current_user.role else None
+    normalized = deps._normalize_role(role_value)
+    is_admin = current_user.is_superuser or normalized == "admin"
+
+    # Check if integration exists
     existing = crud_integration.get(db=db, integration_id=integration_id)
     if not existing:
         raise HTTPException(status_code=404, detail="Integration not found")
 
-    if existing.user_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Not authorized to update this integration")
+    # Check permissions: admin can update any, managers can only update their own
+    if not is_admin and existing.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="You can only update your own integrations")
 
     # Update integration
     updated_integration = crud_integration.update(
@@ -159,14 +172,19 @@ async def delete_integration(
     db: Session = Depends(deps.get_db),
     current_user: User = Depends(deps.get_current_user)
 ):
-    """Delete an integration."""
-    # Check if integration exists and user owns it
+    """Delete an integration (only managers and admins can delete their own integrations)."""
+    role_value = str(current_user.role) if current_user.role else None
+    normalized = deps._normalize_role(role_value)
+    is_admin = current_user.is_superuser or normalized == "admin"
+
+    # Check if integration exists
     existing = crud_integration.get(db=db, integration_id=integration_id)
     if not existing:
         raise HTTPException(status_code=404, detail="Integration not found")
 
-    if existing.user_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Not authorized to delete this integration")
+    # Check permissions: admin can delete any, managers can only delete their own
+    if not is_admin and existing.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="You can only delete your own integrations")
 
     # Delete integration
     success = crud_integration.delete(db=db, integration_id=integration_id)

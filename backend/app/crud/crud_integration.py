@@ -86,5 +86,26 @@ class CRUDIntegration:
         """Count integrations for a user."""
         return db.query(Integration).filter(Integration.user_id == user_id).count()
 
+    def get_all(
+        self,
+        db: Session,
+        skip: int = 0,
+        limit: int = 100,
+        status: Optional[str] = None
+    ) -> List[Integration]:
+        """Get all integrations (for admin/manager view)."""
+        query = db.query(Integration)
+        if status:
+            query = query.filter(Integration.status == status)
+        return query.offset(skip).limit(limit).all()
+
+    def get_all_active(self, db: Session) -> List[Integration]:
+        """Get all active integrations."""
+        return db.query(Integration).filter(Integration.status == "active").all()
+
+    def count_all(self, db: Session) -> int:
+        """Count all integrations."""
+        return db.query(Integration).count()
+
 
 integration = CRUDIntegration()

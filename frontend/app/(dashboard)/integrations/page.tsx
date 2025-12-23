@@ -49,11 +49,23 @@ interface Integration {
     config: IntegrationConfig
 }
 
-interface IntegrationFormState extends IntegrationConfig {
+interface IntegrationFormState {
     name: string
     type: IntegrationType
     description: string
     status: "active" | "paused"
+    method: "POST" | "PUT"
+    endpoint: string
+    authHeader: string
+    headersJson: string
+    payloadTemplate: string
+    webhookUrl: string
+    parameters: string
+    model: string
+    apiKey: string
+    baseUrl: string
+    instructions: string
+    reasoningEffort: "low" | "medium" | "high"
 }
 
 const defaultFormState: IntegrationFormState = {
@@ -128,13 +140,15 @@ const seedIntegrations: Integration[] = [
 ]
 
 export default function IntegrationsPage() {
-    const { user, token } = useAuth()
+    const { user } = useAuth()
     const normalizedRole = useMemo(() => {
         if (!user?.role) return "user"
         return user.role === "documents_admin" ? "manager" : user.role
     }, [user?.role])
-    const isReadOnly = normalizedRole === "manager"
+    const isAdmin = user?.is_superuser || normalizedRole === "admin"
+    const isManager = normalizedRole === "manager"
     const isUser = normalizedRole === "user"
+    const token = typeof window !== 'undefined' ? localStorage.getItem("token") : null
 
     const [integrations, setIntegrations] = useState<Integration[]>([])
     const [showForm, setShowForm] = useState(false)
@@ -234,7 +248,7 @@ export default function IntegrationsPage() {
             type: integration.type,
             description: integration.description,
             status: integration.status,
-            method: integration.config.method || "POST",
+            method: (integration.config.method as "POST" | "PUT") || "POST",
             endpoint: integration.config.endpoint || "",
             authHeader: integration.config.authHeader || "",
             headersJson: integration.config.headersJson || "",
@@ -252,7 +266,19 @@ export default function IntegrationsPage() {
     }
 
     const handleDelete = async (id: string) => {
-        if (normalizedRole !== "admin") return
+        const integration = integrations.find(i => i.id === id)
+        if (!integration) return
+
+        if (isUser) {
+            alert("Users cannot delete integrations")
+            return
+        }
+
+        if (isManager && integration.user_id !== user?.id) {
+            alert("Managers can only delete their own integrations")
+            return
+        }
+
         if (!confirm("Delete this integration?")) return
         if (!token) return
 
@@ -268,9 +294,18 @@ export default function IntegrationsPage() {
     const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
         e.preventDefault()
 
-        if (normalizedRole !== "admin") {
-            alert("Only admins can create integrations")
+        if (isUser) {
+            alert("Users cannot create or edit integrations")
             return
+        }
+
+        // For editing, check if manager owns the integration
+        if (editingId && isManager) {
+            const integration = integrations.find(i => i.id === editingId)
+            if (integration && integration.user_id !== user?.id) {
+                alert("Managers can only edit their own integrations")
+                return
+            }
         }
 
         if (!token) {
@@ -370,15 +405,6 @@ export default function IntegrationsPage() {
         return result
     }
 
-    if (isUser) {
-        return (
-            <div className="bg-white rounded-lg border shadow-sm p-6">
-                <h2 className="text-xl font-semibold text-slate-900">Access restricted</h2>
-                <p className="text-slate-600 mt-2">Standard users cannot access Integration.</p>
-            </div>
-        )
-    }
-
     const renderTypeFields = () => {
         switch (formState.type) {
             case "api":
@@ -387,7 +413,7 @@ export default function IntegrationsPage() {
                         <div className="space-y-2">
                             <div className="flex items-center justify-between">
                                 <label className="text-sm font-medium">Import from cURL</label>
-                                {normalizedRole === "admin" && (
+                                {!isUser && (
                                     <Button
                                         type="button"
                                         size="sm"
@@ -409,13 +435,13 @@ export default function IntegrationsPage() {
                                     </Button>
                                 )}
                             </div>
-                            <Textarea
-                                placeholder='curl -X POST "https://api.example.com" -H "Authorization: Bearer token" -H "Content-Type: application/json" -d "{\"foo\":\"bar\"}"'
-                                value={curlInput}
-                                onChange={(e) => setCurlInput(e.target.value)}
-                                rows={3}
-                                disabled={isReadOnly}
-                            />
+                                    <Textarea
+                                        placeholder='curl -X POST "https://api.example.com" -H "Authorization: Bearer token" -H "Content-Type: application/json" -d "{\"foo\":\"bar\"}"'
+                                        value={curlInput}
+                                        onChange={(e) => setCurlInput(e.target.value)}
+                                        rows={3}
+                                        disabled={isUser}
+                                    />
                         </div>
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                             <div className="space-y-2">
@@ -425,7 +451,7 @@ export default function IntegrationsPage() {
                                     value={formState.method}
                                     onChange={(e) => setFormState({ ...formState, method: e.target.value as "POST" | "PUT" })}
                                     required
-                                    disabled={isReadOnly}
+                                    disabled={isUser}
                                 >
                                     <option value="POST">POST</option>
                                     <option value="PUT">PUT</option>
@@ -438,7 +464,7 @@ export default function IntegrationsPage() {
                                     placeholder="https://api.example.com/v1/ingest"
                                     value={formState.endpoint}
                                     onChange={(e) => setFormState({ ...formState, endpoint: e.target.value })}
-                                    disabled={isReadOnly}
+                                    disabled={isUser}
                                 />
                             </div>
                         </div>
@@ -448,7 +474,7 @@ export default function IntegrationsPage() {
                                 placeholder="Authorization: Bearer <token>"
                                 value={formState.authHeader}
                                 onChange={(e) => setFormState({ ...formState, authHeader: e.target.value })}
-                                disabled={isReadOnly}
+                                disabled={isUser}
                             />
                         </div>
                         <div className="space-y-2">
@@ -457,7 +483,7 @@ export default function IntegrationsPage() {
                                 placeholder='{\n  "Authorization": "Bearer <token>",\n  "X-API-Key": "<key>"\n}'
                                 value={formState.headersJson}
                                 onChange={(e) => setFormState({ ...formState, headersJson: e.target.value })}
-                                disabled={isReadOnly}
+                                disabled={isUser}
                                 rows={4}
                             />
                         </div>
@@ -468,7 +494,7 @@ export default function IntegrationsPage() {
                                 value={formState.payloadTemplate}
                                 onChange={(e) => setFormState({ ...formState, payloadTemplate: e.target.value })}
                                 rows={5}
-                                disabled={isReadOnly}
+                                disabled={isUser}
                             />
                         </div>
                         <div className="space-y-2">
@@ -477,10 +503,10 @@ export default function IntegrationsPage() {
                                 placeholder="document_id, file_url, fields"
                                 value={formState.parameters}
                                 onChange={(e) => setFormState({ ...formState, parameters: e.target.value })}
-                                disabled={isReadOnly}
+                                disabled={isUser}
                             />
                         </div>
-                    </div >
+                    </div>
                 )
             case "llm":
                 return (
@@ -496,7 +522,7 @@ export default function IntegrationsPage() {
                                             placeholder="sk-..."
                                             value={formState.apiKey}
                                             onChange={(e) => setFormState({ ...formState, apiKey: e.target.value })}
-                                            disabled={isReadOnly}
+                                            disabled={isUser}
                                             required
                                         />
                                     </div>
@@ -506,7 +532,7 @@ export default function IntegrationsPage() {
                                             placeholder="https://api.openai.com/v1 (default)"
                                             value={formState.baseUrl}
                                             onChange={(e) => setFormState({ ...formState, baseUrl: e.target.value })}
-                                            disabled={isReadOnly}
+                                            disabled={isUser}
                                         />
                                         <p className="text-xs text-slate-500">Leave empty for OpenAI. Use custom URL for Azure, Groq, local LLMs, etc.</p>
                                     </div>
@@ -518,7 +544,7 @@ export default function IntegrationsPage() {
                                             className="flex h-10 w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm"
                                             value={formState.model}
                                             onChange={(e) => setFormState({ ...formState, model: e.target.value })}
-                                            disabled={isReadOnly}
+                                            disabled={isUser}
                                             title="Select LLM Model"
                                             required
                                         >
@@ -546,7 +572,7 @@ export default function IntegrationsPage() {
                                             className="flex h-10 w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm"
                                             value={formState.reasoningEffort}
                                             onChange={(e) => setFormState({ ...formState, reasoningEffort: e.target.value as "low" | "medium" | "high" })}
-                                            disabled={isReadOnly}
+                                            disabled={isUser}
                                             title="Select Reasoning Effort Level"
                                         >
                                             <option value="low">Low</option>
@@ -559,14 +585,14 @@ export default function IntegrationsPage() {
                                 <div className="space-y-2">
                                     <label className="text-sm font-medium">Instructions *</label>
                                     <Textarea
-                                        placeholder="Enter instructions for the LLM to process extracted data..."
+                                        placeholder="Enter instructions for LLM to process extracted data..."
                                         value={formState.instructions}
                                         onChange={(e) => setFormState({ ...formState, instructions: e.target.value })}
-                                        disabled={isReadOnly}
+                                        disabled={isUser}
                                         rows={4}
                                         required
                                     />
-                                    <p className="text-xs text-slate-500">Instructions for the LLM. The extracted data from document processing will be passed as input.</p>
+                                    <p className="text-xs text-slate-500">Instructions for LLM. The extracted data from document processing will be passed as input.</p>
                                 </div>
                                 {/* Test Connection Section */}
                                 <div className="space-y-3 pt-4 border-t">
@@ -577,7 +603,7 @@ export default function IntegrationsPage() {
                                             placeholder="Enter test data to verify LLM configuration..."
                                             value={testInput}
                                             onChange={(e) => setTestInput(e.target.value)}
-                                            disabled={isReadOnly || testLoading}
+                                            disabled={isUser || testLoading}
                                             rows={3}
                                         />
                                     </div>
@@ -623,17 +649,11 @@ export default function IntegrationsPage() {
                                                 setTestLoading(false)
                                             }
                                         }}
-                                        disabled={isReadOnly || testLoading || !testInput.trim()}
+                                        disabled={isUser || testLoading || !testInput.trim()}
                                     >
                                         {testLoading ? "Testing..." : "Test Connection"}
                                     </Button>
-                                    {testResult && (
-                                        <div className={`p-3 rounded-md text-sm ${testResult.startsWith("Error") ? "bg-red-50 text-red-800" : "bg-green-50 text-green-800"}`}>
-                                            <div className="font-semibold mb-1">Test Result:</div>
-                                            <div className="whitespace-pre-wrap">{testResult}</div>
-                                        </div>
-                                    )}
-                                </div>
+                                     </div>
                             </div>
                         )}
                     </div>
@@ -648,6 +668,7 @@ export default function IntegrationsPage() {
                                 placeholder="https://hooks.n8n.cloud/webhook/..."
                                 value={formState.webhookUrl}
                                 onChange={(e) => setFormState({ ...formState, webhookUrl: e.target.value })}
+                                disabled={isUser}
                             />
                         </div>
                         <div className="space-y-2">
@@ -656,8 +677,98 @@ export default function IntegrationsPage() {
                                 placeholder="jobId, status, payload, confidence"
                                 value={formState.parameters}
                                 onChange={(e) => setFormState({ ...formState, parameters: e.target.value })}
+                                disabled={isUser}
                                 rows={3}
                             />
+                        </div>
+
+                        {/* Test Connection Section */}
+                        <div className="space-y-3 pt-4 border-t">
+                            <div className="text-sm font-semibold text-slate-700">Test Connection</div>
+                            <div className="space-y-2">
+                                <label className="text-sm font-medium">Test Payload (JSON)</label>
+                                <Textarea
+                                    placeholder='{"test": true, "message": "Connection test from InsightOCR"}'
+                                    value={testInput}
+                                    onChange={(e) => setTestInput(e.target.value)}
+                                    disabled={isUser || testLoading}
+                                    rows={3}
+                                />
+                            </div>
+                            <Button
+                                type="button"
+                                variant="outline"
+                                onClick={async () => {
+                                    if (!formState.webhookUrl || !formState.webhookUrl.trim()) {
+                                        alert("Please enter a webhook URL first")
+                                        return
+                                    }
+
+                                    setTestLoading(true)
+                                    setTestResult(null)
+
+                                    try {
+                                        // Prepare test payload
+                                        let payload: any = {
+                                            test: true,
+                                            message: "Connection test from InsightOCR",
+                                            timestamp: new Date().toISOString()
+                                        }
+
+                                        // If user provided custom test input, use it
+                                        if (testInput.trim()) {
+                                            try {
+                                                payload = JSON.parse(testInput)
+                                            } catch (e) {
+                                                setTestResult("Error: Invalid JSON format in test payload")
+                                                setTestLoading(false)
+                                                return
+                                            }
+                                        }
+
+                                        const response = await fetch(formState.webhookUrl, {
+                                            method: "POST",
+                                            headers: {
+                                                "Content-Type": "application/json"
+                                            },
+                                            body: JSON.stringify(payload)
+                                        })
+
+                                        if (response.ok) {
+                                            const contentType = response.headers.get("content-type")
+                                            let responseData = ""
+
+                                            if (contentType && contentType.includes("application/json")) {
+                                                const data = await response.json()
+                                                responseData = JSON.stringify(data, null, 2)
+                                            } else {
+                                                responseData = await response.text()
+                                            }
+
+                                            setTestResult(`✓ Success! (Status: ${response.status})\n\nResponse:\n${responseData || "No response body"}`)
+                                        } else {
+                                            const errorText = await response.text().catch(() => "No error details")
+                                            setTestResult(`✗ Failed! (Status: ${response.status})\n\nError:\n${errorText}`)
+                                        }
+                                    } catch (error) {
+                                        setTestResult(`✗ Error: ${error instanceof Error ? error.message : "Network error or invalid URL"}`)
+                                    } finally {
+                                        setTestLoading(false)
+                                    }
+                                }}
+                                disabled={isUser || testLoading || !formState.webhookUrl}
+                            >
+                                {testLoading ? "Testing..." : "Test Connection"}
+                            </Button>
+                            {testResult && (
+                                <div className={`p-3 rounded-md text-sm font-mono whitespace-pre-wrap ${
+                                    testResult.startsWith("✓")
+                                        ? "bg-green-50 text-green-800 border border-green-200"
+                                        : "bg-red-50 text-red-800 border border-red-200"
+                                }`}>
+                                    {testResult}
+                                </div>
+                            )}
                         </div>
                     </div>
                 )
@@ -768,10 +879,10 @@ export default function IntegrationsPage() {
                     <p className="text-slate-600">Manage outbound integration channels for the OCR pipeline</p>
                     <p className="text-xs text-slate-500 mt-1 flex items-center gap-2">
                         <ShieldCheck className="h-4 w-4" />
-                        Admin: CRUD, Manager: View only
+                        Admin: All CRUD, Manager: View + Own CRUD, User: View/Use only
                     </p>
                 </div>
-                {normalizedRole === "admin" && (
+                {(isAdmin || isManager) && (
                     <Button onClick={openCreate}>
                         <Plus className="mr-2 h-4 w-4" />
                         Add Integration
@@ -827,13 +938,13 @@ export default function IntegrationsPage() {
                                 <div className="text-xs text-slate-500">Updated {new Date(integration.updatedAt).toLocaleString()}</div>
                             </div>
                             <div className="flex items-center gap-2">
-                                {normalizedRole === "manager" && (
+                                {isUser && (
                                     <div className="flex items-center gap-1 text-slate-500 text-sm">
                                         <Eye className="h-4 w-4" />
                                         View only
                                     </div>
                                 )}
-                                {normalizedRole === "admin" && (
+                                {(isAdmin || (isManager && integration.user_id === user?.id)) && (
                                     <>
                                         <Button variant="ghost" size="sm" onClick={() => openEdit(integration)}>
                                             <Pencil className="h-4 w-4 mr-1" /> Edit
@@ -865,7 +976,7 @@ export default function IntegrationsPage() {
                                 required
                                 value={formState.name}
                                 onChange={(e) => setFormState({ ...formState, name: e.target.value })}
-                                disabled={isReadOnly}
+                                disabled={isUser}
                             />
                         </div>
                         <div className="space-y-2">
@@ -874,7 +985,7 @@ export default function IntegrationsPage() {
                                 className="flex h-10 w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm"
                                 value={formState.type}
                                 onChange={(e) => setFormState({ ...formState, type: e.target.value as IntegrationType })}
-                                disabled={isReadOnly}
+                                disabled={isUser}
                             >
                                 <option value="api">API</option>
                                 <option value="workflow">Workflow Automation</option>
@@ -887,7 +998,7 @@ export default function IntegrationsPage() {
                                 className="flex h-10 w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm"
                                 value={formState.status}
                                 onChange={(e) => setFormState({ ...formState, status: e.target.value as "active" | "paused" })}
-                                disabled={isReadOnly}
+                                disabled={isUser}
                             >
                                 <option value="active">Active</option>
                                 <option value="paused">Paused</option>
@@ -900,20 +1011,20 @@ export default function IntegrationsPage() {
                             placeholder="Describe what this integration sends"
                             value={formState.description}
                             onChange={(e) => setFormState({ ...formState, description: e.target.value })}
-                            disabled={isReadOnly}
+                            disabled={isUser}
                         />
                     </div>
-
+                    
                     {renderTypeFields()}
 
-                    {normalizedRole === "admin" ? (
+                    {isUser ? (
+                        <div className="flex justify-end">
+                            <Button type="button" variant="outline" onClick={() => setShowForm(false)}>Close</Button>
+                        </div>
+                    ) : (
                         <div className="flex justify-end gap-2">
                             <Button variant="outline" type="button" onClick={() => setShowForm(false)}>Cancel</Button>
                             <Button type="submit">{editingId ? "Save changes" : "Create"}</Button>
-                        </div>
-                    ) : (
-                        <div className="flex justify-end">
-                            <Button type="button" variant="outline" onClick={() => setShowForm(false)}>Close</Button>
                         </div>
                     )}
                 </form>
