@@ -6,6 +6,7 @@ from typing import Optional, Generator
 from contextlib import contextmanager
 from app.core.config import settings
 from minio import Minio
+from botocore.exceptions import ClientError
 import logging
 
 logger = logging.getLogger(__name__)
@@ -91,19 +92,39 @@ class S3BaseStorage(StorageService):
             region_name=region
         )
 
+    def _ensure_bucket_exists(self):
+        """Check if bucket exists, create if not."""
+        try:
+            self.client.head_bucket(Bucket=self.bucket)
+        except ClientError as e:
+            error_code = e.response.get('Error', {}).get('Code')
+            if error_code == '404':
+                logger.info(f"Bucket {self.bucket} does not exist, creating...")
+                try:
+                    self.client.create_bucket(Bucket=self.bucket)
+                    logger.info(f"Successfully created bucket: {self.bucket}")
+                except ClientError as create_error:
+                    logger.error(f"Failed to create bucket {self.bucket}: {create_error}")
+                    raise
+            else:
+                logger.error(f"Error checking bucket {self.bucket}: {e}")
+                raise
+
     def upload_file(self, file_obj, destination_path: str, content_type: str = None) -> str:
+        self._ensure_bucket_exists()
         extra_args = {}
         if content_type:
             extra_args['ContentType'] = content_type
-        
+
         # Reset file pointer if possible
         if hasattr(file_obj, 'seek'):
             file_obj.seek(0)
-            
+
         self.client.upload_fileobj(file_obj, self.bucket, destination_path, ExtraArgs=extra_args)
         return destination_path
 
     def delete_file(self, path: str):
+        self._ensure_bucket_exists()
         self.client.delete_object(Bucket=self.bucket, Key=path)
 
     def exists(self, path: str) -> bool:
@@ -115,6 +136,7 @@ class S3BaseStorage(StorageService):
 
     @contextmanager
     def get_local_path(self, path: str) -> Generator[str, None, None]:
+        self._ensure_bucket_exists()
         import tempfile
         tmp_fd, tmp_path = tempfile.mkstemp()
         try:
