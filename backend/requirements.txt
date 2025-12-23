@@ -21,3 +21,4 @@ tiktoken
 Pillow
 email-validator
 boto3
+httpx

@@ -230,19 +230,25 @@ export default function ActivityLogsPage() {
             case "send_to_integration":
                 return (
                     <div className="space-y-1 text-xs">
-                        {log.details.integration_name && (
-                            <div><span className="font-medium">Integration:</span> {log.details.integration_name}</div>
+                        {log.details.job_name && (
+                            <div><span className="font-medium">Job:</span> {log.details.job_name}</div>
                         )}
-                        {log.details.document_count !== undefined && (
+                        {log.details.name && (
+                            <div><span className="font-medium">Integration:</span> {log.details.name}</div>
+                        )}
+                        {log.details.type && (
+                            <div><span className="font-medium">Type:</span> {log.details.type}</div>
+                        )}
+                        {log.details.result && (
                             <div>
-                                <span className="font-medium">Documents:</span> {log.details.document_count}
-                                {log.details.successful_count !== undefined && (
-                                    <span className="text-green-600"> ({log.details.successful_count} success</span>
-                                )}
-                                {log.details.failed_count !== undefined && log.details.failed_count > 0 && (
-                                    <span className="text-red-600">, {log.details.failed_count} failed</span>
-                                )}
-                                {(log.details.successful_count !== undefined || log.details.failed_count !== undefined) && ")"}
+                                <span className="font-medium">Result:</span>{" "}
+                                <span className={`px-1.5 py-0.5 rounded ${
+                                    log.details.result === "success"
+                                        ? "bg-green-100 text-green-800"
+                                        : "bg-red-100 text-red-800"
+                                }`}>
+                                    {log.details.result}
+                                </span>
                             </div>
                         )}
                     </div>

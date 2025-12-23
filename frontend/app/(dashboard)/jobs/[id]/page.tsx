@@ -445,90 +445,48 @@ export default function JobDetailPage() {
 
     const handleSendToIntegration = async () => {
         if (!job || !selectedIntegration) return
-        const integration = integrations.find(int => int.id === selectedIntegration)
-        if (!integration) return
 
         setSendingIntegration(true)
         setIntegrationMessage(null)
 
         const payload = {
-            job_id: job.id,
+            integration_id: selectedIntegration,
             job_name: job.name,
             documents: documents.map(doc => ({
-                id: doc.id,
-                filename: doc.filename,
-                schema_id: doc.schema_id,
-                status: doc.status,
-                data: doc.reviewed_data || doc.extracted_data,
+                id: String(doc.id),
+                filename: doc.filename || "unnamed",
+                data: doc.reviewed_data || doc.extracted_data || {}
             }))
         }
 
         try {
-            if (integration.type === "llm") {
-                // Call LLM endpoint
-                const res = await fetch(`${apiBase}/integrations/send-llm`, {
-                    method: "POST",
-                    headers: {
-                        "Content-Type": "application/json",
-                        "Authorization": `Bearer ${localStorage.getItem("token")}`
-                    },
-                    body: JSON.stringify({
-                        apiKey: integration.config.apiKey,
-                        baseUrl: integration.config.baseUrl || undefined,
-                        model: integration.config.model,
-                        reasoningEffort: integration.config.reasoningEffort || "low",
-                        instructions: integration.config.instructions,
-                        documents: payload.documents.map(doc => ({
-                            id: String(doc.id),
-                            filename: doc.filename || "unnamed",
-                            data: doc.data || {}
-                        }))
-                    })
-                })
-                if (!res.ok) {
-                    const errData = await res.json().catch(() => ({}))
-                    const errMsg = typeof errData.detail === "string" ? errData.detail : JSON.stringify(errData.detail || errData)
-                    throw new Error(errMsg || `LLM processing failed: ${res.status}`)
-                }
-                const result = await res.json()
+            const token = localStorage.getItem("token")
+            const res = await fetch(`${apiBase}/integrations/send`, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "Authorization": `Bearer ${token}`
+                },
+                body: JSON.stringify(payload)
+            })
+
+            if (!res.ok) {
+                const errData = await res.json().catch(() => ({}))
+                const errMsg = typeof errData.detail === "string" ? errData.detail : JSON.stringify(errData.detail || errData)
+                throw new Error(errMsg || `Integration send failed: ${res.status}`)
+            }
+
+            const result = await res.json()
+
+            const integration = integrations.find(int => int.id === selectedIntegration)
+
+            if (integration?.type === "llm" && result.results) {
                 setLlmResults(result.results)
                 setShowLlmResultsModal(true)
                 setShowIntegrationModal(false)
                 setIntegrationMessage("LLM processing completed")
-            } else if (integration.type === "workflow") {
-                const res = await fetch(integration.config.webhookUrl || "", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify(payload)
-                })
-                if (!res.ok) throw new Error(`Webhook responded ${res.status}`)
-                setIntegrationMessage("Sent successfully")
             } else {
-                const headers: Record<string, string> = { "Content-Type": "application/json" }
-                if (integration.config.authHeader) {
-                    integration.config.authHeader.split("\n").forEach(line => {
-                        const [key, ...rest] = line.split(":")
-                        if (key && rest.length) headers[key.trim()] = rest.join(":").trim()
-                    })
-                }
-                if (integration.config.headersJson) {
-                    try {
-                        const parsed = JSON.parse(integration.config.headersJson)
-                        Object.entries(parsed).forEach(([k, v]) => {
-                            if (typeof v === "string") headers[k] = v
-                        })
-                    } catch {
-                        // ignore bad JSON
-                    }
-                }
-
-                const res = await fetch(integration.config.endpoint || "", {
-                    method: integration.config.method || "POST",
-                    headers,
-                    body: JSON.stringify(payload)
-                })
-                if (!res.ok) throw new Error(`Endpoint responded ${res.status}`)
-                setIntegrationMessage("Sent successfully")
+                setIntegrationMessage(result.message || "Sent successfully")
             }
         } catch (err: any) {
             setIntegrationMessage(err?.message || "Failed to send")

@@ -4,6 +4,8 @@ from typing import Optional, List, Dict, Any
 from uuid import UUID
 from openai import OpenAI
 from sqlalchemy.orm import Session
+import httpx
+import json
 from app.api import deps
 from app.models.user import User
 from app.schemas.integration import (
@@ -14,7 +16,6 @@ from app.schemas.integration import (
 )
 from app.crud.crud_integration import integration as crud_integration
 from app.utils.activity_logger import log_activity, Actions
-import json
 
 router = APIRouter()
 
@@ -253,6 +254,18 @@ class SendLLMResponse(BaseModel):
     results: List[DocumentResult]
 
 
+class SendToIntegrationRequest(BaseModel):
+    integration_id: UUID
+    job_name: str
+    documents: List[DocumentInput]
+
+
+class SendToIntegrationResponse(BaseModel):
+    success: bool
+    message: str
+    results: Optional[List[DocumentResult]] = None
+
+
 @router.post("/test-llm", response_model=TestLLMResponse)
 async def test_llm(
     request: TestLLMRequest,
@@ -355,13 +368,9 @@ async def send_to_llm(
             resource_type="integration",
             resource_id=None,
             details={
-                "integration_name": "LLM Integration",
-                "integration_type": "llm",
-                "model": request.model,
-                "document_count": len(request.documents),
-                "successful_count": successful_count,
-                "failed_count": failed_count,
-                "documents": [{"id": r.id, "filename": r.filename, "status": "success" if r.success else "failed"} for r in results]
+                "name": "LLM Integration",
+                "type": "llm",
+                "result": "success" if failed_count == 0 else "failed"
             },
             ip_address=client_ip,
             user_agent=user_agent
@@ -378,10 +387,9 @@ async def send_to_llm(
             resource_type="integration",
             resource_id=None,
             details={
-                "integration_name": "LLM Integration",
-                "integration_type": "llm",
-                "status": "failed",
-                "error": str(e)
+                "name": "LLM Integration",
+                "type": "llm",
+                "result": "failed"
             },
             ip_address=client_ip,
             user_agent=user_agent
@@ -390,4 +398,207 @@ async def send_to_llm(
         raise HTTPException(
             status_code=400,
             detail=f"LLM processing failed: {str(e)}"
+        )
+
+
+@router.post("/send", response_model=SendToIntegrationResponse)
+async def send_to_integration(
+    request: SendToIntegrationRequest,
+    http_request: Request,
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_user)
+):
+    """
+    Send documents to integration endpoint (supports all integration types: llm, workflow, api)
+    """
+    client_ip = http_request.client.host if http_request.client else None
+    user_agent = http_request.headers.get("user-agent")
+
+    integration = None
+
+    try:
+        integration = crud_integration.get(db=db, integration_id=request.integration_id)
+        if not integration:
+            raise HTTPException(status_code=404, detail="Integration not found")
+
+        print(f"[DEBUG] Integration type: {integration.type}")
+        print(f"[DEBUG] Integration config: {integration.config}")
+
+        results = []
+        success = False
+        message = ""
+
+        if integration.type == "llm":
+            if not integration.config.apiKey:
+                raise HTTPException(status_code=400, detail="API Key is required for LLM integration")
+
+            client_kwargs = {"api_key": integration.config.apiKey}
+            if integration.config.baseUrl:
+                client_kwargs["base_url"] = integration.config.baseUrl
+
+            client = OpenAI(**client_kwargs)
+
+            for doc in request.documents:
+                try:
+                    doc_input = json.dumps(doc.data, ensure_ascii=False, indent=2) if doc.data else "No data"
+
+                    response = client.responses.create(
+                        model=integration.config.model,
+                        reasoning={"effort": integration.config.reasoningEffort},
+                        instructions=integration.config.instructions,
+                        input=f"Document: {doc.filename}\n\nData:\n{doc_input}",
+                    )
+
+                    output_text = response.output_text if hasattr(response, 'output_text') else str(response)
+
+                    results.append(DocumentResult(
+                        id=doc.id,
+                        filename=doc.filename,
+                        output=output_text,
+                        success=True
+                    ))
+                except Exception as e:
+                    results.append(DocumentResult(
+                        id=doc.id,
+                        filename=doc.filename,
+                        output="",
+                        success=False,
+                        error=str(e)
+                    ))
+
+            successful_count = sum(1 for r in results if r.success)
+            failed_count = len(results) - successful_count
+            success = failed_count == 0
+            message = "Sent successfully" if success else f"Partial success: {successful_count} succeeded, {failed_count} failed"
+
+        elif integration.type == "workflow":
+            webhook_url = integration.config.get("webhookUrl")
+            if not webhook_url:
+                raise HTTPException(status_code=400, detail="Webhook URL is required for workflow integration")
+
+            payload = {
+                "documents": [{"id": d.id, "filename": d.filename, "data": d.data} for d in request.documents]
+            }
+
+            print(f"[DEBUG] Sending to webhook: {webhook_url}")
+            print(f"[DEBUG] Payload: {json.dumps(payload, ensure_ascii=False, indent=2)}")
+
+            async with httpx.AsyncClient() as client:
+                res = await client.post(webhook_url, json=payload, timeout=30.0)
+                print(f"[DEBUG] Webhook response status: {res.status_code}")
+                print(f"[DEBUG] Webhook response: {res.text}")
+                if res.status_code >= 400:
+                    raise HTTPException(status_code=res.status_code, detail=f"Webhook responded {res.status_code}: {res.text}")
+
+            success = True
+            message = "Sent successfully to workflow"
+
+        elif integration.type == "api":
+            endpoint = integration.config.get("endpoint")
+            if not endpoint:
+                raise HTTPException(status_code=400, detail="Endpoint URL is required for API integration")
+
+            payload = {
+                "documents": [{"id": d.id, "filename": d.filename, "data": d.data} for d in request.documents]
+            }
+
+            headers: Dict[str, str] = {"Content-Type": "application/json"}
+            auth_header = integration.config.get("authHeader")
+            if auth_header:
+                for line in auth_header.split("\n"):
+                    parts = line.split(":", 1)
+                    if len(parts) == 2:
+                        headers[parts[0].strip()] = parts[1].strip()
+
+            headers_json = integration.config.get("headersJson")
+            if headers_json:
+                try:
+                    parsed = json.loads(headers_json)
+                    headers.update(parsed)
+                except:
+                    pass
+
+            method = integration.config.get("method", "POST")
+
+            print(f"[DEBUG] Sending to API: {method} {endpoint}")
+            print(f"[DEBUG] Payload: {json.dumps(payload, ensure_ascii=False, indent=2)}")
+
+            async with httpx.AsyncClient() as client:
+                res = await client.request(method, endpoint, json=payload, headers=headers, timeout=30.0)
+                print(f"[DEBUG] API response status: {res.status_code}")
+                print(f"[DEBUG] API response: {res.text}")
+                if res.status_code >= 400:
+                    raise HTTPException(status_code=res.status_code, detail=f"API responded {res.status_code}: {res.text}")
+
+            success = True
+            message = "Sent successfully to API endpoint"
+
+        else:
+            raise HTTPException(status_code=400, detail=f"Unsupported integration type: {integration.type}")
+
+        log_activity(
+            db=db,
+            user_id=current_user.id,
+            action=Actions.SEND_TO_INTEGRATION,
+            resource_type="integration",
+            resource_id=integration.id,
+            details={
+                "job_name": request.job_name,
+                "name": integration.name,
+                "type": integration.type,
+                "result": "success" if success else "failed"
+            },
+            ip_address=client_ip,
+            user_agent=user_agent
+        )
+
+        return SendToIntegrationResponse(
+            success=success,
+            message=message,
+            results=results if integration.type == "llm" else None
+        )
+
+    except HTTPException as he:
+        print(f"[DEBUG] HTTPException: {he.detail}")
+        if integration:
+            log_activity(
+                db=db,
+                user_id=current_user.id,
+                action=Actions.SEND_TO_INTEGRATION,
+                resource_type="integration",
+                resource_id=integration.id,
+                details={
+                    "name": integration.name,
+                    "type": integration.type,
+                    "result": "failed"
+                },
+                ip_address=client_ip,
+                user_agent=user_agent
+            )
+        raise
+
+    except Exception as e:
+        print(f"[DEBUG] Exception: {str(e)}")
+        import traceback
+        traceback.print_exc()
+
+        if integration:
+            log_activity(
+                db=db,
+                user_id=current_user.id,
+                action=Actions.SEND_TO_INTEGRATION,
+                resource_type="integration",
+                resource_id=integration.id,
+                details={
+                    "name": integration.name,
+                    "type": integration.type,
+                    "result": "failed"
+                },
+                ip_address=client_ip,
+                user_agent=user_agent
+            )
+
+        raise HTTPException(
+            status_code=400,
+            detail=f"Integration send failed: {str(e)}"
         )
