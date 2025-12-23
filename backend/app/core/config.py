@@ -9,9 +9,12 @@ class Settings(BaseSettings):
     BACKEND_CORS_ORIGINS: str = ""
 
     # Database
+    DB_USER: Optional[str] = "postgres"
+    DB_PASSWORD: Optional[str] = "postgres"
     DATABASE_URL: str = "postgresql://postgres:postgres@db:5432/softnix_ocr"
-    
+
     # Redis (for Celery task queue)
+    REDIS_PASSWORD: Optional[str] = None
     REDIS_URL: str = "redis://redis:6379/0" # Set via env var
 
     # Storage
