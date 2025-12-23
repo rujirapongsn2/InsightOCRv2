@@ -18,7 +18,8 @@ services:
       - internal
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/health"]
+      # Use HTTPS directly on IPv4 loopback to avoid redirects/IPv6 resolution issues
+      test: ["CMD", "wget", "--no-check-certificate", "--quiet", "--tries=1", "--spider", "https://127.0.0.1/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -32,12 +33,15 @@ services:
       - ./backend:/app
     env_file:
       - ./backend/.env
+    environment:
+      - HTTP_PROXY=http://gateway:8888
+      - HTTPS_PROXY=http://gateway:8888
+      - NO_PROXY=localhost,127.0.0.1,backend,db,redis,minio,frontend,nginx,gateway
     depends_on:
       - db
       - redis
     networks:
-      - public      # allow outbound calls (e.g., external OCR/APIs)
-      - internal    # keep service discovery and DB/Redis access isolated
+      - internal    # isolate; outbound via gateway proxy
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
@@ -53,13 +57,16 @@ services:
       - ./backend:/app
     env_file:
       - ./backend/.env
+    environment:
+      - HTTP_PROXY=http://gateway:8888
+      - HTTPS_PROXY=http://gateway:8888
+      - NO_PROXY=localhost,127.0.0.1,backend,db,redis,minio,frontend,nginx,gateway
     depends_on:
       - db
       - redis
       - backend
     networks:
-      - public      # required if worker needs to call external APIs
-      - internal
+      - internal    # isolate; outbound via gateway proxy
     restart: unless-stopped
 
   frontend:
@@ -146,6 +153,15 @@ services:
       timeout: 10s
       retries: 3
 
+  gateway:
+    build: ./gateway
+    container_name: softnix_ocr_gateway
+    expose:
+      - "8888"
+    networks:
+      - public    # egress to internet
+      - internal  # reachable from backend/worker
+    restart: unless-stopped
 networks:
   public:
     driver: bridge
