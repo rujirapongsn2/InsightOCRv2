@@ -1,8 +1,8 @@
 # 🔒 แผนการแก้ไขปัญหาความปลอดภัย - InsightOCR v2
 
 > **สร้างเมื่อ:** 23 ธันวาคม 2568
-> **อัปเดตล่าสุด:** 23 ธันวาคม 2568 เวลา 20:35 น.
-> **สถานะ:** ✅ Phase 1 เสร็จสมบูรณ์ (5/10 ข้อ) | 🚧 Phase 2-4 รอดำเนินการ
+> **อัปเดตล่าสุด:** 23 ธันวาคม 2568 เวลา 21:15 น.
+> **สถานะ:** ✅ Phase 1 เสร็จสมบูรณ์ (5/10 ข้อ) | 🚧 Phase 2-4 รอดำเนินการ (Fix #6-7 เสร็จแล้ว)
 > **วัตถุประสงค์:** แก้ไขช่องโหว่ด้านความปลอดภัยตามลำดับความง่ายและผลกระทบ
 
 ---
@@ -61,14 +61,14 @@
 | 3 | เปลี่ยน PostgreSQL Password | ⭐ (1) | 🔥🔥🔥🔥🔥 (5) | 25 | 5 นาที | ✅ เสร็จแล้ว (23 ธ.ค. 68) |
 | 4 | สร้าง SECRET_KEY ใหม่ | ⭐ (1) | 🔥🔥🔥🔥 (4) | 20 | 3 นาที | ✅ เสร็จแล้ว (23 ธ.ค. 68) |
 | 5 | เพิ่ม Redis Authentication | ⭐⭐ (2) | 🔥🔥🔥🔥🔥 (5) | 20 | 10 นาที | ✅ เสร็จแล้ว (23 ธ.ค. 68) |
-| 6 | ตั้งค่า Network Isolation | ⭐⭐ (2) | 🔥🔥🔥 (3) | 12 | - | ⏳ รอดำเนินการ |
-| 7 | จำกัด Healthcheck Information | ⭐⭐ (2) | 🔥🔥 (2) | 8 | - | ⏳ รอดำเนินการ |
+| 6 | ตั้งค่า Network Isolation | ⭐⭐ (2) | 🔥🔥🔥 (3) | 12 | ~20 นาที | ✅ เสร็จแล้ว (23 ธ.ค. 68) |
+| 7 | จำกัด Healthcheck Information | ⭐⭐ (2) | 🔥🔥 (2) | 8 | ~10 นาที | ✅ เสร็จแล้ว (23 ธ.ค. 68) |
 | 8 | เพิ่ม Container Security Options | ⭐⭐⭐ (3) | 🔥🔥🔥 (3) | 9 | - | ⏳ รอดำเนินการ |
 | 9 | ตั้งค่า Rate Limiting ใน Nginx | ⭐⭐⭐ (3) | 🔥🔥🔥🔥 (4) | 12 | - | ⏳ รอดำเนินการ |
 | 10 | แก้ไข Volume Mounting (Production) | ⭐⭐⭐⭐ (4) | 🔥🔥🔥🔥 (4) | 8 | - | ⏳ รอดำเนินการ |
 
-**ความคืบหน้า:** 5/10 ข้อเสร็จสมบูรณ์ (50%)
-**เวลาที่ใช้ไป:** ~25 นาที | **เวลาที่เหลือโดยประมาณ:** 1.5-2 ชั่วโมง
+**ความคืบหน้า:** 7/10 ข้อเสร็จสมบูรณ์ (70%)
+**เวลาที่ใช้ไป:** ~60 นาที | **เวลาที่เหลือโดยประมาณ:** ~45-60 นาที
 
 ---
 
@@ -428,7 +428,7 @@ docker compose logs backend --tail 20
 
 ---
 
-## ⚡ Phase 2: Critical Fixes (30 นาที) - ✅ Fix #5 เสร็จแล้ว | ⏳ Fix #6 รอดำเนินการ
+## ⚡ Phase 2: Critical Fixes (30 นาที) - ✅ Fix #5 เสร็จแล้ว | ✅ Fix #6 เสร็จแล้ว
 
 ### ✅ Fix #5: เพิ่ม Redis Authentication (เสร็จแล้ว)
 
@@ -523,168 +523,75 @@ docker compose logs celery_worker --tail 20
 
 ---
 
-### 🎯 Fix #6: ตั้งค่า Network Isolation
+### ✅ Fix #6: ตั้งค่า Network Isolation (เสร็จแล้ว)
 
 **ระดับความง่าย:** ⭐⭐ (2/5)
 **ผลกระทบ:** 🔥🔥🔥 (3/5) - จำกัดการเข้าถึงจาก external
 **Priority Score:** 12
-**เวลา:** 5 นาที
+**เวลา:** ~20 นาที
+**ดำเนินการเมื่อ:** 23 ธันวาคม 2568
 
 #### 🔍 ปัญหา
-Internal network อนุญาตให้ containers เชื่อมต่อ internet ได้
+Internal network อนุญาตให้ containers เชื่อมต่อ internet ได้ (เสี่ยง data exfiltration) และไม่มี gateway ควบคุม outbound
 
-#### 📝 ขั้นตอน
-
-1. **อัปเดต docker-compose.yml:**
+#### 📝 ขั้นตอน (ที่ทำแล้ว)
+1. **ตั้ง internal network เป็น isolated (default true):**
 ```yaml
-# docker-compose.yml
 networks:
   public:
     driver: bridge
   internal:
     driver: bridge
-    # ✅ เปลี่ยนเป็น true สำหรับ production:
-    internal: true  # ป้องกันการเชื่อมต่อ external network
+    internal: ${DOCKER_INTERNAL_NETWORK:-true}  # prod=true, dev override false ได้
 ```
-
-2. **⚠️ หมายเหตุสำคัญ:**
-```
-การตั้ง internal: true จะทำให้:
-- Services ใน internal network ไม่สามารถ download packages จาก internet ได้
-- ไม่สามารถเรียก external APIs ได้ (เช่น OCR service)
-
-✅ แนะนำ:
-- Development: ใช้ internal: false
-- Production: ใช้ internal: true และย้าย external API calls ไปที่ proxy/gateway
-```
-
-3. **สำหรับ Production - สร้าง API Gateway:**
-```yaml
-# เพิ่ม gateway service สำหรับเรียก external APIs
-gateway:
-  image: nginx:alpine
-  container_name: api_gateway
-  networks:
-    - public    # เชื่อมต่อ internet ได้
-    - internal  # เชื่อมต่อกับ backend services
-  # Configure as reverse proxy to external APIs
-```
-
-4. **Restart Network:**
-```bash
-# Development mode - ไม่ต้องเปลี่ยน
-# Production mode - recreate network
-docker compose down
-docker compose up -d
-```
+2. **จำกัด service ออกเน็ตผ่าน gateway เดียว:**
+   - backend, celery_worker ต่อแค่ internal network และตั้ง `HTTP_PROXY/HTTPS_PROXY=http://gateway:8888`, `NO_PROXY=localhost,127.0.0.1,backend,db,redis,minio,frontend,nginx,gateway`.
+3. **เพิ่ม gateway service (tinyproxy) สำหรับ egress ควบคุม:**
+   - ไฟล์ใหม่: `gateway/Dockerfile`, `gateway/tinyproxy.conf`.
+   - ต่อทั้ง `public` และ `internal` network; เปิดพอร์ต 8888 ให้บริการภายในใช้งาน.
+4. **Healthcheck และ build:**
+   - Rebuild backend/celery ใส่ `curl`/`ping` เพื่อรองรับ healthcheck และการทดสอบ.
+   - แก้ healthcheck nginx ใช้ `https://127.0.0.1/health` (หลีกเลี่ยง redirect/IPv6).
 
 #### ✅ การตรวจสอบ
 ```bash
-# ทดสอบว่า internal network ถูก isolate
-docker compose exec backend ping -c 3 8.8.8.8
-# ถ้า internal: true -> ควรได้ "Network unreachable"
-# ถ้า internal: false -> ควรได้ response ปกติ
+# ออกอินเทอร์เน็ตจาก backend ผ่าน gateway สำเร็จ
+docker compose exec backend curl -k -H 'Authorization: Bearer ocr_ai_key_987654321fedcba' https://111.223.37.41:9001/me  # ได้ 200
+
+# Isolation: redis (internal only) ออกเน็ตไม่ได้ -> Network unreachable
+docker compose exec redis ping -c 1 8.8.8.8
+
+# ทุก service health = healthy หลัง restart (nginx healthcheck ผ่าน https://127.0.0.1/health)
+docker compose ps
 ```
 
 ---
 
 ## 🔐 Phase 3: Enhanced Security (1 ชั่วโมง)
 
-### 🎯 Fix #7: จำกัด Healthcheck Information Disclosure
+### ✅ Fix #7: จำกัด Healthcheck Information Disclosure (เสร็จแล้ว)
 
 **ระดับความง่าย:** ⭐⭐ (2/5)
 **ผลกระทบ:** 🔥🔥 (2/5) - ป้องกัน information leakage
 **Priority Score:** 8
-**เวลา:** 15 นาที
+**เวลา:** ~10 นาที
+**ดำเนินการเมื่อ:** 23 ธันวาคม 2568
 
 #### 🔍 ปัญหา
 Healthcheck endpoint อาจเปิดเผยข้อมูล version และ dependencies
 
-#### 📝 ขั้นตอน
-
-1. **สร้าง Simple Health Endpoint:**
-
-สร้างไฟล์ `backend/app/api/v1/endpoints/health.py`:
-```python
-from fastapi import APIRouter, status
-from fastapi.responses import JSONResponse
-
-router = APIRouter()
-
-@router.get("/health", include_in_schema=False)
-async def health_check():
-    """
-    Simple health check endpoint.
-    Returns minimal information for security.
-    """
-    return JSONResponse(
-        status_code=status.HTTP_200_OK,
-        content={"status": "ok"}  # ไม่เปิดเผยข้อมูลอื่น
-    )
-
-@router.get("/health/detailed")
-async def detailed_health_check(
-    # TODO: เพิ่ม authentication dependency
-):
-    """
-    Detailed health check with authentication required.
-    """
-    from app.db.session import SessionLocal
-    from sqlalchemy import text
-
-    db = SessionLocal()
-    try:
-        db.execute(text("SELECT 1"))
-        db_status = "healthy"
-    except Exception as e:
-        db_status = f"unhealthy: {str(e)}"
-    finally:
-        db.close()
-
-    return {
-        "status": "ok",
-        "database": db_status,
-        "version": "2.0.0",  # อาจเปิดเผยได้ถ้ามี auth
-    }
-```
-
-2. **Register Router:**
-
-แก้ไข `backend/app/main.py`:
-```python
-# เพิ่มใน main.py
-from app.api.v1.endpoints import health
-
-# Register health router (ไม่อยู่ใน /api/v1 prefix)
-app.include_router(health.router, tags=["health"])
-```
-
-3. **อัปเดต docker-compose.yml healthcheck:**
-```yaml
-# docker-compose.yml - backend service
-backend:
-  healthcheck:
-    test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-    # ใช้ /health แทน /health/detailed
-    interval: 30s
-    timeout: 10s
-    retries: 3
-```
-
-4. **Restart Backend:**
-```bash
-docker compose restart backend
-```
+#### 📝 ขั้นตอน (ที่ทำแล้ว)
+1. ปรับ `/health` ให้ส่งข้อมูลขั้นต่ำและไม่แสดงใน OpenAPI:
+   - `backend/app/main.py` ➜ `@app.get("/health", include_in_schema=False)` คืนค่า `{"status": "ok"}` เท่านั้น
+2. รีสตาร์ท backend + nginx เพื่อโหลด config ใหม่
 
 #### ✅ การตรวจสอบ
 ```bash
-# ทดสอบ public health endpoint
-curl http://localhost/health
-# ควรได้: {"status":"ok"}
+# Health ผ่าน nginx (HTTPS, self-signed)
+curl -k https://localhost/health  # {"status":"ok"}
 
-# ทดสอบ detailed endpoint (ต้องมี auth)
-curl http://localhost/health/detailed
-# ควรได้ 401 Unauthorized (ถ้าเพิ่ม auth แล้ว)
+# docker compose ps ทุก service health = healthy
+docker compose ps
 ```
 
 ---
@@ -1343,13 +1250,13 @@ curl http://localhost/health
 - [x] สร้าง SECRET_KEY ใหม่ ✅ (23 ธ.ค. 68)
 - [x] Backup ข้อมูลก่อนเปลี่ยนแปลง ✅ (23 ธ.ค. 68)
 
-### Phase 2: Critical Fixes (1/2 เสร็จ)
+### Phase 2: Critical Fixes ✅ (เสร็จสมบูรณ์)
 - [x] เพิ่ม Redis authentication ✅ (23 ธ.ค. 68 - Bonus!)
-- [ ] ตั้งค่า network isolation (ระวังผลกระทบต่อ external APIs)
-- [ ] ทดสอบว่า services ยังทำงานได้
+- [x] ตั้งค่า network isolation + gateway egress ✅ (23 ธ.ค. 68)
+- [x] ทดสอบว่า services ยังทำงานได้ (curl external API 200, compose health = healthy) ✅
 
-### Phase 3: Enhanced Security ⏳
-- [ ] จำกัด healthcheck information
+### Phase 3: Enhanced Security (1/4 เสร็จ)
+- [x] จำกัด healthcheck information (minimal payload, hide from schema) ✅
 - [ ] เพิ่ม container security options
 - [ ] ตั้งค่า rate limiting
 - [ ] ทดสอบ rate limiting ทำงาน

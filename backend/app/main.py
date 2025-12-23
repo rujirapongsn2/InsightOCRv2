@@ -131,6 +131,8 @@ app.include_router(api_router, prefix=settings.API_V1_STR)
 def root():
     return {"message": "Welcome to Softnix InsightOCR API"}
 
-@app.get("/health")
+
+@app.get("/health", include_in_schema=False)
 def health_check():
-    return {"status": "healthy"}
+    # Return minimal info to avoid leaking version/config details
+    return {"status": "ok"}
