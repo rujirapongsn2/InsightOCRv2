@@ -42,51 +42,39 @@ git clone https://github.com/rujirapongsn2/InsightOCRv2.git
 cd InsightOCRv2
 ```
 
-2) Create environment files:
-
-**For Development:**
+2) Create environment files (root + backend + frontend):
 ```bash
+# Root (docker compose)
+cp .env.example .env
+
 # Backend
-cd backend
-cp .env.dev.example .env
-# Edit .env and update OCR_ENDPOINT, TEST_ENDPOINT as needed
+cp backend/.env.dev.example backend/.env   # หรือใช้ .env.prod.example ถ้า deploy
 
 # Frontend
-cd ../frontend
-cp .env.development.example .env.local
+cp frontend/.env.development.example frontend/.env.local
 ```
+- แก้ค่าใน `.env`, `backend/.env`, `frontend/.env.local` ให้ครบถ้วน (ดู `ENV_SETUP.md` และไฟล์ *.example เป็นแนวทาง)
+- คีย์สำคัญ: `SECRET_KEY`, `DATABASE_URL`, `BACKEND_CORS_ORIGINS`, `NEXT_PUBLIC_API_URL`, OCR endpoints/keys
 
-**For Production:**
+3) Start services (เลือกวิธีใดวิธีหนึ่ง):
 ```bash
-# Backend
-cd backend
-cp .env.prod.example .env
-# IMPORTANT: Edit .env and update all values (SECRET_KEY, DATABASE_URL, etc.)
-
-# Frontend
-cd ../frontend
-cp .env.production.example .env.local
-# Update NEXT_PUBLIC_API_URL to your production backend URL
+docker compose up -d        # หรือ
+./scripts/services.sh up    # helper script
 ```
 
-**Quick Reference:**
-- See `backend/.env.example` for all available configuration options
-- See `ENV_SETUP.md` for detailed environment configuration guide
-- Development uses `localhost` URLs by default
-- Production requires updating database, CORS, and OCR endpoints
-
-**Important Notes:**
-- Generate a strong `SECRET_KEY` for production: `openssl rand -hex 32`
-- Update `BACKEND_CORS_ORIGINS` to match your frontend domain
-- Configure `OCR_ENDPOINT` and `TEST_ENDPOINT` for your OCR service
-- Rebuild frontend after changing `NEXT_PUBLIC_API_URL` (env is baked at build time)
-
-3) Start the stack:
+4) Setup gateway/nginx (จำเป็นหลังขึ้น container แล้ว):
 ```bash
-docker compose up --build
+./scripts/setup/setup-nginx.sh
 ```
 
-4) Access the application:
+5) ตรวจสอบ services และ network isolation:
+- จะมีอย่างน้อย 8 services (backend, frontend, nginx, gateway, db, redis, minio, celery_worker)  
+  ตรวจสอบด้วย: `docker ps`
+- ยืนยัน isolation (ตัวอย่าง):  
+  `docker compose exec redis ping -c1 8.8.8.8` ➜ ควร `Network unreachable`  
+  `docker compose exec backend curl -k https://<external-api>/me` ➜ ควรเข้าถึงได้ผ่าน gateway proxy
+
+6) Access the application:
 - Frontend: http://localhost:3000
 - Backend API: http://localhost:8000
 - API Docs: http://localhost:8000/docs
