@@ -108,45 +108,20 @@ export default function JobDetailPage() {
 
     const apiBase = getApiBaseUrl()
 
-    // Function to load integrations from localStorage
-    const loadIntegrations = () => {
-        if (typeof window === "undefined") return
-        const stored = localStorage.getItem("integrations")
-        if (stored) {
-            try {
-                const parsed = JSON.parse(stored) as Integration[]
-                setIntegrations(parsed.filter(int => int.status === "active"))
-                return
-            } catch {
-                // fall through to seeds
-            }
+    // Function to load integrations from API
+    const loadIntegrations = async () => {
+        const token = typeof window !== "undefined" ? localStorage.getItem("token") : null
+        if (!token) return
+
+        try {
+            const { getActiveIntegrations } = await import("@/lib/integrations-api")
+            const activeIntegrations = await getActiveIntegrations(token)
+            setIntegrations(activeIntegrations)
+        } catch (error) {
+            console.error("Failed to load integrations:", error)
+            // Fallback to empty array on error
+            setIntegrations([])
         }
-        const seeds: Integration[] = [
-            {
-                id: "int-workflow-1",
-                name: "N8N Automation",
-                type: "workflow",
-                description: "Trigger a webhook to N8N and continue automation flows",
-                status: "active",
-                config: {
-                    webhookUrl: "https://n8n.example.com/webhook/ocr-finish",
-                    parameters: "jobId, status, fileUrl, payload, confidence"
-                }
-            },
-            {
-                id: "int-api-1",
-                name: "Core API",
-                type: "api",
-                description: "Push OCR results into the internal ERP via API",
-                status: "active",
-                config: {
-                    method: "POST",
-                    endpoint: "https://api.internal.example.com/erp/import",
-                    authHeader: "Bearer <service-token>",
-                }
-            },
-        ]
-        setIntegrations(seeds.filter(int => int.status === "active"))
     }
 
     // Load integrations on mount

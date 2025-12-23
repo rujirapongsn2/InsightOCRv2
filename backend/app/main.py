@@ -13,6 +13,7 @@ from app.models.setting import Setting
 from app.models.template import SchemaTemplate
 from app.models.ai_settings import AISettings
 from app.models.activity_log import ActivityLog
+from app.models.integration import Integration
 from app.initial_data import init_db
 from app.initial_templates import init_system_templates
 from app.initial_ai_settings import init_ai_settings

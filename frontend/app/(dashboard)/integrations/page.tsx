@@ -9,6 +9,13 @@ import { Textarea } from "@/components/ui/textarea"
 import { Modal } from "@/components/ui/modal"
 import { Plus, Pencil, Trash2, Plug, Eye, ShieldCheck } from "lucide-react"
 import { getApiBaseUrl } from "@/lib/api"
+import {
+    getIntegrations,
+    createIntegration,
+    updateIntegration,
+    deleteIntegration,
+    type Integration as APIIntegration,
+} from "@/lib/integrations-api"
 
 type IntegrationType = "api" | "workflow" | "llm"
 
@@ -31,11 +38,14 @@ type IntegrationConfig = {
 
 interface Integration {
     id: string
+    user_id?: string
     name: string
     type: IntegrationType
-    description: string
+    description?: string
     status: "active" | "paused"
-    updatedAt: string
+    updatedAt?: string
+    updated_at?: string
+    created_at?: string
     config: IntegrationConfig
 }
 
@@ -118,7 +128,7 @@ const seedIntegrations: Integration[] = [
 ]
 
 export default function IntegrationsPage() {
-    const { user } = useAuth()
+    const { user, token } = useAuth()
     const normalizedRole = useMemo(() => {
         if (!user?.role) return "user"
         return user.role === "documents_admin" ? "manager" : user.role
@@ -135,26 +145,80 @@ export default function IntegrationsPage() {
     const [testInput, setTestInput] = useState("")
     const [testResult, setTestResult] = useState<string | null>(null)
     const [testLoading, setTestLoading] = useState(false)
+    // Loading and error states
+    const [loading, setLoading] = useState(false)
+    const [error, setError] = useState<string | null>(null)
 
-    // Load persisted integrations (localStorage fallback)
+    // Load integrations from API
     useEffect(() => {
-        if (typeof window === "undefined") return
-        const stored = localStorage.getItem("integrations")
-        if (stored) {
-            try {
-                setIntegrations(JSON.parse(stored))
-                return
-            } catch {
-                // ignore parse error and fall back to seeds
-            }
-        }
-        setIntegrations(seedIntegrations)
-    }, [])
+        loadIntegrations()
+    }, [token])
 
-    const persistIntegrations = (items: Integration[]) => {
-        setIntegrations(items)
-        if (typeof window !== "undefined") {
-            localStorage.setItem("integrations", JSON.stringify(items))
+    const loadIntegrations = async () => {
+        if (!token) return
+
+        setLoading(true)
+        setError(null)
+
+        try {
+            const data = await getIntegrations(token)
+            setIntegrations(data.integrations as Integration[])
+
+            // Migrate localStorage data if this is first load
+            await migrateLocalStorageData()
+        } catch (err) {
+            console.error("Failed to load integrations:", err)
+            setError(err instanceof Error ? err.message : "Failed to load integrations")
+        } finally {
+            setLoading(false)
+        }
+    }
+
+    // Migrate localStorage data to database (runs once)
+    const migrateLocalStorageData = async () => {
+        if (!token) return
+
+        const migrated = localStorage.getItem("integrations_migrated")
+        if (migrated === "true") return
+
+        const stored = localStorage.getItem("integrations")
+        if (!stored) {
+            localStorage.setItem("integrations_migrated", "true")
+            return
+        }
+
+        try {
+            const localIntegrations = JSON.parse(stored) as Integration[]
+
+            // Only migrate if database is empty
+            const { integrations: dbIntegrations } = await getIntegrations(token)
+            if (dbIntegrations.length > 0) {
+                localStorage.setItem("integrations_migrated", "true")
+                return
+            }
+
+            // Migrate each integration
+            console.log(`Migrating ${localIntegrations.length} integrations from localStorage...`)
+            for (const integration of localIntegrations) {
+                try {
+                    await createIntegration(token, {
+                        name: integration.name,
+                        type: integration.type,
+                        description: integration.description || "",
+                        status: integration.status,
+                        config: integration.config,
+                    })
+                } catch (error) {
+                    console.error(`Failed to migrate integration: ${integration.name}`, error)
+                }
+            }
+
+            // Reload integrations after migration
+            await loadIntegrations()
+            localStorage.setItem("integrations_migrated", "true")
+            console.log("✓ Successfully migrated integrations to database")
+        } catch (error) {
+            console.error("Migration failed:", error)
         }
     }
 
@@ -187,47 +251,82 @@ export default function IntegrationsPage() {
         setShowForm(true)
     }
 
-    const handleDelete = (id: string) => {
+    const handleDelete = async (id: string) => {
         if (normalizedRole !== "admin") return
         if (!confirm("Delete this integration?")) return
-        persistIntegrations(integrations.filter((item) => item.id !== id))
+        if (!token) return
+
+        try {
+            await deleteIntegration(token, id)
+            setIntegrations(integrations.filter((item) => item.id !== id))
+        } catch (err) {
+            console.error("Failed to delete integration:", err)
+            alert(err instanceof Error ? err.message : "Failed to delete integration")
+        }
     }
 
-    const handleSubmit = (e: React.FormEvent<HTMLFormElement>) => {
+    const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
         e.preventDefault()
-        if (normalizedRole !== "admin") return
-        const payload: Integration = {
-            id: editingId || `int-${Date.now()}`,
-            name: formState.name,
-            type: formState.type,
-            description: formState.description,
-            status: formState.status,
-            updatedAt: new Date().toISOString(),
-            config: {
-                method: formState.type === "workflow" ? undefined : formState.method,
-                endpoint: formState.type === "workflow" ? undefined : formState.endpoint,
-                authHeader: formState.type === "workflow" ? undefined : formState.authHeader,
-                headersJson: formState.type === "workflow" ? undefined : formState.headersJson,
-                payloadTemplate: formState.type === "workflow" ? undefined : formState.payloadTemplate,
-                webhookUrl: formState.type === "workflow" ? formState.webhookUrl : undefined,
-                parameters: formState.parameters,
-                model: formState.type === "llm" ? formState.model : undefined,
-                apiKey: formState.type === "llm" ? formState.apiKey : undefined,
-                baseUrl: formState.type === "llm" ? formState.baseUrl : undefined,
-                instructions: formState.type === "llm" ? formState.instructions : undefined,
-                reasoningEffort: formState.type === "llm" ? formState.reasoningEffort : undefined,
+
+        if (normalizedRole !== "admin") {
+            alert("Only admins can create integrations")
+            return
+        }
+
+        if (!token) {
+            alert("Please login to continue")
+            return
+        }
+
+        // Set loading state
+        setLoading(true)
+
+        const configData = {
+            method: formState.method,
+            endpoint: formState.endpoint,
+            authHeader: formState.authHeader,
+            headersJson: formState.headersJson,
+            payloadTemplate: formState.payloadTemplate,
+            webhookUrl: formState.webhookUrl,
+            parameters: formState.parameters,
+            model: formState.model,
+            apiKey: formState.apiKey,
+            baseUrl: formState.baseUrl,
+            instructions: formState.instructions,
+            reasoningEffort: formState.reasoningEffort,
+        }
+
+        try {
+            if (editingId) {
+                // Update existing integration
+                const updated = await updateIntegration(token, editingId, {
+                    name: formState.name,
+                    type: formState.type,
+                    description: formState.description,
+                    status: formState.status,
+                    config: configData,
+                })
+                setIntegrations(integrations.map((item) => (item.id === editingId ? updated as Integration : item)))
+            } else {
+                // Create new integration
+                const created = await createIntegration(token, {
+                    name: formState.name,
+                    type: formState.type,
+                    description: formState.description,
+                    status: formState.status,
+                    config: configData,
+                })
+                setIntegrations([...integrations, created as Integration])
             }
+            setShowForm(false)
+            setFormState(defaultFormState)
+            setEditingId(null)
+        } catch (err) {
+            console.error("Failed to save integration:", err)
+            alert(err instanceof Error ? err.message : "Failed to save integration")
+        } finally {
+            setLoading(false)
         }
-
-        if (editingId) {
-            persistIntegrations(integrations.map((item) => item.id === editingId ? payload : item))
-        } else {
-            persistIntegrations([payload, ...integrations])
-        }
-
-        setShowForm(false)
-        setEditingId(null)
-        setFormState(defaultFormState)
     }
 
     const parseCurlCommand = (curlText: string) => {

@@ -1,15 +1,197 @@
 from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
+from uuid import UUID
 from openai import OpenAI
 from sqlalchemy.orm import Session
 from app.api import deps
 from app.models.user import User
+from app.schemas.integration import (
+    IntegrationCreate,
+    IntegrationUpdate,
+    IntegrationResponse,
+    IntegrationListResponse
+)
+from app.crud.crud_integration import integration as crud_integration
 from app.utils.activity_logger import log_activity, Actions
 import json
 
 router = APIRouter()
 
+
+# ============================================================================
+# Integration CRUD Endpoints
+# ============================================================================
+
+@router.get("/", response_model=IntegrationListResponse)
+async def get_integrations(
+    skip: int = 0,
+    limit: int = 100,
+    status: Optional[str] = None,
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_user)
+):
+    """
+    Get all integrations for the current user.
+
+    Query parameters:
+    - skip: Number of integrations to skip (pagination)
+    - limit: Maximum number of integrations to return
+    - status: Filter by status (active/paused)
+    """
+    integrations = crud_integration.get_by_user(
+        db=db,
+        user_id=current_user.id,
+        skip=skip,
+        limit=limit,
+        status=status
+    )
+    total = crud_integration.count_by_user(db=db, user_id=current_user.id)
+
+    return IntegrationListResponse(
+        integrations=integrations,
+        total=total
+    )
+
+
+@router.get("/active", response_model=List[IntegrationResponse])
+async def get_active_integrations(
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_user)
+):
+    """Get all active integrations for the current user."""
+    integrations = crud_integration.get_active_by_user(db=db, user_id=current_user.id)
+    return integrations
+
+
+@router.get("/{integration_id}", response_model=IntegrationResponse)
+async def get_integration(
+    integration_id: UUID,
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_user)
+):
+    """Get a specific integration by ID."""
+    integration = crud_integration.get(db=db, integration_id=integration_id)
+
+    if not integration:
+        raise HTTPException(status_code=404, detail="Integration not found")
+
+    # Check if user owns this integration
+    if integration.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized to access this integration")
+
+    return integration
+
+
+@router.post("/", response_model=IntegrationResponse, status_code=201)
+async def create_integration(
+    integration_data: IntegrationCreate,
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_user)
+):
+    """Create a new integration."""
+    integration = crud_integration.create(
+        db=db,
+        integration=integration_data,
+        user_id=current_user.id
+    )
+
+    # Log activity
+    log_activity(
+        db=db,
+        user_id=current_user.id,
+        action=Actions.CREATE_INTEGRATION,
+        resource_type="integration",
+        resource_id=str(integration.id),
+        details={
+            "name": integration.name,
+            "type": integration.type,
+            "status": integration.status
+        }
+    )
+
+    return integration
+
+
+@router.put("/{integration_id}", response_model=IntegrationResponse)
+async def update_integration(
+    integration_id: UUID,
+    integration_data: IntegrationUpdate,
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_user)
+):
+    """Update an existing integration."""
+    # Check if integration exists and user owns it
+    existing = crud_integration.get(db=db, integration_id=integration_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Integration not found")
+
+    if existing.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized to update this integration")
+
+    # Update integration
+    updated_integration = crud_integration.update(
+        db=db,
+        integration_id=integration_id,
+        integration=integration_data
+    )
+
+    # Log activity
+    log_activity(
+        db=db,
+        user_id=current_user.id,
+        action=Actions.UPDATE_INTEGRATION,
+        resource_type="integration",
+        resource_id=str(integration_id),
+        details={
+            "name": updated_integration.name,
+            "type": updated_integration.type,
+            "status": updated_integration.status
+        }
+    )
+
+    return updated_integration
+
+
+@router.delete("/{integration_id}", status_code=204)
+async def delete_integration(
+    integration_id: UUID,
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_user)
+):
+    """Delete an integration."""
+    # Check if integration exists and user owns it
+    existing = crud_integration.get(db=db, integration_id=integration_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Integration not found")
+
+    if existing.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized to delete this integration")
+
+    # Delete integration
+    success = crud_integration.delete(db=db, integration_id=integration_id)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to delete integration")
+
+    # Log activity
+    log_activity(
+        db=db,
+        user_id=current_user.id,
+        action=Actions.DELETE_INTEGRATION,
+        resource_type="integration",
+        resource_id=str(integration_id),
+        details={
+            "name": existing.name,
+            "type": existing.type
+        }
+    )
+
+    return None
+
+
+# ============================================================================
+# LLM Integration Endpoints
+# ============================================================================
 
 class TestLLMRequest(BaseModel):
     apiKey: str
