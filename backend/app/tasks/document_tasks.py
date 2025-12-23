@@ -163,7 +163,13 @@ def process_document_task(self, document_id: str, schema_id: str):
             for page_num in range(1, page_count + 1):
                 try:
                     # Call OCR for this specific page
-                    ocr_result = process_ocr(local_file_path, db, page_number=page_num)
+                    ocr_result = process_ocr(
+                        local_file_path,
+                        db,
+                        page_number=page_num,
+                        filename=document.filename,
+                        mime_type=document.mime_type
+                    )
                     
                     # Extract content from OCR API response
                     page_content = ""

@@ -1,6 +1,6 @@
 from typing import List, Any, Optional
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from app.models.user import User
 from sqlalchemy.orm import Session
 from app.api import deps
@@ -328,7 +328,7 @@ async def extract_ocr_for_suggestion(
             shutil.copyfileobj(file.file, buffer)
 
         # Process OCR
-        ocr_result = process_ocr(file_path, db)
+        ocr_result = process_ocr(file_path, db, filename=file.filename, mime_type=file.content_type)
 
         # Extract text content
         ocr_content = ""
@@ -461,12 +461,21 @@ def download_document_file(
             logger.error(f"Download error: {e}")
             raise HTTPException(status_code=404, detail="File not found")
 
-    # For remote storage, redirect to presigned URL
-    url = storage.get_presigned_url(document.file_path)
-    if not url:
-        raise HTTPException(status_code=500, detail="Could not generate download URL")
+    # For remote storage, download from storage and stream to client
+    with storage.get_local_path(document.file_path) as local_file_path:
+        # get_local_path returns a file path string, not a file object
+        # Read file content into memory before context manager exits
+        with open(local_file_path, 'rb') as f:
+            file_content = f.read()
 
-    return RedirectResponse(url)
+        def iter_file():
+            yield file_content
+
+        return StreamingResponse(
+            iter_file(),
+            media_type=document.mime_type or "application/pdf",
+            headers={"Content-Disposition": f'inline; filename="{document.filename}"'}
+        )
 
 @router.delete("/{document_id}")
 def delete_document(

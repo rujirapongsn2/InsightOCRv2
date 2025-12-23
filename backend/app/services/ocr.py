@@ -32,7 +32,7 @@ def count_pdf_pages(file_path: str) -> int:
     except Exception as e:
         raise ValueError(f"Failed to read PDF: {str(e)}")
 
-def process_ocr(file_path: str, db: Session, page_number: int = 1) -> dict:
+def process_ocr(file_path: str, db: Session, page_number: int = 1, filename: str = None, mime_type: str = None) -> dict:
     """
     Process a specific page of a file using the external OCR service.
 
@@ -40,6 +40,8 @@ def process_ocr(file_path: str, db: Session, page_number: int = 1) -> dict:
         file_path: Path to the file to process.
         db: Database session to fetch settings.
         page_number: Specific page number to process (default: 1).
+        filename: Original filename (used to determine content type if mime_type not provided).
+        mime_type: MIME type of the file (overrides filename-based detection).
 
     Returns:
         A dictionary containing the OCR result for the specified page.
@@ -85,23 +87,35 @@ def process_ocr(file_path: str, db: Session, page_number: int = 1) -> dict:
     }
 
     try:
-        # Determine file content type based on extension
-        file_ext = os.path.splitext(file_path)[1].lower()
-        content_type = 'application/pdf' if file_ext == '.pdf' else f'image/{file_ext[1:]}'
+        # Determine file content type
+        # Priority: mime_type > filename > temp file path
+        if mime_type:
+            content_type = mime_type
+        elif filename:
+            file_ext = os.path.splitext(filename)[1].lower()
+            content_type = 'application/pdf' if file_ext == '.pdf' else f'image/{file_ext[1:]}'
+        else:
+            # Fallback to checking temp file path (may not have extension)
+            file_ext = os.path.splitext(file_path)[1].lower()
+            content_type = 'application/pdf' if file_ext == '.pdf' else f'image/{file_ext[1:]}' if file_ext else 'application/octet-stream'
 
         # Debug logging
+        upload_filename = filename if filename else os.path.basename(file_path)
         print("=" * 80)
         print("OCR REQUEST DEBUG:")
         print(f"URL: {ocr_api_url}")
-        print(f"File: {os.path.basename(file_path)}")
+        print(f"Upload Filename: {upload_filename}")
         print(f"Content-Type: {content_type}")
         print(f"Headers: {headers}")
         print(f"Data: {data}")
         print("=" * 80)
 
         with open(file_path, 'rb') as f:
+            # Use original filename if available, otherwise use temp file path
+            upload_filename = filename if filename else os.path.basename(file_path)
+
             files = {
-                'file': (os.path.basename(file_path), f, content_type)
+                'file': (upload_filename, f, content_type)
             }
 
             response = requests.post(
