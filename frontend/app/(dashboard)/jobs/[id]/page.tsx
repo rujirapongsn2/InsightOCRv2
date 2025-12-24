@@ -63,7 +63,7 @@ interface Integration {
     id: string
     name: string
     type: IntegrationType
-    description: string
+    description?: string
     status: "active" | "paused"
     config: IntegrationConfig
 }

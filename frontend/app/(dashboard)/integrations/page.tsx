@@ -246,7 +246,7 @@ export default function IntegrationsPage() {
         setFormState({
             name: integration.name,
             type: integration.type,
-            description: integration.description,
+            description: integration.description || "",
             status: integration.status,
             method: (integration.config.method as "POST" | "PUT") || "POST",
             endpoint: integration.config.endpoint || "",
@@ -435,13 +435,13 @@ export default function IntegrationsPage() {
                                     </Button>
                                 )}
                             </div>
-                                    <Textarea
-                                        placeholder='curl -X POST "https://api.example.com" -H "Authorization: Bearer token" -H "Content-Type: application/json" -d "{\"foo\":\"bar\"}"'
-                                        value={curlInput}
-                                        onChange={(e) => setCurlInput(e.target.value)}
-                                        rows={3}
-                                        disabled={isUser}
-                                    />
+                            <Textarea
+                                placeholder='curl -X POST "https://api.example.com" -H "Authorization: Bearer token" -H "Content-Type: application/json" -d "{\"foo\":\"bar\"}"'
+                                value={curlInput}
+                                onChange={(e) => setCurlInput(e.target.value)}
+                                rows={3}
+                                disabled={isUser}
+                            />
                         </div>
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                             <div className="space-y-2">
@@ -653,7 +653,7 @@ export default function IntegrationsPage() {
                                     >
                                         {testLoading ? "Testing..." : "Test Connection"}
                                     </Button>
-                                     </div>
+                                </div>
                             </div>
                         )}
                     </div>
@@ -761,11 +761,10 @@ export default function IntegrationsPage() {
                                 {testLoading ? "Testing..." : "Test Connection"}
                             </Button>
                             {testResult && (
-                                <div className={`p-3 rounded-md text-sm font-mono whitespace-pre-wrap ${
-                                    testResult.startsWith("✓")
+                                <div className={`p-3 rounded-md text-sm font-mono whitespace-pre-wrap ${testResult.startsWith("✓")
                                         ? "bg-green-50 text-green-800 border border-green-200"
                                         : "bg-red-50 text-red-800 border border-red-200"
-                                }`}>
+                                    }`}>
                                     {testResult}
                                 </div>
                             )}
@@ -935,7 +934,7 @@ export default function IntegrationsPage() {
                                     </span>
                                 </div>
                                 <p className="text-slate-600">{integration.description}</p>
-                                <div className="text-xs text-slate-500">Updated {new Date(integration.updatedAt).toLocaleString()}</div>
+                                <div className="text-xs text-slate-500">Updated {new Date(integration.updatedAt || integration.updated_at || integration.created_at || Date.now()).toLocaleString()}</div>
                             </div>
                             <div className="flex items-center gap-2">
                                 {isUser && (
@@ -1014,7 +1013,7 @@ export default function IntegrationsPage() {
                             disabled={isUser}
                         />
                     </div>
-                    
+
                     {renderTypeFields()}
 
                     {isUser ? (

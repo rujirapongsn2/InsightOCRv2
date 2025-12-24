@@ -16,10 +16,28 @@ services:
     networks:
       - public
       - internal
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+      - CHOWN
+      - SETGID
+      - SETUID
+    read_only: true
+    tmpfs:
+      - /var/cache/nginx
+      - /var/run
+      - /tmp
+    deploy:
+      resources:
+        limits:
+          memory: 256M
     restart: unless-stopped
     healthcheck:
       # Use HTTPS directly on IPv4 loopback to avoid redirects/IPv6 resolution issues
-      test: ["CMD", "wget", "--no-check-certificate", "--quiet", "--tries=1", "--spider", "https://127.0.0.1/health"]
+      test: [ "CMD", "wget", "--no-check-certificate", "--quiet", "--tries=1", "--spider", "https://127.0.0.1/health" ]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -41,10 +59,23 @@ services:
       - db
       - redis
     networks:
-      - internal    # isolate; outbound via gateway proxy
+      - internal # isolate; outbound via gateway proxy
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    read_only: true
+    tmpfs:
+      - /tmp
+    deploy:
+      resources:
+        limits:
+          memory: 1G
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: [ "CMD", "curl", "-f", "http://localhost:8000/health" ]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -66,7 +97,18 @@ services:
       - redis
       - backend
     networks:
-      - internal    # isolate; outbound via gateway proxy
+      - internal # isolate; outbound via gateway proxy
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+    deploy:
+      resources:
+        limits:
+          memory: 1G
     restart: unless-stopped
 
   frontend:
@@ -74,18 +116,32 @@ services:
     container_name: softnix_ocr_frontend
     expose:
       - "3000"
-    volumes:
-      - ./frontend:/app
-      - /app/node_modules
+    # volumes:
+    #   - ./frontend:/app
+    #   - /app/node_modules
     env_file:
       - ./frontend/.env.local
     depends_on:
       - backend
     networks:
       - internal
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    read_only: true
+    tmpfs:
+      - /tmp:size=10M
+      - /run:size=1M
+    deploy:
+      resources:
+        limits:
+          memory: 512M
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3000"]
+      test: [ "CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3000" ]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -103,11 +159,17 @@ services:
       - postgres_data:/var/lib/postgresql/data
     networks:
       - internal
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          memory: 1G
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres}"]
-      interval: 30s
-      timeout: 10s
+      test: [ "CMD-SHELL", "pg_isready -U ${DB_USER:-postgres}" ]
+      interval: 3s
+      timeout: 5s
       retries: 3
 
   redis:
@@ -120,9 +182,15 @@ services:
       - "6379"
     networks:
       - internal
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          memory: 256M
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      test: [ "CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping" ]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -146,9 +214,15 @@ services:
       - minio_data:/data
     networks:
       - internal
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          memory: 1G
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      test: [ "CMD", "curl", "-f", "http://localhost:9000/minio/health/live" ]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -159,15 +233,30 @@ services:
     expose:
       - "8888"
     networks:
-      - public    # egress to internet
-      - internal  # reachable from backend/worker
+      - public # egress to internet
+      - internal # reachable from backend/worker
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+    read_only: true
+    tmpfs:
+      - /run/tinyproxy:size=1M,uid=100,gid=102
+      - /var/log/tinyproxy:size=1M,uid=100,gid=102
+      - /tmp:size=1M
     restart: unless-stopped
 networks:
   public:
     driver: bridge
   internal:
     driver: bridge
-    internal: ${DOCKER_INTERNAL_NETWORK:-true}   # isolate DB/Redis/MinIO; override with DOCKER_INTERNAL_NETWORK=false for local dev
+    internal: ${DOCKER_INTERNAL_NETWORK:-true} # isolate DB/Redis/MinIO; override with DOCKER_INTERNAL_NETWORK=false for local dev
 
 volumes:
   postgres_data:
