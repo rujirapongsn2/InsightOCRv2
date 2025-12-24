@@ -66,6 +66,7 @@ class AISuggestionService:
             "inputs": {
                 "ocr_content": ocr_content
             },
+            "user": "insightocr_system",
             "citation": True,
             "response_mode": "blocking"
         }
@@ -89,7 +90,10 @@ class AISuggestionService:
                 result = response.json()
 
         except httpx.HTTPError as e:
-            logger.error(f"Error calling AI API: {str(e)}")
+            error_msg = f"Error calling AI API: {str(e)}"
+            if hasattr(e, 'response') and e.response:
+                error_msg += f" | Status: {e.response.status_code} | Body: {e.response.text}"
+            logger.error(error_msg)
             raise ValueError(f"Failed to call AI provider: {str(e)}")
         except Exception as e:
             logger.error(f"Unexpected error: {str(e)}")

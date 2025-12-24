@@ -317,48 +317,50 @@ async def extract_ocr_for_suggestion(
             detail="Invalid file type. Only PDF, JPG, and PNG are allowed."
         )
 
-    # Save file temporarily
+    # Generate temp file key for storage
     file_ext = os.path.splitext(file.filename)[1]
-    file_name = f"temp_{uuid.uuid4()}{file_ext}"
-    file_path = os.path.join(UPLOAD_DIR, file_name)
+    file_key = f"temp/{uuid.uuid4()}{file_ext}"
+    
+    storage = get_storage_service()
 
     try:
-        # Save file
-        with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
+        # Upload file to storage (MinIO or S3)
+        storage.upload_file(file.file, file_key, content_type=file.content_type)
+        
+        # Get local path for OCR processing (downloads if remote)
+        with storage.get_local_path(file_key) as local_file_path:
+            # Process OCR
+            ocr_result = process_ocr(local_file_path, db, filename=file.filename, mime_type=file.content_type)
 
-        # Process OCR
-        ocr_result = process_ocr(file_path, db, filename=file.filename, mime_type=file.content_type)
+            # Extract text content
+            ocr_content = ""
+            if ocr_result.get('status') == 'success':
+                pages = ocr_result.get('results', {}).get('pages', [])
+                for page in pages:
+                    page_num = page.get('page_number')
+                    ocr_content += f"--- Page {page_num} ---\n"
+                    
+                    # Try AI processing first
+                    ai_processing = page.get('ai_processing', {})
+                    if ai_processing.get('success') and ai_processing.get('content'):
+                        ocr_content += ai_processing.get('content', '') + "\n\n"
+                    # Fallback to raw OCR text if AI processing failed or empty
+                    elif page.get('ocr_text'):
+                        ocr_content += page.get('ocr_text', '') + "\n\n"
 
-        # Extract text content
-        ocr_content = ""
-        if ocr_result.get('status') == 'success':
-            pages = ocr_result.get('results', {}).get('pages', [])
-            for page in pages:
-                page_num = page.get('page_number')
-                ocr_content += f"--- Page {page_num} ---\n"
-                
-                # Try AI processing first
-                ai_processing = page.get('ai_processing', {})
-                if ai_processing.get('success') and ai_processing.get('content'):
-                    ocr_content += ai_processing.get('content', '') + "\n\n"
-                # Fallback to raw OCR text if AI processing failed or empty
-                elif page.get('ocr_text'):
-                    ocr_content += page.get('ocr_text', '') + "\n\n"
+            if not ocr_content:
+                raise HTTPException(
+                    status_code=400,
+                    detail="No text could be extracted from the document"
+                )
 
-        if not ocr_content:
-            raise HTTPException(
-                status_code=400,
-                detail="No text could be extracted from the document"
-            )
-
-        return {
-            "status": "success",
-            "ocr_text": ocr_content,
-            "text_content": ocr_content,
-            "filename": file.filename,
-            "pages": len(pages) if 'pages' in locals() else 1
-        }
+            return {
+                "status": "success",
+                "ocr_text": ocr_content,
+                "text_content": ocr_content,
+                "filename": file.filename,
+                "pages": len(pages) if 'pages' in locals() else 1
+            }
 
     except ValueError as e:
         # Settings not configured or valid
@@ -373,12 +375,11 @@ async def extract_ocr_for_suggestion(
             detail=f"OCR extraction failed: {str(e)}"
         )
     finally:
-        # Cleanup temporary file
-        if os.path.exists(file_path):
-            try:
-                os.remove(file_path)
-            except:
-                pass
+        # Cleanup temp file from storage
+        try:
+            storage.delete_file(file_key)
+        except Exception as cleanup_error:
+            logger.warning(f"Failed to cleanup temp file {file_key}: {cleanup_error}")
 
 from app.schemas.document import DocumentUpdate
 

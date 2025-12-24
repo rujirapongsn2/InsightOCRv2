@@ -24,6 +24,7 @@ __pycache__/
 connection_test_result.txt
 debug_*.py
 test_*.py
+!test/test_softnix_genai.py
 temp_*.py
 fix_*.py
 update_*.py
