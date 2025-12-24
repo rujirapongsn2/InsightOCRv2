@@ -28,8 +28,9 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-UPLOAD_DIR = "/app/uploads" # Inside container
-os.makedirs(UPLOAD_DIR, exist_ok=True)
+# UPLOAD_DIR is kept for legacy compatibility with local storage
+# Directory creation is handled by LocalStorage class in storage.py
+UPLOAD_DIR = "/app/uploads"
 
 def parse_extracted_json(extracted_data: Any) -> Any:
     """
