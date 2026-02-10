@@ -688,7 +688,7 @@ export default function IntegrationsPage() {
                             <div className="space-y-2">
                                 <label className="text-sm font-medium">Test Payload (JSON)</label>
                                 <Textarea
-                                    placeholder='{"test": true, "message": "Connection test from InsightOCR"}'
+                                    placeholder='{"test": true, "message": "Connection test from InsightDOC"}'
                                     value={testInput}
                                     onChange={(e) => setTestInput(e.target.value)}
                                     disabled={isUser || testLoading}
@@ -711,7 +711,7 @@ export default function IntegrationsPage() {
                                         // Prepare test payload
                                         let payload: any = {
                                             test: true,
-                                            message: "Connection test from InsightOCR",
+                                            message: "Connection test from InsightDOC",
                                             timestamp: new Date().toISOString()
                                         }
 

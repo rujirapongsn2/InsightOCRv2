@@ -22,6 +22,7 @@ import json
 import re
 import logging
 from pydantic import BaseModel
+from urllib.parse import quote
 
 # Configure logging for structure extraction debugging
 logger = logging.getLogger(__name__)
@@ -465,18 +466,21 @@ def download_document_file(
 
     # For remote storage, download from storage and stream to client
     with storage.get_local_path(document.file_path) as local_file_path:
-        # get_local_path returns a file path string, not a file object
-        # Read file content into memory before context manager exits
         with open(local_file_path, 'rb') as f:
             file_content = f.read()
 
         def iter_file():
             yield file_content
 
+        # RFC 5987: use filename* with UTF-8 encoding for non-ASCII filenames
+        encoded_filename = quote(document.filename)
         return StreamingResponse(
             iter_file(),
             media_type=document.mime_type or "application/pdf",
-            headers={"Content-Disposition": f'inline; filename="{document.filename}"'}
+            headers={
+                "Content-Disposition": f"inline; filename*=UTF-8''{encoded_filename}",
+                "Content-Length": str(len(file_content)),
+            }
         )
 
 @router.delete("/{document_id}")

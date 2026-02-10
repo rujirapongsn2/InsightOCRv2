@@ -1,8 +1,8 @@
-# InsightOCR
+# InsightDOC
 
 A modern document processing system with OCR (Optical Character Recognition) and structured data extraction capabilities. Built with FastAPI backend and Next.js (App Router) frontend.
 
-![Softnix InsightOCR Dashboard](assets/dashboard_preview.png)
+![Softnix InsightDOC Dashboard](assets/dashboard_preview.png)
 
 ## Features
 
@@ -38,8 +38,8 @@ A modern document processing system with OCR (Optical Character Recognition) and
 
 1) Clone the repository:
 ```bash
-git clone https://github.com/rujirapongsn2/InsightOCRv2.git
-cd InsightOCRv2
+git clone https://github.com/rujirapongsn2/InsightDOCv2.git
+cd InsightDOCv2
 ```
 
 2) Create environment files (root + backend + frontend):
@@ -190,7 +190,7 @@ Navigate to `/settings` and configure:
 ## Project Structure
 
 ```
-InsightOCRv2/
+InsightDOCv2/
 ├── backend/
 │   ├── app/
 │   │   ├── api/          # API endpoints
@@ -208,7 +208,7 @@ InsightOCRv2/
 
 ## External API Configuration
 
-InsightOCR integrates with an external AI service for OCR processing and structured data extraction. The external API provides the following endpoints:
+InsightDOC integrates with an external AI service for OCR processing and structured data extraction. The external API provides the following endpoints:
 
 ### 1. Authentication Test Endpoint
 - **URL**: `https://111.223.37.41:9001/me`

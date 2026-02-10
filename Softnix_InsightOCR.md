@@ -1,7 +1,7 @@
-# Softnix InsightOCR
+# Softnix InsightDOC
 
 ## 1. Executive Summary
-**Softnix InsightOCR** is an intelligent document processing solution designed to automate data extraction from various document types (Invoices, POs, Tax Forms, etc.) using a combination of **OCR (Optical Character Recognition)** and **LLM (Large Language Model)** technologies.
+**Softnix InsightDOC** is an intelligent document processing solution designed to automate data extraction from various document types (Invoices, POs, Tax Forms, etc.) using a combination of **OCR (Optical Character Recognition)** and **LLM (Large Language Model)** technologies.
 
 The system allows users to upload documents, define schemas for extraction, validate the extracted data, and export the results to other systems via API or file formats.
 

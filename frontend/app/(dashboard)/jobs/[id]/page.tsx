@@ -1,15 +1,16 @@
 "use client"
 
 import { useEffect, useState, useRef, useMemo } from "react"
-import { useParams } from "next/navigation"
+import { useParams, useRouter } from "next/navigation"
 import Link from "next/link"
-import { ArrowLeft, Upload, FileText, Loader2, Eye, X, Trash2 } from "lucide-react"
+import { ArrowLeft, Upload, FileText, Loader2, Eye, X, Trash2, AlertTriangle } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Modal } from "@/components/ui/modal"
 import { Textarea } from "@/components/ui/textarea"
 import { Input } from "@/components/ui/input"
 import dynamic from "next/dynamic"
 import { getApiBaseUrl } from "@/lib/api"
+import { useAuth } from "@/components/auth-provider"
 
 const PDFViewer = dynamic(
     () => import("@/components/document/PDFViewer").then(mod => mod.PDFViewer),
@@ -26,6 +27,7 @@ interface Job {
     status: string
     created_at?: string
     user_name?: string
+    user_id?: string
 }
 
 interface Document {
@@ -81,6 +83,8 @@ interface Schema {
 
 export default function JobDetailPage() {
     const params = useParams()
+    const router = useRouter()
+    const { user } = useAuth()
     const jobId = params.id as string
     const [job, setJob] = useState<Job | null>(null)
     const [documents, setDocuments] = useState<Document[]>([])
@@ -100,11 +104,17 @@ export default function JobDetailPage() {
     // LLM Results for export
     const [llmResults, setLlmResults] = useState<Array<{ id: string; filename: string; output: string; success: boolean; error?: string }>>([])
     const [showLlmResultsModal, setShowLlmResultsModal] = useState(false)
-    // Delete confirmation
+    // Delete confirmation (document)
     const [deleteConfirmDoc, setDeleteConfirmDoc] = useState<Document | null>(null)
     const [deleting, setDeleting] = useState(false)
+    // Delete confirmation (job)
+    const [showDeleteJobConfirm, setShowDeleteJobConfirm] = useState(false)
+    const [deletingJob, setDeletingJob] = useState(false)
     // Image viewer state
     const [imageUrl, setImageUrl] = useState<string | null>(null)
+    // Reject document from review modal
+    const [rejectConfirm, setRejectConfirm] = useState(false)
+    const [rejecting, setRejecting] = useState(false)
 
     const apiBase = getApiBaseUrl()
 
@@ -354,6 +364,52 @@ export default function JobDetailPage() {
         }
     }
 
+    const handleDeleteJob = async () => {
+        try {
+            setDeletingJob(true)
+            const token = typeof window !== "undefined" ? localStorage.getItem("token") : null
+            const response = await fetch(`${apiBase}/jobs/${jobId}`, {
+                method: "DELETE",
+                headers: {
+                    Authorization: `Bearer ${token}`,
+                },
+            })
+            if (!response.ok) {
+                throw new Error("Failed to delete job")
+            }
+            router.push("/jobs")
+        } catch (error) {
+            console.error("Delete job error:", error)
+            alert("Failed to delete job. Please try again.")
+        } finally {
+            setDeletingJob(false)
+            setShowDeleteJobConfirm(false)
+        }
+    }
+
+    const handleRejectDocument = async () => {
+        if (!reviewDoc) return
+        try {
+            setRejecting(true)
+            const token = localStorage.getItem("token")
+            const res = await fetch(`${apiBase}/documents/${reviewDoc.id}`, {
+                method: "DELETE",
+                headers: { Authorization: `Bearer ${token}` },
+            })
+            if (!res.ok) throw new Error("Failed to reject document")
+            await fetchDocuments()
+            setReviewDoc(null)
+            setRejectConfirm(false)
+        } catch (error) {
+            console.error("Reject error:", error)
+            alert("Failed to reject document. Please try again.")
+        } finally {
+            setRejecting(false)
+        }
+    }
+
+    const canDeleteJob = user && job && (user.is_superuser || user.role === "admin" || user.id === job.user_id)
+
     const normalizeExtractedData = (data: unknown): ExtractedEntry[] => {
         if (!data) return []
 
@@ -399,6 +455,7 @@ export default function JobDetailPage() {
 
     const handleReview = (doc: Document) => {
         setReviewDoc(doc)
+        setRejectConfirm(false)
         setEditedOcrText(doc.ocr_text || "")
         // Normalize extracted data so multi-page/JSON-string responses display correctly
         const normalizedData = normalizeExtractedData(doc.reviewed_data || doc.extracted_data)
@@ -596,13 +653,24 @@ export default function JobDetailPage() {
                     <h2 className="text-2xl font-bold tracking-tight">{job.name}</h2>
                     <p className="text-slate-500">{job.description}</p>
                 </div>
-                <div className="ml-auto">
+                <div className="ml-auto flex items-center gap-3">
                     <span className={`px-3 py-1 rounded-full text-sm font-medium ${job.status === 'completed' ? 'bg-green-100 text-green-800' :
                         job.status === 'processing' ? 'bg-blue-100 text-blue-800' :
                             'bg-slate-100 text-slate-800'
                         }`}>
                         {job.status.toUpperCase()}
                     </span>
+                    {canDeleteJob && (
+                        <Button
+                            variant="outline"
+                            size="sm"
+                            className="text-red-600 hover:text-red-700 hover:bg-red-50 border-red-200"
+                            onClick={() => setShowDeleteJobConfirm(true)}
+                        >
+                            <Trash2 className="mr-2 h-4 w-4" />
+                            Delete Job
+                        </Button>
+                    )}
                 </div>
             </div>
 
@@ -647,6 +715,12 @@ export default function JobDetailPage() {
                                             <div className="flex items-center gap-3 mb-3">
                                                 <FileText className="h-5 w-5 text-slate-500" />
                                                 <span className="font-medium text-sm flex-1">{doc.filename}</span>
+                                                {doc.processing_error && doc.status !== "failed" && (
+                                                    <span className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded-full bg-amber-50 text-amber-700 border border-amber-200" title={doc.processing_error}>
+                                                        <AlertTriangle className="h-3 w-3" />
+                                                        OCR Degraded
+                                                    </span>
+                                                )}
                                                 <span className={`text-xs px-2.5 py-1 rounded-full border font-medium capitalize ${getStatusColor(doc.status)}`}>
                                                     {doc.status.replace(/_/g, ' ')}
                                                 </span>
@@ -852,6 +926,23 @@ export default function JobDetailPage() {
 
                             {/* Right Column - Editable Data */}
                             <div className="flex flex-col space-y-4 overflow-y-auto pr-2">
+                                {/* AI Processing Warning Banner */}
+                                {reviewDoc.processing_error && (
+                                    <div className="flex items-start gap-3 p-4 rounded-lg border border-amber-300 bg-amber-50">
+                                        <AlertTriangle className="h-5 w-5 text-amber-600 flex-shrink-0 mt-0.5" />
+                                        <div>
+                                            <p className="text-sm font-semibold text-amber-800">OCR Quality Warning</p>
+                                            <p className="text-xs text-amber-700 mt-1">
+                                                AI text enhancement failed during OCR processing. The extracted text may contain errors, resulting in incomplete or inaccurate data extraction.
+                                            </p>
+                                            <details className="mt-2">
+                                                <summary className="text-xs text-amber-600 cursor-pointer hover:underline">Show details</summary>
+                                                <code className="text-xs text-amber-700 block mt-1 break-all whitespace-pre-wrap">{reviewDoc.processing_error}</code>
+                                            </details>
+                                        </div>
+                                    </div>
+                                )}
+
                                 {/* OCR Text Section */}
                                 <div className="bg-white border rounded-lg p-4">
                                     <label className="text-sm font-semibold mb-3 block text-slate-700">
@@ -907,13 +998,42 @@ export default function JobDetailPage() {
                         </div>
 
                         {/* Footer - Action Buttons */}
-                        <div className="flex items-center justify-end gap-3 px-6 py-4 border-t bg-slate-50">
-                            <Button variant="outline" onClick={() => setReviewDoc(null)}>
-                                Cancel
-                            </Button>
-                            <Button onClick={handleSaveReview} className="min-w-[120px]">
-                                Save Changes
-                            </Button>
+                        <div className="flex items-center justify-between px-6 py-4 border-t bg-slate-50">
+                            {/* Left: Reject */}
+                            <div>
+                                {!rejectConfirm ? (
+                                    <Button
+                                        variant="outline"
+                                        onClick={() => setRejectConfirm(true)}
+                                        className="text-red-600 border-red-300 hover:bg-red-50"
+                                    >
+                                        Reject
+                                    </Button>
+                                ) : (
+                                    <div className="flex items-center gap-2">
+                                        <span className="text-sm text-red-600">Delete this document?</span>
+                                        <Button
+                                            onClick={handleRejectDocument}
+                                            disabled={rejecting}
+                                            className="bg-red-600 hover:bg-red-700 text-white"
+                                        >
+                                            {rejecting ? "Deleting..." : "Confirm Delete"}
+                                        </Button>
+                                        <Button variant="outline" onClick={() => setRejectConfirm(false)}>
+                                            No
+                                        </Button>
+                                    </div>
+                                )}
+                            </div>
+                            {/* Right: Cancel + Save */}
+                            <div className="flex items-center gap-3">
+                                <Button variant="outline" onClick={() => setReviewDoc(null)}>
+                                    Cancel
+                                </Button>
+                                <Button onClick={handleSaveReview} className="min-w-[120px]">
+                                    Save Changes
+                                </Button>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -1147,7 +1267,7 @@ export default function JobDetailPage() {
                 </div>
             )}
 
-            {/* Delete Confirmation Modal */}
+            {/* Delete Document Confirmation Modal */}
             {deleteConfirmDoc && (
                 <div className="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center">
                     <div className="bg-white rounded-lg shadow-xl p-6 max-w-md w-full mx-4">
@@ -1170,6 +1290,42 @@ export default function JobDetailPage() {
                                 disabled={deleting}
                             >
                                 {deleting ? (
+                                    <>
+                                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                                        Deleting...
+                                    </>
+                                ) : (
+                                    "Delete"
+                                )}
+                            </Button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Delete Job Confirmation Modal */}
+            {showDeleteJobConfirm && (
+                <div className="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center">
+                    <div className="bg-white rounded-lg shadow-xl p-6 max-w-md w-full mx-4">
+                        <h3 className="text-lg font-semibold mb-4">Delete Job</h3>
+                        <p className="text-slate-600 mb-6">
+                            Are you sure you want to delete job <strong>{job.name}</strong>?
+                            All associated documents will also be deleted. This action cannot be undone.
+                        </p>
+                        <div className="flex justify-end gap-3">
+                            <Button
+                                onClick={() => setShowDeleteJobConfirm(false)}
+                                variant="outline"
+                                disabled={deletingJob}
+                            >
+                                Cancel
+                            </Button>
+                            <Button
+                                onClick={handleDeleteJob}
+                                variant="destructive"
+                                disabled={deletingJob}
+                            >
+                                {deletingJob ? (
                                     <>
                                         <Loader2 className="mr-2 h-4 w-4 animate-spin" />
                                         Deleting...

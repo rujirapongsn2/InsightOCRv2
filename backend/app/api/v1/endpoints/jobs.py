@@ -4,11 +4,21 @@ from app.models.user import User
 from sqlalchemy.orm import Session
 from app.api import deps
 from app.models.job import Job
+from app.models.document import Document
 from app.schemas.job import Job as JobSchema
 from app.schemas.job import JobCreate
+from app.services.storage import get_storage_service
 from app.utils.activity_logger import log_activity, Actions
+import logging
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+def _normalize_role(role: str | None) -> str:
+    if not role:
+        return "user"
+    return "manager" if role == "documents_admin" else role
 
 @router.get("/", response_model=List[JobSchema])
 def read_jobs(
@@ -20,7 +30,9 @@ def read_jobs(
     """
     Retrieve jobs.
     """
-    if current_user.is_superuser:
+    normalized_role = _normalize_role(current_user.role)
+    is_admin = current_user.is_superuser or normalized_role == "admin"
+    if is_admin:
         jobs = db.query(Job).offset(skip).limit(limit).all()
     else:
         jobs = db.query(Job).filter(Job.user_id == current_user.id).offset(skip).limit(limit).all()
@@ -72,9 +84,11 @@ def read_job(
     job = db.query(Job).filter(Job.id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    if not current_user.is_superuser and job.user_id != current_user.id:
+    normalized_role = _normalize_role(current_user.role)
+    is_admin = current_user.is_superuser or normalized_role == "admin"
+    if not is_admin and job.user_id != current_user.id:
         raise HTTPException(status_code=403, detail="Not enough permissions")
-    
+
     # Convert to dict and add user_name
     job_dict = {
         "id": job.id,
@@ -98,26 +112,48 @@ def delete_job(
 ) -> Any:
     """
     Delete a job and all its associated documents.
+    Owner, admin, or superuser can delete.
     """
     job = db.query(Job).filter(Job.id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    # Check permissions
-    if not current_user.is_superuser and job.user_id != current_user.id:
+    # Check permissions: superuser, admin role, or job owner
+    normalized_role = _normalize_role(current_user.role)
+    is_admin = current_user.is_superuser or normalized_role == "admin"
+    is_owner = job.user_id == current_user.id
+    if not is_admin and not is_owner:
         raise HTTPException(status_code=403, detail="Not enough permissions")
 
-    # Log activity before deletion
-    log_activity(
-        db=db,
-        user_id=current_user.id,
-        action=Actions.DELETE_JOB,
-        resource_type="job",
-        resource_id=job.id,
-        details={"job_name": job.name, "status": job.status}
-    )
+    try:
+        # Cleanup storage files for all associated documents
+        storage = get_storage_service()
+        documents = db.query(Document).filter(Document.job_id == job.id).all()
+        for doc in documents:
+            try:
+                storage.delete_file(doc.file_path)
+            except Exception as e:
+                logger.warning(f"Failed to delete storage file {doc.file_path}: {e}")
 
-    db.delete(job)
-    db.commit()
+        # Log activity before deletion
+        log_activity(
+            db=db,
+            user_id=current_user.id,
+            action=Actions.DELETE_JOB,
+            resource_type="job",
+            resource_id=job.id,
+            details={
+                "job_name": job.name,
+                "status": job.status,
+                "documents_deleted": len(documents),
+            }
+        )
+
+        db.delete(job)
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to delete job {job_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to delete job")
 
     return {"message": "Job deleted successfully", "id": job_id}

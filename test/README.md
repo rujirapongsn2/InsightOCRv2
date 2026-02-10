@@ -30,9 +30,9 @@ python3 api-test.py --host 0.0.0.0 --port 8080
 python3 api-test.py --debug
 ```
 
-### 2. ตั้งค่า Integration ใน InsightOCR
+### 2. ตั้งค่า Integration ใน InsightDOC
 
-1. เปิด InsightOCR → ไปที่หน้า **Integration**
+1. เปิด InsightDOC → ไปที่หน้า **Integration**
 2. คลิก **Add Integration**
 3. กรอกข้อมูล:
    - **Name**: Test API Integration

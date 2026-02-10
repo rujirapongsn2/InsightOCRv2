@@ -23,15 +23,26 @@ logger = logging.getLogger(__name__)
 
 def table_to_key_values(content: str) -> List[str]:
     """
-    Convert simple markdown pipe tables into key:value lines to help structure extraction.
+    Convert markdown pipe tables into key:value lines to help structure extraction.
+    Only processes content that contains a real markdown table separator row (e.g. |---|---|).
+    Returns empty list if no real table is detected, so caller falls back to original text.
     """
+    # Only process if content has a real markdown table separator row
+    has_separator = any(
+        set(line.strip()) <= {"|", "-", " ", ":"} and "-" in line and "|" in line
+        for line in content.splitlines()
+        if line.strip()
+    )
+    if not has_separator:
+        return []
+
     key_values = []
     for raw_line in content.splitlines():
         line = raw_line.strip()
         if not line:
             continue
         # Skip separator rows or malformed rows
-        if set(line) <= {"|", "-", " "} or line.count("|") < 2:
+        if set(line) <= {"|", "-", " ", ":"} or line.count("|") < 2:
             continue
 
         # Strip leading/trailing pipes then split
@@ -134,8 +145,8 @@ def process_document_task(self, document_id: str, schema_id: str):
 
             # STEP 1: Count pages (PDF or Image)
             try:
-                # Check if file is an image or PDF
-                file_ext = os.path.splitext(local_file_path)[1].lower()
+                # Use original filename for extension check (temp files have no extension)
+                file_ext = os.path.splitext(document.filename)[1].lower()
 
                 if file_ext in ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp']:
                     # Image files have only 1 page
@@ -159,7 +170,8 @@ def process_document_task(self, document_id: str, schema_id: str):
             # STEP 2: Process each page with OCR
             ocr_pages_results = []
             ocr_content_combined = ""
-    
+            ai_processing_warnings = []
+
             for page_num in range(1, page_count + 1):
                 try:
                     # Call OCR for this specific page
@@ -170,7 +182,7 @@ def process_document_task(self, document_id: str, schema_id: str):
                         filename=document.filename,
                         mime_type=document.mime_type
                     )
-                    
+
                     # Extract content from OCR API response
                     page_content = ""
                     page_success = False
@@ -191,6 +203,13 @@ def process_document_task(self, document_id: str, schema_id: str):
                                     # Try to get content from AI processing first
                                     if ai_processing.get('success', False):
                                         page_content = ai_processing.get('content', '')
+                                    else:
+                                        # Track AI processing failure
+                                        ai_error = ai_processing.get('error', 'Unknown error')
+                                        ai_processing_warnings.append(
+                                            f"Page {page_num}: AI text enhancement failed ({ai_error}). Using raw OCR text."
+                                        )
+                                        logger.warning(f"AI processing failed for document {document_id} page {page_num}: {ai_error}")
 
                                     # Fallback to ocr_text if AI processing failed or no content
                                     if not page_content:
@@ -249,6 +268,8 @@ def process_document_task(self, document_id: str, schema_id: str):
             # STEP 3: Store OCR results
             document.ocr_pages = ocr_pages_results
             document.ocr_text = ocr_content_combined
+            if ai_processing_warnings:
+                document.processing_error = "OCR quality degraded: " + "; ".join(ai_processing_warnings)
             db.add(document)
             db.commit()
 
@@ -319,8 +340,30 @@ def process_document_task(self, document_id: str, schema_id: str):
             document.extracted_data = parsed_output if parsed_output is not None else raw_output
             document.status = "extraction_completed"
 
+            # Check if extracted data has meaningful values (majority of fields populated)
+            def _extraction_quality(data) -> float:
+                """Return ratio of non-empty fields (0.0 to 1.0)."""
+                if isinstance(data, dict):
+                    fields = [v for v in data.values() if not isinstance(v, (dict, list))]
+                    if not fields:
+                        return 0.0
+                    filled = sum(1 for v in fields if v and str(v).strip())
+                    return filled / len(fields)
+                if isinstance(data, list) and data:
+                    return max(_extraction_quality(item) for item in data)
+                return 0.0
+
             if not parsed_output or parsed_output == {} or (isinstance(parsed_output, dict) and 'extracted_text' in parsed_output):
-                document.processing_error = f"Parse may be incomplete. Raw response preview: {str(raw_output)[:500]}"
+                # Extraction produced no useful data — keep/append OCR warning
+                parse_warning = f"Parse may be incomplete. Raw response preview: {str(raw_output)[:500]}"
+                if document.processing_error:
+                    document.processing_error += f" | {parse_warning}"
+                else:
+                    document.processing_error = parse_warning
+            elif _extraction_quality(parsed_output) >= 0.5:
+                # Majority of fields populated — OCR degradation didn't matter, clear warning
+                document.processing_error = None
+            # else: less than half populated — keep the OCR degraded warning as-is
         else:
             document.status = "failed"
             error_msg = structure_result.get('message', 'Unknown error')

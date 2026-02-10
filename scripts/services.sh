@@ -5,7 +5,7 @@ COMPOSE="docker compose"
 
 usage() {
   cat <<'EOF'
-Softnix InsightOCR service helper
+Softnix InsightDOC service helper
 
 Usage:
   services.sh up           # start all services (frontend, backend, db, redis, minio)

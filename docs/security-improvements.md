@@ -1,7 +1,7 @@
-# Security Improvements - InsightOCRv2
+# Security Improvements - InsightDOCv2
 
 ## Overview
-This document tracks security improvements implemented in the InsightOCRv2 Docker environment.
+This document tracks security improvements implemented in the InsightDOCv2 Docker environment.
 
 ---
 
@@ -173,7 +173,7 @@ BACKEND_CORS_ORIGINS=https://localhost,http://localhost:3000,http://localhost:80
 
 ```
 ==========================================
-Port Security Test - InsightOCRv2
+Port Security Test - InsightDOCv2
 ==========================================
 
 Expected Accessible Ports:

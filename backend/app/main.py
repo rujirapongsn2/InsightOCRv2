@@ -129,7 +129,7 @@ app.include_router(api_router, prefix=settings.API_V1_STR)
 
 @app.get("/")
 def root():
-    return {"message": "Welcome to Softnix InsightOCR API"}
+    return {"message": "Welcome to Softnix InsightDOC API"}
 
 
 @app.get("/health", include_in_schema=False)

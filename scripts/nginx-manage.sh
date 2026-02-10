@@ -37,7 +37,7 @@ check_nginx() {
 
 # Show usage
 show_usage() {
-    echo "Nginx Management Helper for InsightOCRv2"
+    echo "Nginx Management Helper for InsightDOCv2"
     echo ""
     echo "Usage: $0 <command>"
     echo ""

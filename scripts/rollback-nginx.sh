@@ -9,7 +9,7 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 BACKUP_DIR="$PROJECT_ROOT/.nginx-backup-$(date +%Y%m%d-%H%M%S)"
 
 echo "=========================================="
-echo "Nginx Rollback for InsightOCRv2"
+echo "Nginx Rollback for InsightDOCv2"
 echo "=========================================="
 echo ""
 

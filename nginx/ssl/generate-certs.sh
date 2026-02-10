@@ -7,7 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CERT_PATH="$SCRIPT_DIR/cert.pem"
 KEY_PATH="$SCRIPT_DIR/key.pem"
 
-echo "Generating self-signed SSL certificate for InsightOCRv2..."
+echo "Generating self-signed SSL certificate for InsightDOCv2..."
 
 # Generate private key and certificate
 openssl req -x509 -nodes -days 365 -newkey rsa:2048 \

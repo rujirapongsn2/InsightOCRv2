@@ -2,7 +2,7 @@ from typing import List, Optional
 from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
-    PROJECT_NAME: str = "Softnix InsightOCR"
+    PROJECT_NAME: str = "Softnix InsightDOC"
     API_V1_STR: str = "/api/v1"
     
     # CORS - comma-separated string

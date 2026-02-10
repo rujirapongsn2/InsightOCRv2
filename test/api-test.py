@@ -4,7 +4,7 @@ API Integration Webhook Receiver
 Usage: python api-test.py [options]
 
 This script creates a simple webhook receiver to test API-type integrations.
-It receives POST/PUT requests from InsightOCR and displays the received data.
+It receives POST/PUT requests from InsightDOC and displays the received data.
 """
 
 import argparse
@@ -165,7 +165,7 @@ Examples:
   # Start server accessible from network
   python api-test.py --host 0.0.0.0 --port 8080
 
-Integration Setup in InsightOCR:
+Integration Setup in InsightDOC:
   1. Go to Integration page
   2. Create new integration (Type: API)
   3. Set Endpoint URL: http://localhost:5000/webhook
@@ -213,7 +213,7 @@ Available Endpoints:
     print(f"   POST      http://{args.host}:{args.port}/webhook/clear")
 
     print(f"\n⚙️  Integration Setup:")
-    print(f"   1. Go to InsightOCR → Integration → Add Integration")
+    print(f"   1. Go to InsightDOC → Integration → Add Integration")
     print(f"   2. Type: API")
     print(f"   3. Endpoint URL: http://{args.host}:{args.port}/webhook")
     print(f"   4. HTTP Method: POST")

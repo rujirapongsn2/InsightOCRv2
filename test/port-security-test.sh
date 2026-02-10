@@ -2,7 +2,7 @@
 # Port Security Test Script
 
 echo "=========================================="
-echo "Port Security Test - InsightOCRv2"
+echo "Port Security Test - InsightDOCv2"
 echo "=========================================="
 echo ""
 

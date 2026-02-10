@@ -19,5 +19,5 @@ class Job(Base):
 
     # Relationships
     schema = relationship("DocumentSchema")
-    documents = relationship("Document", back_populates="job")
+    documents = relationship("Document", back_populates="job", cascade="all, delete-orphan")
     user = relationship("User")

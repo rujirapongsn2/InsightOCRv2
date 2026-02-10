@@ -1,5 +1,5 @@
 #!/bin/bash
-# Setup Nginx Reverse Proxy for InsightOCRv2
+# Setup Nginx Reverse Proxy for InsightDOCv2
 # This script automates the Nginx setup process
 
 set -e
@@ -10,7 +10,7 @@ NGINX_DIR="$PROJECT_ROOT/nginx"
 SSL_DIR="$NGINX_DIR/ssl"
 
 echo "=========================================="
-echo "Nginx Reverse Proxy Setup for InsightOCRv2"
+echo "Nginx Reverse Proxy Setup for InsightDOCv2"
 echo "=========================================="
 echo ""
 

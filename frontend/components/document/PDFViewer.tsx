@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button"
 import "react-pdf/dist/Page/AnnotationLayer.css"
 import "react-pdf/dist/Page/TextLayer.css"
 
-// Configure PDF.js worker
+// Configure PDF.js worker — use CDN matching the exact pdfjs version from react-pdf
 pdfjs.GlobalWorkerOptions.workerSrc = `//unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`
 
 interface PDFViewerProps {
