@@ -59,22 +59,22 @@ export function WizardStep1() {
 
   const options = [
     {
-      id: "template" as StartingPoint,
-      icon: Sparkles,
-      title: "Start from Template",
-      description: "Choose from pre-built templates for common document types",
-      recommended: true,
-      color: "blue",
-      available: true
-    },
-    {
       id: "ai" as StartingPoint,
       icon: Wand2,
       title: "AI-Assisted",
       description: "Upload a sample document and let AI suggest fields",
-      recommended: false,
+      recommended: true,
       color: "purple",
-      available: true // Now available!
+      available: true
+    },
+    {
+      id: "template" as StartingPoint,
+      icon: Sparkles,
+      title: "Start from Template",
+      description: "Choose from pre-built templates for common document types",
+      recommended: false,
+      color: "blue",
+      available: true
     },
     {
       id: "scratch" as StartingPoint,
@@ -137,8 +137,7 @@ export function WizardStep1() {
       </div>
 
       <InfoCard type="tip" dismissible>
-        <strong>New to schema creation?</strong> We recommend starting with a template.
-        You can customize it to fit your exact needs.
+        <strong>New to schema creation?</strong> We recommend AI-Assisted mode — just upload a sample document and AI will suggest fields for you.
       </InfoCard>
 
       <div className="grid gap-4">
