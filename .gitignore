@@ -13,6 +13,16 @@ frontend/.env.local
 !backend/.env*.example
 !frontend/.env.example
 !frontend/.env*.example
+# Test data files (PDFs, images) — keep only scripts
+test/*.pdf
+test/*.png
+test/*.jpg
+test/*.jpeg
+test/*.tiff
+test/*.bmp
+test/*.gif
+test/*.webp
+
 /.git_old/
 frontend/.next
 frontend/node_modules
