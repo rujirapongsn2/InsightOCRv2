@@ -1,8 +1,53 @@
 from fastapi import APIRouter, HTTPException, Depends, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 from uuid import UUID
 from openai import OpenAI
+
+
+def _build_llm_input(
+    doc_filename: str,
+    doc_input: str,
+    user_prompt: Optional[str] = None,
+    output_format_prompt: Optional[str] = None,
+) -> str:
+    """Compose the input string: [userPrompt] + OCR data + [outputFormatPrompt]."""
+    parts: list[str] = []
+    if user_prompt and user_prompt.strip():
+        parts.append(user_prompt.strip())
+    parts.append(f"Document: {doc_filename}\n\nData:\n{doc_input}")
+    if output_format_prompt and output_format_prompt.strip():
+        parts.append(output_format_prompt.strip())
+    return "\n\n".join(parts)
+
+
+def _build_combined_llm_input(
+    documents: List[tuple],
+    user_prompt: Optional[str] = None,
+    output_format_prompt: Optional[str] = None,
+) -> str:
+    """Compose input with ALL documents combined into one block for cross-document validation."""
+    import json as _json
+    parts: list[str] = []
+    if user_prompt and user_prompt.strip():
+        parts.append(user_prompt.strip())
+    doc_blocks = []
+    for filename, data in documents:
+        doc_json = _json.dumps(data, ensure_ascii=False, indent=2) if data is not None else "No data"
+        doc_blocks.append(f"## Document: {filename}\n\n```json\n{doc_json}\n```")
+    parts.append("\n\n---\n\n".join(doc_blocks))
+    if output_format_prompt and output_format_prompt.strip():
+        parts.append(output_format_prompt.strip())
+    return "\n\n".join(parts)
+
+
+def _supports_reasoning(model: str) -> bool:
+    """Return True only for o-series OpenAI models that support reasoning.effort."""
+    if not model:
+        return False
+    m = model.lower()
+    return m.startswith("o1") or m.startswith("o3") or m.startswith("o4")
 from sqlalchemy.orm import Session
 import httpx
 import json
@@ -15,6 +60,7 @@ from app.schemas.integration import (
     IntegrationListResponse
 )
 from app.crud.crud_integration import integration as crud_integration
+from app.crud.crud_integration_result import integration_result as crud_integration_result
 from app.utils.activity_logger import log_activity, Actions
 
 router = APIRouter()
@@ -68,6 +114,54 @@ async def get_active_integrations(
     """Get all active integrations (all users can view all integrations)."""
     integrations = crud_integration.get_all_active(db=db)
     return integrations
+
+
+@router.get("/results")
+async def get_integration_results_by_job(
+    job_id: UUID,
+    limit: int = 50,
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_user),
+):
+    """Get all integration results for a job, newest first."""
+    results = crud_integration_result.get_by_job(db, job_id=job_id, limit=limit)
+    return [
+        {
+            "id": str(r.id),
+            "job_id": str(r.job_id),
+            "integration_id": str(r.integration_id) if r.integration_id else None,
+            "integration_type": r.integration_type,
+            "integration_name": r.integration_name,
+            "status": r.status,
+            "model_used": r.model_used,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+        }
+        for r in results
+    ]
+
+
+@router.get("/results/{result_id}")
+async def get_integration_result(
+    result_id: UUID,
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_user),
+):
+    """Get a single integration result with full output."""
+    result = crud_integration_result.get(db, result_id=result_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Result not found")
+    return {
+        "id": str(result.id),
+        "job_id": str(result.job_id),
+        "integration_id": str(result.integration_id) if result.integration_id else None,
+        "integration_type": result.integration_type,
+        "integration_name": result.integration_name,
+        "status": result.status,
+        "output": result.output,
+        "error_message": result.error_message,
+        "model_used": result.model_used,
+        "created_at": result.created_at.isoformat() if result.created_at else None,
+    }
 
 
 @router.get("/{integration_id}", response_model=IntegrationResponse)
@@ -218,6 +312,8 @@ class TestLLMRequest(BaseModel):
     model: str
     reasoningEffort: str = "low"
     instructions: str
+    userPrompt: Optional[str] = None
+    outputFormatPrompt: Optional[str] = None
     testInput: str
 
 
@@ -239,6 +335,8 @@ class SendLLMRequest(BaseModel):
     model: str
     reasoningEffort: str = "low"
     instructions: str
+    userPrompt: Optional[str] = None
+    outputFormatPrompt: Optional[str] = None
     documents: List[DocumentInput]
 
 
@@ -256,6 +354,7 @@ class SendLLMResponse(BaseModel):
 
 class SendToIntegrationRequest(BaseModel):
     integration_id: UUID
+    job_id: Optional[UUID] = None
     job_name: str
     documents: List[DocumentInput]
 
@@ -281,18 +380,30 @@ async def test_llm(
             client_kwargs["base_url"] = request.baseUrl
         
         client = OpenAI(**client_kwargs)
-        
-        # Call OpenAI Responses API
-        response = client.responses.create(
-            model=request.model,
-            reasoning={"effort": request.reasoningEffort},
-            instructions=request.instructions,
-            input=request.testInput,
+
+        # Compose input: userPrompt + testInput + outputFormatPrompt
+        composed_input = _build_llm_input(
+            doc_filename="test",
+            doc_input=request.testInput,
+            user_prompt=request.userPrompt,
+            output_format_prompt=request.outputFormatPrompt,
         )
-        
+
+        # Build request params — reasoning.effort is only supported by o-series models
+        create_params: Dict[str, Any] = {
+            "model": request.model,
+            "instructions": request.instructions,
+            "input": composed_input,
+        }
+        if _supports_reasoning(request.model):
+            create_params["reasoning"] = {"effort": request.reasoningEffort}
+
+        # Call OpenAI Responses API
+        response = client.responses.create(**create_params)
+
         # Extract output text
         output_text = response.output_text if hasattr(response, 'output_text') else str(response)
-        
+
         return TestLLMResponse(output=output_text)
     
     except Exception as e:
@@ -331,13 +442,25 @@ async def send_to_llm(
                 # Convert document data to string input
                 doc_input = json.dumps(doc.data, ensure_ascii=False, indent=2) if doc.data else "No data"
 
-                # Call OpenAI Responses API
-                response = client.responses.create(
-                    model=request.model,
-                    reasoning={"effort": request.reasoningEffort},
-                    instructions=request.instructions,
-                    input=f"Document: {doc.filename}\n\nData:\n{doc_input}",
+                # Compose input: userPrompt + OCR data + outputFormatPrompt
+                composed_input = _build_llm_input(
+                    doc_filename=doc.filename,
+                    doc_input=doc_input,
+                    user_prompt=request.userPrompt,
+                    output_format_prompt=request.outputFormatPrompt,
                 )
+
+                # Build request params — reasoning.effort is only supported by o-series models
+                create_params: Dict[str, Any] = {
+                    "model": request.model,
+                    "instructions": request.instructions,
+                    "input": composed_input,
+                }
+                if _supports_reasoning(request.model):
+                    create_params["reasoning"] = {"effort": request.reasoningEffort}
+
+                # Call OpenAI Responses API
+                response = client.responses.create(**create_params)
 
                 # Extract output text
                 output_text = response.output_text if hasattr(response, 'output_text') else str(response)
@@ -401,6 +524,187 @@ async def send_to_llm(
         )
 
 
+@router.post("/send-stream")
+async def send_to_integration_stream(
+    request: SendToIntegrationRequest,
+    http_request: Request,
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_user)
+):
+    """
+    Stream LLM output as SSE events.
+    Events:
+      data: {"type":"delta","text":"..."}
+      data: {"type":"done","full_output":"...","filename":"..."}
+      data: {"type":"error","message":"..."}
+    """
+    import uuid as _uuid
+
+    client_ip = http_request.client.host if http_request.client else None
+    user_agent = http_request.headers.get("user-agent")
+
+    integration = crud_integration.get(db=db, integration_id=request.integration_id)
+    if not integration:
+        raise HTTPException(status_code=404, detail="Integration not found")
+
+    if integration.type != "llm":
+        raise HTTPException(status_code=400, detail="Streaming is only supported for LLM integrations")
+
+    llm_api_key = integration.config.get("apiKey")
+    if not llm_api_key:
+        raise HTTPException(status_code=400, detail="API Key is required for LLM integration")
+
+    llm_model = integration.config.get("model", "gpt-4o")
+    llm_base_url = integration.config.get("baseUrl")
+    llm_instructions = integration.config.get("instructions", "")
+    llm_user_prompt = integration.config.get("userPrompt")
+    llm_output_format = integration.config.get("outputFormatPrompt")
+    llm_reasoning_effort = integration.config.get("reasoningEffort", "low")
+
+    doc_tuples = [(doc.filename, doc.data) for doc in request.documents]
+    composed_input = _build_combined_llm_input(
+        documents=doc_tuples,
+        user_prompt=llm_user_prompt,
+        output_format_prompt=llm_output_format,
+    )
+
+    report_filename = f"{request.job_name} — Validation Report"
+
+    async def _event_generator():
+        full_output = ""
+        try:
+            client_kwargs: Dict[str, Any] = {"api_key": llm_api_key}
+            if llm_base_url:
+                client_kwargs["base_url"] = llm_base_url
+
+            client = OpenAI(**client_kwargs)
+
+            create_params: Dict[str, Any] = {
+                "model": llm_model,
+                "instructions": llm_instructions,
+                "input": composed_input,
+                "stream": True,
+            }
+            if _supports_reasoning(llm_model):
+                create_params["reasoning"] = {"effort": llm_reasoning_effort}
+
+            stream = client.responses.create(**create_params)
+
+            for event in stream:
+                # OpenAI Responses API streaming emits various event types
+                if hasattr(event, "type"):
+                    if event.type == "response.output_text.delta":
+                        delta = event.delta if hasattr(event, "delta") else ""
+                        if delta:
+                            full_output += delta
+                            yield f"data: {json.dumps({'type': 'delta', 'text': delta}, ensure_ascii=False)}\n\n"
+                    elif event.type == "response.completed":
+                        # Final event — extract full text if available
+                        if hasattr(event, "response") and hasattr(event.response, "output_text"):
+                            full_output = event.response.output_text
+                    elif event.type == "response.output_text.done":
+                        if hasattr(event, "text"):
+                            full_output = event.text
+
+            # Save result to DB
+            saved_result_id = None
+            if request.job_id:
+                try:
+                    saved = crud_integration_result.create(
+                        db,
+                        job_id=request.job_id,
+                        integration_id=integration.id,
+                        user_id=current_user.id,
+                        integration_type="llm",
+                        integration_name=integration.name,
+                        status="success",
+                        output=full_output,
+                        model_used=llm_model,
+                    )
+                    saved_result_id = str(saved.id)
+                except Exception:
+                    pass
+
+            done_payload: Dict[str, Any] = {
+                "type": "done",
+                "full_output": full_output,
+                "filename": report_filename,
+            }
+            if saved_result_id:
+                done_payload["result_id"] = saved_result_id
+            yield f"data: {json.dumps(done_payload, ensure_ascii=False)}\n\n"
+
+            # Log activity after stream completes
+            try:
+                log_activity(
+                    db=db,
+                    user_id=current_user.id,
+                    action=Actions.SEND_TO_INTEGRATION,
+                    resource_type="integration",
+                    resource_id=integration.id,
+                    details={
+                        "job_name": request.job_name,
+                        "name": integration.name,
+                        "type": integration.type,
+                        "result": "success",
+                        "stream": True,
+                    },
+                    ip_address=client_ip,
+                    user_agent=user_agent,
+                )
+            except Exception:
+                pass
+
+        except Exception as e:
+            # Save error result to DB
+            if request.job_id:
+                try:
+                    crud_integration_result.create(
+                        db,
+                        job_id=request.job_id,
+                        integration_id=integration.id,
+                        user_id=current_user.id,
+                        integration_type="llm",
+                        integration_name=integration.name,
+                        status="error",
+                        error_message=str(e),
+                        model_used=llm_model,
+                    )
+                except Exception:
+                    pass
+
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)}, ensure_ascii=False)}\n\n"
+            try:
+                log_activity(
+                    db=db,
+                    user_id=current_user.id,
+                    action=Actions.SEND_TO_INTEGRATION,
+                    resource_type="integration",
+                    resource_id=integration.id,
+                    details={
+                        "job_name": request.job_name,
+                        "name": integration.name,
+                        "type": integration.type,
+                        "result": "failed",
+                        "stream": True,
+                    },
+                    ip_address=client_ip,
+                    user_agent=user_agent,
+                )
+            except Exception:
+                pass
+
+    return StreamingResponse(
+        _event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @router.post("/send", response_model=SendToIntegrationResponse)
 async def send_to_integration(
     request: SendToIntegrationRequest,
@@ -429,42 +733,63 @@ async def send_to_integration(
         message = ""
 
         if integration.type == "llm":
-            if not integration.config.apiKey:
+            llm_api_key = integration.config.get("apiKey")
+            if not llm_api_key:
                 raise HTTPException(status_code=400, detail="API Key is required for LLM integration")
 
-            client_kwargs = {"api_key": integration.config.apiKey}
-            if integration.config.baseUrl:
-                client_kwargs["base_url"] = integration.config.baseUrl
+            llm_model = integration.config.get("model", "gpt-4o")
+            llm_base_url = integration.config.get("baseUrl")
+            llm_instructions = integration.config.get("instructions", "")
+            llm_user_prompt = integration.config.get("userPrompt")
+            llm_output_format = integration.config.get("outputFormatPrompt")
+            llm_reasoning_effort = integration.config.get("reasoningEffort", "low")
+
+            client_kwargs = {"api_key": llm_api_key}
+            if llm_base_url:
+                client_kwargs["base_url"] = llm_base_url
 
             client = OpenAI(**client_kwargs)
 
-            for doc in request.documents:
-                try:
-                    doc_input = json.dumps(doc.data, ensure_ascii=False, indent=2) if doc.data else "No data"
+            # Combine all documents into ONE LLM call so cross-document validation works
+            try:
+                doc_tuples = [(doc.filename, doc.data) for doc in request.documents]
+                composed_input = _build_combined_llm_input(
+                    documents=doc_tuples,
+                    user_prompt=llm_user_prompt,
+                    output_format_prompt=llm_output_format,
+                )
 
-                    response = client.responses.create(
-                        model=integration.config.model,
-                        reasoning={"effort": integration.config.reasoningEffort},
-                        instructions=integration.config.instructions,
-                        input=f"Document: {doc.filename}\n\nData:\n{doc_input}",
-                    )
+                print(f"[DEBUG] Sending {len(request.documents)} documents combined to LLM model={llm_model}")
 
-                    output_text = response.output_text if hasattr(response, 'output_text') else str(response)
+                # Build request params — reasoning.effort only supported by o-series models
+                create_params: Dict[str, Any] = {
+                    "model": llm_model,
+                    "instructions": llm_instructions,
+                    "input": composed_input,
+                }
+                if _supports_reasoning(llm_model):
+                    create_params["reasoning"] = {"effort": llm_reasoning_effort}
 
-                    results.append(DocumentResult(
-                        id=doc.id,
-                        filename=doc.filename,
-                        output=output_text,
-                        success=True
-                    ))
-                except Exception as e:
-                    results.append(DocumentResult(
-                        id=doc.id,
-                        filename=doc.filename,
-                        output="",
-                        success=False,
-                        error=str(e)
-                    ))
+                response = client.responses.create(**create_params)
+                output_text = response.output_text if hasattr(response, 'output_text') else str(response)
+
+                print(f"[DEBUG] LLM response length: {len(output_text)} chars")
+
+                results.append(DocumentResult(
+                    id="combined",
+                    filename=f"{request.job_name} — Validation Report",
+                    output=output_text,
+                    success=True
+                ))
+            except Exception as e:
+                print(f"[DEBUG] LLM combined call error: {str(e)}")
+                results.append(DocumentResult(
+                    id="combined",
+                    filename=request.job_name,
+                    output="",
+                    success=False,
+                    error=str(e)
+                ))
 
             successful_count = sum(1 for r in results if r.success)
             failed_count = len(results) - successful_count
@@ -552,6 +877,24 @@ async def send_to_integration(
             user_agent=user_agent
         )
 
+        # Save integration result for history
+        if request.job_id:
+            try:
+                crud_integration_result.create(
+                    db,
+                    job_id=request.job_id,
+                    integration_id=integration.id,
+                    user_id=current_user.id,
+                    integration_type=integration.type.value if hasattr(integration.type, "value") else str(integration.type),
+                    integration_name=integration.name,
+                    status="success" if success else "error",
+                    output=results[0].output if results and integration.type == "llm" else None,
+                    error_message=results[0].error if results and not success else None,
+                    model_used=integration.config.get("model") if integration.type == "llm" else None,
+                )
+            except Exception:
+                pass
+
         return SendToIntegrationResponse(
             success=success,
             message=message,
@@ -575,6 +918,20 @@ async def send_to_integration(
                 ip_address=client_ip,
                 user_agent=user_agent
             )
+            if request.job_id:
+                try:
+                    crud_integration_result.create(
+                        db,
+                        job_id=request.job_id,
+                        integration_id=integration.id,
+                        user_id=current_user.id,
+                        integration_type=integration.type.value if hasattr(integration.type, "value") else str(integration.type),
+                        integration_name=integration.name,
+                        status="error",
+                        error_message=str(he.detail),
+                    )
+                except Exception:
+                    pass
         raise
 
     except Exception as e:
@@ -597,6 +954,20 @@ async def send_to_integration(
                 ip_address=client_ip,
                 user_agent=user_agent
             )
+            if request.job_id:
+                try:
+                    crud_integration_result.create(
+                        db,
+                        job_id=request.job_id,
+                        integration_id=integration.id,
+                        user_id=current_user.id,
+                        integration_type=integration.type.value if hasattr(integration.type, "value") else str(integration.type),
+                        integration_name=integration.name,
+                        status="error",
+                        error_message=str(e),
+                    )
+                except Exception:
+                    pass
 
         raise HTTPException(
             status_code=400,

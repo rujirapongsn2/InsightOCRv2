@@ -33,17 +33,16 @@ export function SuggestedFieldCard({ field, onAccept, onReject, disabled, isAcce
 
   const confidenceColor =
     field.confidence >= 0.8 ? "text-green-600 bg-green-50" :
-    field.confidence >= 0.6 ? "text-yellow-600 bg-yellow-50" :
-    "text-orange-600 bg-orange-50"
+      field.confidence >= 0.6 ? "text-yellow-600 bg-yellow-50" :
+        "text-orange-600 bg-orange-50"
 
   const confidencePercentage = Math.round(field.confidence * 100)
 
   return (
-    <div className={`border rounded-lg p-4 transition-all ${
-      isAccepted
+    <div className={`border rounded-lg p-4 transition-all ${isAccepted
         ? "border-green-500 bg-green-50/50 shadow-sm"
         : "border-blue-200 bg-blue-50/30 hover:bg-blue-50/50"
-    }`}>
+      }`}>
       {/* Header with confidence badge */}
       <div className="flex items-start justify-between mb-3">
         <div className="flex items-center gap-2">
@@ -52,7 +51,7 @@ export function SuggestedFieldCard({ field, onAccept, onReject, disabled, isAcce
           ) : (
             <Sparkles className="h-4 w-4 text-blue-600" />
           )}
-          <span className="font-medium text-slate-900">{field.name}</span>
+          <span className="font-medium text-slate-900">{editedField.name}</span>
           {isAccepted && (
             <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
               Accepted

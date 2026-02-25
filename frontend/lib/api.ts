@@ -1,17 +1,10 @@
 export const getApiBaseUrl = (): string => {
-  const envApi = process.env.NEXT_PUBLIC_API_URL
-
-  // Use environment variable if explicitly set
-  if (envApi) {
-    return envApi
-  }
-
-  // Client-side: Use same origin with /api/v1 path (works with Nginx reverse proxy)
+  // Client-side: Always use the same origin as the browser to avoid CORS issues
+  // This works when Nginx proxies /api/v1 → backend
   if (typeof window !== "undefined") {
-    const { protocol, hostname } = window.location
-    return `${protocol}//${hostname}/api/v1`
+    return `${window.location.protocol}//${window.location.host}/api/v1`
   }
 
-  // Server-side: Use internal Docker network or fallback
+  // Server-side (SSR): Use internal Docker network
   return process.env.NEXT_PUBLIC_SSR_API_URL || "http://backend:8000/api/v1"
 }

@@ -47,9 +47,8 @@ services:
     container_name: softnix_ocr_backend
     expose:
       - "8000"
-    # volumes:
-    #   - ./backend:/app
-    #   - documents_uploads:/app/uploads
+    volumes:
+      - documents_uploads:/app/uploads
     env_file:
       - ./backend/.env
     environment:
@@ -85,9 +84,8 @@ services:
     build: ./backend
     container_name: softnix_ocr_celery
     command: celery -A app.celery_app worker --loglevel=info --concurrency=2
-    # volumes:
-    #   - ./backend:/app
-    #   - documents_uploads:/app/uploads
+    volumes:
+      - documents_uploads:/app/uploads
     env_file:
       - ./backend/.env
     environment:

@@ -45,7 +45,7 @@ const SchemaWizardContext = createContext<
   (SchemaWizardState & SchemaWizardActions) | undefined
 >(undefined)
 
-export function SchemaWizardProvider({ children }: { children: ReactNode }) {
+export function SchemaWizardProvider({ children, onSaved }: { children: ReactNode; onSaved?: () => void }) {
   const router = useRouter()
   const [state, setState] = useState<SchemaWizardState>(initialState)
 
@@ -127,7 +127,7 @@ export function SchemaWizardProvider({ children }: { children: ReactNode }) {
   }
 
   const nextStep = () => {
-    if (state.currentStep < 4) {
+    if (state.currentStep < 2) {
       setState(prev => ({ ...prev, currentStep: (prev.currentStep + 1) as WizardStep }))
     }
   }
@@ -155,7 +155,14 @@ export function SchemaWizardProvider({ children }: { children: ReactNode }) {
         description: state.schemaData.description,
         document_type: state.schemaData.document_type,
         ocr_engine: state.schemaData.ocr_engine || "tesseract",
-        fields: state.fields.map(({ id, ...field }) => field), // Remove temporary ID
+        fields: state.fields.map(({ id, ...field }) => {
+          // For array type, ensure items is included in payload
+          if (field.type === "array" && field.items) {
+            return { ...field, items: field.items }
+          }
+          const { items, ...restField } = field as any
+          return restField
+        }),
         template_id: state.schemaData.template_id
       }
 
@@ -172,8 +179,11 @@ export function SchemaWizardProvider({ children }: { children: ReactNode }) {
       )
 
       if (res.ok) {
-        // Success - redirect to schemas list
-        router.push("/schemas")
+        if (onSaved) {
+          onSaved()
+        } else {
+          router.push("/schemas")
+        }
       } else {
         const error = await res.json()
         throw new Error(error.detail || "Failed to create schema")

@@ -32,6 +32,7 @@ class Document(Base):
     processed_at = Column(DateTime(timezone=True), nullable=True)
     
     schema_id = Column(UUID(as_uuid=True), ForeignKey("document_schemas.id"), nullable=True)
+    task_id = Column(String, nullable=True)
 
     # Relationships
     job = relationship("Job", back_populates="documents")

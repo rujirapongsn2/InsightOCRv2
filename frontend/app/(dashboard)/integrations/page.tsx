@@ -7,7 +7,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { Modal } from "@/components/ui/modal"
-import { Plus, Pencil, Trash2, Plug, Eye, ShieldCheck } from "lucide-react"
+import { Plus, Pencil, Trash2, Plug, Eye, ShieldCheck, Maximize2 } from "lucide-react"
 import { getApiBaseUrl } from "@/lib/api"
 import {
     getIntegrations,
@@ -33,6 +33,8 @@ type IntegrationConfig = {
     baseUrl?: string
     // OpenAI Responses API fields
     instructions?: string
+    userPrompt?: string
+    outputFormatPrompt?: string
     reasoningEffort?: "low" | "medium" | "high"
 }
 
@@ -65,6 +67,8 @@ interface IntegrationFormState {
     apiKey: string
     baseUrl: string
     instructions: string
+    userPrompt: string
+    outputFormatPrompt: string
     reasoningEffort: "low" | "medium" | "high"
 }
 
@@ -84,6 +88,8 @@ const defaultFormState: IntegrationFormState = {
     apiKey: "",
     baseUrl: "",
     instructions: "",
+    userPrompt: "",
+    outputFormatPrompt: "",
     reasoningEffort: "low",
 }
 
@@ -159,6 +165,15 @@ export default function IntegrationsPage() {
     const [testInput, setTestInput] = useState("")
     const [testResult, setTestResult] = useState<string | null>(null)
     const [testLoading, setTestLoading] = useState(false)
+    // Instructions expand modal
+    const [showInstructionsExpanded, setShowInstructionsExpanded] = useState(false)
+    const [expandedInstructions, setExpandedInstructions] = useState("")
+    // UserPrompt expand modal
+    const [showUserPromptExpanded, setShowUserPromptExpanded] = useState(false)
+    const [expandedUserPrompt, setExpandedUserPrompt] = useState("")
+    // OutputFormatPrompt expand modal
+    const [showOutputFormatExpanded, setShowOutputFormatExpanded] = useState(false)
+    const [expandedOutputFormat, setExpandedOutputFormat] = useState("")
     // Loading and error states
     const [loading, setLoading] = useState(false)
     const [error, setError] = useState<string | null>(null)
@@ -259,6 +274,8 @@ export default function IntegrationsPage() {
             apiKey: integration.config.apiKey || "",
             baseUrl: integration.config.baseUrl || "",
             instructions: integration.config.instructions || "",
+            userPrompt: integration.config.userPrompt || "",
+            outputFormatPrompt: integration.config.outputFormatPrompt || "",
             reasoningEffort: integration.config.reasoningEffort || "low",
         })
         setEditingId(integration.id)
@@ -328,6 +345,8 @@ export default function IntegrationsPage() {
             apiKey: formState.apiKey,
             baseUrl: formState.baseUrl,
             instructions: formState.instructions,
+            userPrompt: formState.userPrompt,
+            outputFormatPrompt: formState.outputFormatPrompt,
             reasoningEffort: formState.reasoningEffort,
         }
 
@@ -584,15 +603,101 @@ export default function IntegrationsPage() {
                                 </div>
                                 <div className="space-y-2">
                                     <label className="text-sm font-medium">Instructions *</label>
-                                    <Textarea
-                                        placeholder="Enter instructions for LLM to process extracted data..."
-                                        value={formState.instructions}
-                                        onChange={(e) => setFormState({ ...formState, instructions: e.target.value })}
-                                        disabled={isUser}
-                                        rows={4}
-                                        required
-                                    />
-                                    <p className="text-xs text-slate-500">Instructions for LLM. The extracted data from document processing will be passed as input.</p>
+                                    <div className="relative">
+                                        <Textarea
+                                            placeholder="Enter instructions for LLM to process extracted data..."
+                                            value={formState.instructions}
+                                            onChange={(e) => setFormState({ ...formState, instructions: e.target.value })}
+                                            disabled={isUser}
+                                            rows={6}
+                                            className="resize-y min-h-[120px] pr-8"
+                                            required
+                                        />
+                                        {!isUser && (
+                                            <button
+                                                type="button"
+                                                title="Expand editor"
+                                                onClick={() => {
+                                                    setExpandedInstructions(formState.instructions)
+                                                    setShowInstructionsExpanded(true)
+                                                }}
+                                                className="absolute bottom-2 right-2 p-1 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded transition-colors"
+                                            >
+                                                <Maximize2 className="h-3.5 w-3.5" />
+                                            </button>
+                                        )}
+                                    </div>
+                                    <p className="text-xs text-slate-500">System instructions for LLM — defines role and behavior. Passed as the <code className="bg-slate-100 px-1 rounded">instructions</code> parameter.</p>
+                                </div>
+
+                                {/* User Prompt */}
+                                <div className="space-y-2">
+                                    <div className="flex items-center gap-2">
+                                        <label className="text-sm font-medium">User Prompt</label>
+                                        <span className="text-xs text-slate-400">(optional)</span>
+                                    </div>
+                                    <div className="relative">
+                                        <Textarea
+                                            placeholder="e.g. Compare the following documents and highlight discrepancies..."
+                                            value={formState.userPrompt}
+                                            onChange={(e) => setFormState({ ...formState, userPrompt: e.target.value })}
+                                            disabled={isUser}
+                                            rows={4}
+                                            className="resize-y min-h-[90px] pr-8"
+                                        />
+                                        {!isUser && (
+                                            <button
+                                                type="button"
+                                                title="Expand editor"
+                                                onClick={() => {
+                                                    setExpandedUserPrompt(formState.userPrompt)
+                                                    setShowUserPromptExpanded(true)
+                                                }}
+                                                className="absolute bottom-2 right-2 p-1 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded transition-colors"
+                                            >
+                                                <Maximize2 className="h-3.5 w-3.5" />
+                                            </button>
+                                        )}
+                                    </div>
+                                    <p className="text-xs text-slate-500">Prepended before the injected OCR structured data. If empty, only the OCR data is sent as input.</p>
+                                </div>
+
+                                {/* Output Format Prompt */}
+                                <div className="space-y-2">
+                                    <div className="flex items-center gap-2">
+                                        <label className="text-sm font-medium">Output Format Prompt</label>
+                                        <span className="text-xs text-slate-400">(optional)</span>
+                                    </div>
+                                    <div className="relative">
+                                        <Textarea
+                                            placeholder="e.g. Respond in JSON with keys: summary, discrepancies, recommendation."
+                                            value={formState.outputFormatPrompt}
+                                            onChange={(e) => setFormState({ ...formState, outputFormatPrompt: e.target.value })}
+                                            disabled={isUser}
+                                            rows={3}
+                                            className="resize-y min-h-[72px] pr-8"
+                                        />
+                                        {!isUser && (
+                                            <button
+                                                type="button"
+                                                title="Expand editor"
+                                                onClick={() => {
+                                                    setExpandedOutputFormat(formState.outputFormatPrompt)
+                                                    setShowOutputFormatExpanded(true)
+                                                }}
+                                                className="absolute bottom-2 right-2 p-1 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded transition-colors"
+                                            >
+                                                <Maximize2 className="h-3.5 w-3.5" />
+                                            </button>
+                                        )}
+                                    </div>
+                                    <p className="text-xs text-slate-500">Appended after the OCR data. Use this to define the expected output structure or format.</p>
+                                </div>
+
+                                {/* Input preview */}
+                                <div className="rounded-md bg-slate-50 border border-slate-200 p-3 text-xs text-slate-500 space-y-1">
+                                    <p className="font-semibold text-slate-600">Input sent to LLM:</p>
+                                    <p><span className="font-mono bg-white border border-slate-200 rounded px-1">User Prompt</span> + <span className="font-mono bg-blue-50 border border-blue-200 text-blue-700 rounded px-1">{'{{OCR Data}}'}</span> + <span className="font-mono bg-white border border-slate-200 rounded px-1">Output Format Prompt</span></p>
                                 </div>
                                 {/* Test Connection Section */}
                                 <div className="space-y-3 pt-4 border-t">
@@ -611,8 +716,8 @@ export default function IntegrationsPage() {
                                         type="button"
                                         variant="outline"
                                         onClick={async () => {
-                                            if (!formState.apiKey || !formState.model || !formState.instructions) {
-                                                alert("Please fill in API Key, Model, and Instructions first")
+                                            if (!formState.apiKey || !formState.model) {
+                                                alert("Please fill in API Key and Model first")
                                                 return
                                             }
                                             if (!testInput.trim()) {
@@ -634,17 +739,19 @@ export default function IntegrationsPage() {
                                                         model: formState.model,
                                                         reasoningEffort: formState.reasoningEffort,
                                                         instructions: formState.instructions,
+                                                        userPrompt: formState.userPrompt || undefined,
+                                                        outputFormatPrompt: formState.outputFormatPrompt || undefined,
                                                         testInput: testInput
                                                     })
                                                 })
                                                 const data = await response.json()
                                                 if (response.ok) {
-                                                    setTestResult(data.output || "Success!")
+                                                    setTestResult(`✓ ${data.output || "Success!"}`)
                                                 } else {
-                                                    setTestResult(`Error: ${data.detail || "Test failed"}`)
+                                                    setTestResult(`✗ Error: ${data.detail || "Test failed"}`)
                                                 }
                                             } catch (error) {
-                                                setTestResult(`Error: ${error instanceof Error ? error.message : "Network error"}`)
+                                                setTestResult(`✗ Error: ${error instanceof Error ? error.message : "Network error"}`)
                                             } finally {
                                                 setTestLoading(false)
                                             }
@@ -653,6 +760,14 @@ export default function IntegrationsPage() {
                                     >
                                         {testLoading ? "Testing..." : "Test Connection"}
                                     </Button>
+                                    {testResult && (
+                                        <div className={`p-3 rounded-md text-sm font-mono whitespace-pre-wrap ${testResult.startsWith("✓")
+                                                ? "bg-green-50 text-green-800 border border-green-200"
+                                                : "bg-red-50 text-red-800 border border-red-200"
+                                            }`}>
+                                            {testResult}
+                                        </div>
+                                    )}
                                 </div>
                             </div>
                         )}
@@ -872,6 +987,94 @@ export default function IntegrationsPage() {
 
     return (
         <div className="space-y-6">
+            {/* User Prompt Expanded Modal */}
+            {showUserPromptExpanded && (
+                <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+                    <div className="bg-white rounded-xl shadow-2xl w-full max-w-3xl flex flex-col" style={{ height: "80vh" }}>
+                        <div className="flex items-center justify-between px-5 py-4 border-b">
+                            <h3 className="text-base font-semibold text-slate-800">User Prompt</h3>
+                            <div className="flex gap-2">
+                                <Button type="button" variant="outline" size="sm" onClick={() => setShowUserPromptExpanded(false)}>Cancel</Button>
+                                <Button type="button" size="sm" onClick={() => {
+                                    setFormState(prev => ({ ...prev, userPrompt: expandedUserPrompt }))
+                                    setShowUserPromptExpanded(false)
+                                }}>Done</Button>
+                            </div>
+                        </div>
+                        <textarea
+                            className="flex-1 w-full resize-none p-4 text-sm text-slate-800 focus:outline-none font-mono leading-relaxed"
+                            placeholder="Enter user prompt..."
+                            value={expandedUserPrompt}
+                            onChange={(e) => setExpandedUserPrompt(e.target.value)}
+                            autoFocus
+                        />
+                    </div>
+                </div>
+            )}
+
+            {/* Output Format Prompt Expanded Modal */}
+            {showOutputFormatExpanded && (
+                <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+                    <div className="bg-white rounded-xl shadow-2xl w-full max-w-3xl flex flex-col" style={{ height: "80vh" }}>
+                        <div className="flex items-center justify-between px-5 py-4 border-b">
+                            <h3 className="text-base font-semibold text-slate-800">Output Format Prompt</h3>
+                            <div className="flex gap-2">
+                                <Button type="button" variant="outline" size="sm" onClick={() => setShowOutputFormatExpanded(false)}>Cancel</Button>
+                                <Button type="button" size="sm" onClick={() => {
+                                    setFormState(prev => ({ ...prev, outputFormatPrompt: expandedOutputFormat }))
+                                    setShowOutputFormatExpanded(false)
+                                }}>Done</Button>
+                            </div>
+                        </div>
+                        <textarea
+                            className="flex-1 w-full resize-none p-4 text-sm text-slate-800 focus:outline-none font-mono leading-relaxed"
+                            placeholder="Enter output format prompt..."
+                            value={expandedOutputFormat}
+                            onChange={(e) => setExpandedOutputFormat(e.target.value)}
+                            autoFocus
+                        />
+                    </div>
+                </div>
+            )}
+
+            {/* Instructions Expanded Modal */}
+            {showInstructionsExpanded && (
+                <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+                    <div className="bg-white rounded-xl shadow-2xl w-full max-w-3xl flex flex-col" style={{ height: "80vh" }}>
+                        <div className="flex items-center justify-between px-5 py-4 border-b">
+                            <h3 className="text-base font-semibold text-slate-800">Instructions</h3>
+                            <div className="flex gap-2">
+                                <Button
+                                    type="button"
+                                    variant="outline"
+                                    size="sm"
+                                    onClick={() => setShowInstructionsExpanded(false)}
+                                >
+                                    Cancel
+                                </Button>
+                                <Button
+                                    type="button"
+                                    size="sm"
+                                    onClick={() => {
+                                        setFormState(prev => ({ ...prev, instructions: expandedInstructions }))
+                                        setShowInstructionsExpanded(false)
+                                    }}
+                                >
+                                    Done
+                                </Button>
+                            </div>
+                        </div>
+                        <textarea
+                            className="flex-1 w-full resize-none p-4 text-sm text-slate-800 focus:outline-none font-mono leading-relaxed"
+                            placeholder="Enter instructions for LLM to process extracted data..."
+                            value={expandedInstructions}
+                            onChange={(e) => setExpandedInstructions(e.target.value)}
+                            autoFocus
+                        />
+                    </div>
+                </div>
+            )}
+
             <div className="flex items-center justify-between gap-4">
                 <div>
                     <h2 className="text-2xl font-bold tracking-tight">Integration</h2>

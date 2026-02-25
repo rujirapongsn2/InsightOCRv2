@@ -14,14 +14,8 @@ frontend/.env.local
 !frontend/.env.example
 !frontend/.env*.example
 # Test data files (PDFs, images) — keep only scripts
-test/*.pdf
-test/*.png
-test/*.jpg
-test/*.jpeg
-test/*.tiff
-test/*.bmp
-test/*.gif
-test/*.webp
+test/*
+!test/Demo Use Case/
 
 /.git_old/
 frontend/.next
@@ -35,6 +29,8 @@ connection_test_result.txt
 debug_*.py
 test_*.py
 !test/test_softnix_genai.py
+!test/test_stream.py
+!test/test_structured_data.py
 temp_*.py
 fix_*.py
 update_*.py

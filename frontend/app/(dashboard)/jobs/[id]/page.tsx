@@ -11,6 +11,8 @@ import { Input } from "@/components/ui/input"
 import dynamic from "next/dynamic"
 import { getApiBaseUrl } from "@/lib/api"
 import { useAuth } from "@/components/auth-provider"
+import LlmResultRenderer from "@/components/LlmResultRenderer"
+import { generateExportHtml, generateExportText } from "@/lib/exportReportHtml"
 
 const PDFViewer = dynamic(
     () => import("@/components/document/PDFViewer").then(mod => mod.PDFViewer),
@@ -34,7 +36,7 @@ interface Document {
     id: string
     filename: string
     status: string
-    schema_id?: string
+    schema_id?: string | null
     extracted_data?: Record<string, any> | Record<string, any>[]
     reviewed_data?: Record<string, any> | Record<string, any>[]
     ocr_text?: string
@@ -42,6 +44,13 @@ interface Document {
     processing_error?: string
 }
 type ExtractedEntry = Record<string, any>
+type FieldPathSegment = string | number
+
+interface EditableField {
+    path: FieldPathSegment[]
+    label: string
+    value: any
+}
 
 type IntegrationType = "api" | "workflow" | "llm"
 
@@ -92,6 +101,7 @@ export default function JobDetailPage() {
     const [uploading, setUploading] = useState(false)
     const [loading, setLoading] = useState(true)
     const [processingDocs, setProcessingDocs] = useState<Set<string>>(new Set())
+    const [docProgress, setDocProgress] = useState<Record<string, { percent: number; stage: string }>>({})
     const [reviewDoc, setReviewDoc] = useState<Document | null>(null)
     const [editedOcrText, setEditedOcrText] = useState("")
     const [editedData, setEditedData] = useState<ExtractedEntry[]>([])
@@ -104,6 +114,10 @@ export default function JobDetailPage() {
     // LLM Results for export
     const [llmResults, setLlmResults] = useState<Array<{ id: string; filename: string; output: string; success: boolean; error?: string }>>([])
     const [showLlmResultsModal, setShowLlmResultsModal] = useState(false)
+    const [llmStreaming, setLlmStreaming] = useState(false)
+    const [llmStreamText, setLlmStreamText] = useState("")
+    const llmStreamRef = useRef<HTMLDivElement>(null)
+    const userScrolledRef = useRef(false)
     // Delete confirmation (document)
     const [deleteConfirmDoc, setDeleteConfirmDoc] = useState<Document | null>(null)
     const [deleting, setDeleting] = useState(false)
@@ -115,6 +129,9 @@ export default function JobDetailPage() {
     // Reject document from review modal
     const [rejectConfirm, setRejectConfirm] = useState(false)
     const [rejecting, setRejecting] = useState(false)
+    // Integration result history
+    const [resultHistory, setResultHistory] = useState<Array<{ id: string; status: string; model_used: string | null; integration_type: string | null; integration_name: string | null; created_at: string }>>([])
+    const [loadingHistory, setLoadingHistory] = useState(false)
 
     const apiBase = getApiBaseUrl()
 
@@ -139,12 +156,20 @@ export default function JobDetailPage() {
         loadIntegrations()
     }, [])
 
-    // Reload integrations when integration modal opens to get latest data
+    // Reload integrations and reset state when integration modal opens
     useEffect(() => {
         if (showIntegrationModal) {
+            setIntegrationMessage(null)
             loadIntegrations()
         }
     }, [showIntegrationModal])
+
+    // Auto-scroll streaming content
+    useEffect(() => {
+        if (llmStreaming && llmStreamRef.current && !userScrolledRef.current) {
+            llmStreamRef.current.scrollTop = llmStreamRef.current.scrollHeight
+        }
+    }, [llmStreamText, llmStreaming])
 
     const fetchJobData = async () => {
         try {
@@ -168,7 +193,12 @@ export default function JobDetailPage() {
             })
             if (docsRes.ok) {
                 const docs = await docsRes.json()
-                setDocuments(docs)
+                const sorted = [...docs].sort((a: Document, b: Document) => {
+                    const ta = a.uploaded_at ? new Date(a.uploaded_at).getTime() : 0
+                    const tb = b.uploaded_at ? new Date(b.uploaded_at).getTime() : 0
+                    return tb - ta
+                })
+                setDocuments(sorted)
             }
         } catch (error) {
             console.error("Failed to fetch documents", error)
@@ -190,6 +220,57 @@ export default function JobDetailPage() {
         }
     }
 
+    const loadResultHistory = async () => {
+        const token = typeof window !== "undefined" ? localStorage.getItem("token") : null
+        if (!token) return
+        setLoadingHistory(true)
+        try {
+            const res = await fetch(`${apiBase}/integrations/results?job_id=${jobId}`, {
+                headers: { Authorization: `Bearer ${token}` },
+            })
+            if (res.ok) {
+                setResultHistory(await res.json())
+            }
+        } catch (err) {
+            console.error("Failed to load result history", err)
+        } finally {
+            setLoadingHistory(false)
+        }
+    }
+
+    const handleViewHistoryResult = async (resultId: string) => {
+        const token = typeof window !== "undefined" ? localStorage.getItem("token") : null
+        if (!token) return
+        try {
+            const res = await fetch(`${apiBase}/integrations/results/${resultId}`, {
+                headers: { Authorization: `Bearer ${token}` },
+            })
+            if (!res.ok) throw new Error("Failed to fetch result")
+            const data = await res.json()
+            setLlmStreamText("")
+            setLlmStreaming(false)
+            if (data.status === "success" && data.output) {
+                setLlmResults([{
+                    id: data.id,
+                    filename: job?.name ? `${job.name} — Validation Report` : "Validation Report",
+                    output: data.output,
+                    success: true,
+                }])
+            } else {
+                setLlmResults([{
+                    id: data.id,
+                    filename: job?.name || "Result",
+                    output: "",
+                    success: false,
+                    error: data.error_message || "Unknown error",
+                }])
+            }
+            setShowLlmResultsModal(true)
+        } catch (err) {
+            console.error("Failed to load result", err)
+        }
+    }
+
     useEffect(() => {
         const hydrate = async () => {
             setLoading(true)
@@ -197,138 +278,144 @@ export default function JobDetailPage() {
             setLoading(false)
         }
 
-        hydrate()
+        hydrate().then(() => {
+            setDocuments(prev => {
+                const inFlight = prev.filter(d => d.status === "processing" || d.status === "queued")
+                inFlight.forEach(d => startPolling(d.id))
+                return prev
+            })
+        })
+        loadResultHistory()
     }, [jobId])
 
     const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
         if (!e.target.files || e.target.files.length === 0) return
 
         setUploading(true)
-        const file = e.target.files[0]
-        const formData = new FormData()
-        formData.append("file", file)
-        formData.append("job_id", jobId)
+        const files = Array.from<File>(e.target.files)
+        const token = typeof window !== "undefined" ? localStorage.getItem("token") : null
+        const failed: string[] = []
 
-        try {
-            const token = typeof window !== "undefined" ? localStorage.getItem("token") : null
-            const res = await fetch(`${apiBase}/documents/upload`, {
-                method: "POST",
-                headers: token ? { Authorization: `Bearer ${token}` } : undefined,
-                body: formData
-            })
+        for (const file of files) {
+            const formData = new FormData()
+            formData.append("file", file)
+            formData.append("job_id", jobId)
 
-            if (res.ok) {
-                await fetchDocuments()
-            } else {
-                alert("Upload failed")
+            try {
+                const res = await fetch(`${apiBase}/documents/upload`, {
+                    method: "POST",
+                    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+                    body: formData
+                })
+
+                if (res.ok) {
+                    const newDoc: Document = await res.json()
+                    setDocuments(prev => [newDoc, ...prev])
+                } else {
+                    failed.push(file.name)
+                }
+            } catch (error) {
+                console.error("Upload error", error)
+                failed.push(file.name)
             }
-        } catch (error) {
-            console.error("Upload error", error)
-            alert("Upload error")
-        } finally {
-            setUploading(false)
-            if (fileInputRef.current) {
-                fileInputRef.current.value = ""
-            }
+        }
+
+        setUploading(false)
+        if (fileInputRef.current) {
+            fileInputRef.current.value = ""
+        }
+        if (failed.length > 0) {
+            alert(`Upload failed for: ${failed.join(", ")}`)
         }
     }
 
     const handleSchemaChange = (docId: string, schemaId: string) => {
+        const nextSchemaId = schemaId === "auto" ? null : schemaId
         setDocuments(prev => prev.map(doc =>
-            doc.id === docId ? { ...doc, schema_id: schemaId } : doc
+            doc.id === docId ? { ...doc, schema_id: nextSchemaId } : doc
         ))
+    }
+
+    const startPolling = (docId: string) => {
+        const token = typeof window !== "undefined" ? localStorage.getItem("token") : null
+        setProcessingDocs(prev => new Set(prev).add(docId))
+        const pollInterval = setInterval(async () => {
+            try {
+                const statusRes = await fetch(`${apiBase}/documents/${docId}/task-status`, {
+                    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+                })
+                if (!statusRes.ok) {
+                    clearInterval(pollInterval)
+                    setProcessingDocs(prev => { const s = new Set(prev); s.delete(docId); return s })
+                    setDocProgress(prev => { const p = { ...prev }; delete p[docId]; return p })
+                    return
+                }
+
+                const status = await statusRes.json()
+
+                if (status.progress) {
+                    setDocProgress(prev => ({
+                        ...prev,
+                        [docId]: {
+                            percent: status.progress.percent ?? 0,
+                            stage: status.progress.stage ?? "",
+                        }
+                    }))
+                }
+
+                if (status.status === "extraction_completed" || status.status === "reviewed" || status.status === "failed") {
+                    clearInterval(pollInterval)
+                    setProcessingDocs(prev => { const s = new Set(prev); s.delete(docId); return s })
+                    setDocProgress(prev => { const p = { ...prev }; delete p[docId]; return p })
+                    await fetchDocuments()
+                }
+            } catch (pollError) {
+                console.error("Polling error", pollError)
+                clearInterval(pollInterval)
+                setProcessingDocs(prev => { const s = new Set(prev); s.delete(docId); return s })
+                setDocProgress(prev => { const p = { ...prev }; delete p[docId]; return p })
+            }
+        }, 1000)
+        return pollInterval
     }
 
     const handleProcess = async (docId: string) => {
         const doc = documents.find(d => d.id === docId)
-        if (!doc || !doc.schema_id) {
-            alert("Please select a schema first")
-            return
-        }
+        if (!doc) return
 
         setProcessingDocs(prev => new Set(prev).add(docId))
+        setDocProgress(prev => ({ ...prev, [docId]: { percent: 0, stage: "queuing" } }))
 
         try {
             const token = typeof window !== "undefined" ? localStorage.getItem("token") : null
-            // Dispatch the background task
             const res = await fetch(`${apiBase}/documents/${docId}/process`, {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",
                     ...(token ? { Authorization: `Bearer ${token}` } : {})
                 },
-                body: JSON.stringify({ schema_id: doc.schema_id })
+                body: JSON.stringify({ schema_id: doc.schema_id || null })
             })
 
             if (!res.ok) {
                 alert("Failed to start processing")
-                setProcessingDocs(prev => {
-                    const newSet = new Set(prev)
-                    newSet.delete(docId)
-                    return newSet
-                })
+                setProcessingDocs(prev => { const s = new Set(prev); s.delete(docId); return s })
+                setDocProgress(prev => { const p = { ...prev }; delete p[docId]; return p })
                 return
             }
 
-            // Poll for task completion
-            const pollInterval = setInterval(async () => {
-                try {
-                    const statusRes = await fetch(`${apiBase}/documents/${docId}/task-status`, {
-                        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
-                    })
-                    if (!statusRes.ok) {
-                        console.error("[Poll] Failed to check status")
-                        clearInterval(pollInterval)
-                        setProcessingDocs(prev => {
-                            const newSet = new Set(prev)
-                            newSet.delete(docId)
-                            return newSet
-                        })
-                        return
-                    }
-
-                    const status = await statusRes.json()
-                    console.log(`[Poll] Document ${docId} status: ${status.status}`)
-
-                    // Check if processing is complete
-                    if (status.status === "extraction_completed" || status.status === "reviewed" || status.status === "failed") {
-                        console.log(`[Poll] Processing complete for ${docId}, refreshing documents...`)
-                        clearInterval(pollInterval)
-
-                        // Remove from processing set immediately to avoid race conditions
-                        setProcessingDocs(prev => {
-                            const newSet = new Set(prev)
-                            newSet.delete(docId)
-                            return newSet
-                        })
-
-                        await fetchDocuments()
-                        console.log(`[Poll] Documents refreshed`)
-                    }
-                } catch (pollError) {
-                    console.error("Polling error", pollError)
-                    clearInterval(pollInterval)
-                    setProcessingDocs(prev => {
-                        const newSet = new Set(prev)
-                        newSet.delete(docId)
-                        return newSet
-                    })
-                }
-            }, 2000)  // Poll every 2 seconds
+            startPolling(docId)
 
         } catch (error) {
             console.error("Processing error", error)
             alert("Processing error")
-            setProcessingDocs(prev => {
-                const newSet = new Set(prev)
-                newSet.delete(docId)
-                return newSet
-            })
+            setProcessingDocs(prev => { const s = new Set(prev); s.delete(docId); return s })
+            setDocProgress(prev => { const p = { ...prev }; delete p[docId]; return p })
         }
     }
 
     const handleProcessAll = async () => {
-        const docsToProcess = documents.filter(d => d.schema_id && d.status === "uploaded")
+        const docsToProcess = documents.filter(d => d.status === "uploaded")
 
         for (const doc of docsToProcess) {
             await handleProcess(doc.id)
@@ -410,6 +497,12 @@ export default function JobDetailPage() {
 
     const canDeleteJob = user && job && (user.is_superuser || user.role === "admin" || user.id === job.user_id)
 
+    const getSchemaSourceLabel = (doc: Document) => {
+        if (!doc.schema_id) return "auto"
+        const selectedSchema = schemas.find((schema) => schema.id === doc.schema_id)
+        return selectedSchema ? selectedSchema.name : "selected schema"
+    }
+
     const normalizeExtractedData = (data: unknown): ExtractedEntry[] => {
         if (!data) return []
 
@@ -425,6 +518,22 @@ export default function JobDetailPage() {
             return normalizeExtractedData((data as any).structured_output)
         }
 
+        // Handle API structured wrapper with metadata + data payload
+        if (
+            typeof data === "object" &&
+            data !== null &&
+            'data' in data &&
+            (
+                'schema_source' in data ||
+                'success' in data ||
+                'schema' in data ||
+                'structure_model' in data
+            )
+        ) {
+            console.log("[normalizeExtractedData] Unwrapping structured metadata envelope")
+            return normalizeExtractedData((data as any).data)
+        }
+
         // Handle 'data' wrapper
         if (typeof data === "object" && data !== null && 'data' in data && Object.keys(data).length === 1) {
             console.log("[normalizeExtractedData] Unwrapping 'data' field")
@@ -433,7 +542,7 @@ export default function JobDetailPage() {
 
         if (Array.isArray(data)) {
             return data
-                .filter((entry) => entry && typeof entry === "object" && !Array.isArray(entry))
+                .filter((entry) => entry && typeof entry === "object" && !Array.isArray(entry) && Object.keys(entry).length > 0)
                 .map((entry) => entry as ExtractedEntry)
         }
 
@@ -447,10 +556,61 @@ export default function JobDetailPage() {
         }
 
         if (typeof data === "object") {
+            if (Object.keys(data as object).length === 0) {
+                return []
+            }
             return [data as ExtractedEntry]
         }
 
         return []
+    }
+
+    const formatFieldPathLabel = (path: FieldPathSegment[]): string => {
+        return path.reduce<string>((acc, segment) => {
+            if (typeof segment === "number") {
+                return `${acc}[${segment}]`
+            }
+            return acc ? `${acc}.${segment}` : segment
+        }, "")
+    }
+
+    const collectEditableFields = (value: any, currentPath: FieldPathSegment[] = []): EditableField[] => {
+        if (Array.isArray(value)) {
+            return value.flatMap((item, idx) => collectEditableFields(item, [...currentPath, idx]))
+        }
+
+        if (value && typeof value === "object") {
+            return Object.entries(value).flatMap(([key, nestedValue]) =>
+                collectEditableFields(nestedValue, [...currentPath, key])
+            )
+        }
+
+        return [{
+            path: currentPath,
+            label: formatFieldPathLabel(currentPath),
+            value,
+        }]
+    }
+
+    const setValueAtPath = (source: any, path: FieldPathSegment[], nextValue: any): any => {
+        if (path.length === 0) {
+            return nextValue
+        }
+
+        const [head, ...tail] = path
+
+        if (Array.isArray(source)) {
+            const index = Number(head)
+            const cloned = [...source]
+            cloned[index] = setValueAtPath(cloned[index], tail, nextValue)
+            return cloned
+        }
+
+        const safeSource = source && typeof source === "object" ? source : {}
+        return {
+            ...safeSource,
+            [head]: setValueAtPath((safeSource as Record<string, any>)[String(head)], tail, nextValue),
+        }
     }
 
     const handleReview = (doc: Document) => {
@@ -492,10 +652,10 @@ export default function JobDetailPage() {
         }
     }
 
-    const handleDataFieldChange = (index: number, fieldName: string, value: any) => {
+    const handleDataFieldChange = (index: number, fieldPath: FieldPathSegment[], value: string) => {
         setEditedData(prev => {
             const next = [...prev]
-            next[index] = { ...(next[index] || {}), [fieldName]: value }
+            next[index] = setValueAtPath(next[index] || {}, fieldPath, value)
             return next
         })
     }
@@ -503,11 +663,14 @@ export default function JobDetailPage() {
     const handleSendToIntegration = async () => {
         if (!job || !selectedIntegration) return
 
+        const integration = integrations.find(int => int.id === selectedIntegration)
+
         setSendingIntegration(true)
         setIntegrationMessage(null)
 
         const payload = {
             integration_id: selectedIntegration,
+            job_id: jobId,
             job_name: job.name,
             documents: documents.map(doc => ({
                 id: String(doc.id),
@@ -516,6 +679,112 @@ export default function JobDetailPage() {
             }))
         }
 
+        // Use streaming for LLM integrations
+        if (integration?.type === "llm") {
+            // Open modal immediately with streaming state
+            setLlmStreamText("")
+            setLlmStreaming(true)
+            setLlmResults([])
+            setShowLlmResultsModal(true)
+            setShowIntegrationModal(false)
+            userScrolledRef.current = false
+
+            try {
+                const token = localStorage.getItem("token")
+                const res = await fetch(`${apiBase}/integrations/send-stream`, {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                        "Authorization": `Bearer ${token}`
+                    },
+                    body: JSON.stringify(payload)
+                })
+
+                if (!res.ok) {
+                    const errData = await res.json().catch(() => ({}))
+                    const errMsg = typeof errData.detail === "string" ? errData.detail : JSON.stringify(errData.detail || errData)
+                    throw new Error(errMsg || `Stream failed: ${res.status}`)
+                }
+
+                const reader = res.body?.getReader()
+                const decoder = new TextDecoder()
+                let accumulated = ""
+                let buffer = ""
+
+                if (!reader) throw new Error("No response body")
+
+                while (true) {
+                    const { done, value } = await reader.read()
+                    if (done) break
+
+                    buffer += decoder.decode(value, { stream: true })
+                    const lines = buffer.split("\n")
+                    buffer = lines.pop() || ""
+
+                    for (const line of lines) {
+                        if (!line.startsWith("data: ")) continue
+                        try {
+                            const evt = JSON.parse(line.slice(6))
+                            if (evt.type === "delta") {
+                                accumulated += evt.text
+                                setLlmStreamText(accumulated)
+                            } else if (evt.type === "done") {
+                                const finalText = evt.full_output || accumulated
+                                setLlmStreamText(finalText)
+                                setLlmResults([{
+                                    id: "combined",
+                                    filename: evt.filename || `${job.name} — Validation Report`,
+                                    output: finalText,
+                                    success: true
+                                }])
+                                setLlmStreaming(false)
+                            } else if (evt.type === "error") {
+                                setLlmResults([{
+                                    id: "combined",
+                                    filename: job.name,
+                                    output: "",
+                                    success: false,
+                                    error: evt.message
+                                }])
+                                setLlmStreaming(false)
+                            }
+                        } catch {
+                            // skip malformed lines
+                        }
+                    }
+                }
+
+                // If stream ended without done event
+                if (accumulated && llmResults.length === 0) {
+                    setLlmResults([{
+                        id: "combined",
+                        filename: `${job.name} — Validation Report`,
+                        output: accumulated,
+                        success: true
+                    }])
+                }
+                setLlmStreaming(false)
+                setIntegrationMessage("LLM processing completed")
+                loadResultHistory()
+            } catch (err: any) {
+                setLlmStreaming(false)
+                setIntegrationMessage(err?.message || "Failed to send")
+                if (!llmResults.length) {
+                    setLlmResults([{
+                        id: "combined",
+                        filename: job.name,
+                        output: "",
+                        success: false,
+                        error: err?.message || "Stream failed"
+                    }])
+                }
+            } finally {
+                setSendingIntegration(false)
+            }
+            return
+        }
+
+        // Non-LLM integrations: use original /send endpoint
         try {
             const token = localStorage.getItem("token")
             const res = await fetch(`${apiBase}/integrations/send`, {
@@ -534,19 +803,11 @@ export default function JobDetailPage() {
             }
 
             const result = await res.json()
-
-            const integration = integrations.find(int => int.id === selectedIntegration)
-
-            if (integration?.type === "llm" && result.results) {
-                setLlmResults(result.results)
-                setShowLlmResultsModal(true)
-                setShowIntegrationModal(false)
-                setIntegrationMessage("LLM processing completed")
-            } else {
-                setIntegrationMessage(result.message || "Sent successfully")
-            }
+            setIntegrationMessage(result.message || "Sent successfully")
+            loadResultHistory()
         } catch (err: any) {
             setIntegrationMessage(err?.message || "Failed to send")
+            loadResultHistory()
         } finally {
             setSendingIntegration(false)
         }
@@ -614,8 +875,6 @@ export default function JobDetailPage() {
         hour: '2-digit',
         minute: '2-digit'
     }) : new Date().toLocaleString('th-TH')
-    const allHaveSchema = documents.length > 0 && documents.every(d => d.schema_id)
-
     // Helper function to get status badge color
     const getStatusColor = (status: string) => {
         switch (status.toLowerCase()) {
@@ -680,7 +939,7 @@ export default function JobDetailPage() {
                         <div className="flex items-center justify-between mb-4">
                             <h3 className="text-lg font-semibold">Documents</h3>
                             <div className="flex gap-2">
-                                {allHaveSchema && documents.some(d => d.status === "uploaded") && (
+                                {documents.some(d => d.status === "uploaded") && (
                                     <Button onClick={handleProcessAll} variant="outline">
                                         Process All
                                     </Button>
@@ -691,6 +950,7 @@ export default function JobDetailPage() {
                                     className="hidden"
                                     onChange={handleFileUpload}
                                     accept=".pdf,image/*"
+                                    multiple
                                 />
                                 <Button onClick={() => fileInputRef.current?.click()} disabled={uploading}>
                                     <Upload className="mr-2 h-4 w-4" />
@@ -729,11 +989,11 @@ export default function JobDetailPage() {
                                             <div className="flex items-center gap-2">
                                                 <select
                                                     className="flex h-9 w-full rounded-md border border-slate-200 bg-white px-3 py-1 text-sm"
-                                                    value={doc.schema_id || ""}
+                                                    value={doc.schema_id || "auto"}
                                                     onChange={(e) => handleSchemaChange(doc.id, e.target.value)}
                                                     disabled={doc.status !== "uploaded"}
                                                 >
-                                                    <option value="">Select Schema...</option>
+                                                    <option value="auto">Auto (default)</option>
                                                     {schemas.map(schema => (
                                                         <option key={schema.id} value={schema.id}>{schema.name}</option>
                                                     ))}
@@ -743,7 +1003,7 @@ export default function JobDetailPage() {
                                                     <>
                                                         <Button
                                                             onClick={() => handleProcess(doc.id)}
-                                                            disabled={!doc.schema_id || isProcessing}
+                                                            disabled={isProcessing}
                                                             size="sm"
                                                             variant={doc.status === "failed" ? "outline" : "default"}
                                                             className={doc.status === "failed" ? "bg-[rgba(243,144,63,0.1)] text-[rgb(243,144,63)] border-[rgb(243,144,63)] hover:bg-[rgba(243,144,63,0.2)]" : ""}
@@ -777,10 +1037,32 @@ export default function JobDetailPage() {
                                                         variant="outline"
                                                     >
                                                         <Eye className="mr-2 h-4 w-4" />
-                                                        Review
+                                                        Preview
                                                     </Button>
                                                 )}
                                             </div>
+
+                                            {/* Progress bar shown while processing */}
+                                            {isProcessing && docProgress[doc.id] && (
+                                                <div className="mt-2">
+                                                    <div className="flex items-center justify-between mb-1">
+                                                        <span className="text-xs text-slate-500 capitalize">
+                                                            {docProgress[doc.id].stage
+                                                                ? docProgress[doc.id].stage.replace(/_/g, ' ')
+                                                                : "Processing..."}
+                                                        </span>
+                                                        <span className="text-xs font-medium text-slate-700">
+                                                            {docProgress[doc.id].percent}%
+                                                        </span>
+                                                    </div>
+                                                    <div className="w-full bg-slate-200 rounded-full h-1.5">
+                                                        <div
+                                                            className="bg-blue-500 h-1.5 rounded-full transition-all duration-500"
+                                                            style={{ width: `${docProgress[doc.id].percent}%` }}
+                                                        />
+                                                    </div>
+                                                </div>
+                                            )}
                                         </div>
                                     )
                                 })}
@@ -865,6 +1147,60 @@ export default function JobDetailPage() {
                                 <p className="text-xs text-slate-500 mt-2">All documents are reviewed. Choose an integration channel to continue.</p>
                             </div>
                         )}
+
+                        {/* Integration History */}
+                        {resultHistory.length > 0 && (
+                            <div className="mt-4 pt-4 border-t">
+                                <h4 className="text-sm font-semibold text-[#1a365d] mb-2 flex items-center gap-1.5">
+                                    <FileText className="h-3.5 w-3.5" />
+                                    ประวัติการเชื่อมต่อ ({resultHistory.length})
+                                </h4>
+                                <div className="space-y-1.5 max-h-60 overflow-y-auto">
+                                    {resultHistory.map((r) => {
+                                        const isLlm = r.integration_type === "llm"
+                                        const typeBadge = r.integration_type === "llm" ? "LLM" : r.integration_type === "api" ? "API" : r.integration_type === "workflow" ? "Workflow" : r.integration_type || "—"
+                                        const typeBgColor = r.integration_type === "llm" ? "bg-[#ebf8ff] text-[#2b6cb0]" : r.integration_type === "api" ? "bg-[#fffaf0] text-[#c05621]" : "bg-[#f0fff4] text-[#276749]"
+
+                                        const rowContent = (
+                                            <>
+                                                <div className="flex items-center gap-2 min-w-0 flex-1">
+                                                    <span className={`inline-block w-2 h-2 rounded-full flex-shrink-0 ${r.status === "success" ? "bg-[#276749]" : "bg-[#c53030]"}`} />
+                                                    <span className="text-[#2d3748] truncate">
+                                                        {new Date(r.created_at).toLocaleString("th-TH", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" })}
+                                                    </span>
+                                                </div>
+                                                <div className="flex items-center gap-1.5 flex-shrink-0">
+                                                    <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded ${typeBgColor}`}>{typeBadge}</span>
+                                                    <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full ${r.status === "success" ? "bg-[#f0fff4] text-[#276749]" : "bg-[#fff5f5] text-[#c53030]"}`}>
+                                                        {r.status === "success" ? "PASS" : "FAILED"}
+                                                    </span>
+                                                </div>
+                                            </>
+                                        )
+
+                                        return isLlm ? (
+                                            <button
+                                                key={r.id}
+                                                onClick={() => handleViewHistoryResult(r.id)}
+                                                className="w-full text-left px-3 py-2 rounded-lg border border-[#e2e8f0] hover:bg-[#ebf8ff] hover:border-[#2b6cb0]/30 transition-colors text-xs flex items-center justify-between gap-2 cursor-pointer"
+                                                title={r.integration_name || "ดูผลลัพธ์"}
+                                            >
+                                                {rowContent}
+                                                <Eye className="h-3 w-3 text-[#2b6cb0] flex-shrink-0" />
+                                            </button>
+                                        ) : (
+                                            <div
+                                                key={r.id}
+                                                className="w-full text-left px-3 py-2 rounded-lg border border-[#e2e8f0] text-xs flex items-center justify-between gap-2"
+                                                title={r.integration_name || ""}
+                                            >
+                                                {rowContent}
+                                            </div>
+                                        )
+                                    })}
+                                </div>
+                            </div>
+                        )}
                     </div>
                 </div>
             </div>
@@ -875,7 +1211,7 @@ export default function JobDetailPage() {
                     <div className="bg-white rounded-lg shadow-xl w-full h-full max-w-[95vw] max-h-[95vh] flex flex-col">
                         {/* Header */}
                         <div className="flex items-center justify-between px-6 py-4 border-b">
-                            <h2 className="text-xl font-semibold">Review: {reviewDoc.filename}</h2>
+                            <h2 className="text-xl font-semibold">Preview: {reviewDoc.filename}</h2>
                             <Button
                                 variant="ghost"
                                 size="icon"
@@ -946,20 +1282,23 @@ export default function JobDetailPage() {
                                 {/* OCR Text Section */}
                                 <div className="bg-white border rounded-lg p-4">
                                     <label className="text-sm font-semibold mb-3 block text-slate-700">
-                                        OCR Text
+                                        AI Extract
                                     </label>
+                                    <p className="text-xs text-slate-500 mb-3">
+                                        Schema Source: {getSchemaSourceLabel(reviewDoc)}
+                                    </p>
                                     <Textarea
                                         value={editedOcrText}
                                         onChange={(e) => setEditedOcrText(e.target.value)}
                                         className="h-48 font-mono text-xs resize-none"
-                                        placeholder="OCR extracted text..."
+                                        placeholder="AI extracted text..."
                                     />
                                 </div>
 
-                                {/* Extracted Data Section */}
+                                {/* Structured Data Section */}
                                 <div className="bg-white border rounded-lg p-4 flex-1">
                                     <label className="text-sm font-semibold mb-3 block text-slate-700">
-                                        Extracted Data
+                                        Structured Data
                                     </label>
                                     <div className="space-y-3">
                                         {editedData.length === 0 && reviewDoc?.processing_error ? (
@@ -969,7 +1308,7 @@ export default function JobDetailPage() {
                                             </div>
                                         ) : editedData.length === 0 ? (
                                             <p className="text-sm text-slate-500 text-center py-8">
-                                                No extracted data available
+                                                No structured data available
                                             </p>
                                         ) : (
                                             editedData.map((entry, idx) => (
@@ -977,14 +1316,14 @@ export default function JobDetailPage() {
                                                     <div className="text-xs font-semibold text-slate-500 uppercase">
                                                         Record {idx + 1}
                                                     </div>
-                                                    {Object.entries(entry).map(([key, value]) => (
-                                                        <div key={key} className="space-y-1.5">
-                                                            <label className="text-xs font-semibold text-slate-600 uppercase tracking-wide">
-                                                                {key.replace(/_/g, ' ')}
+                                                    {collectEditableFields(entry).map((field) => (
+                                                        <div key={`${idx}-${field.label}`} className="space-y-1.5">
+                                                            <label className="text-xs font-mono font-medium text-slate-500">
+                                                                {field.label}
                                                             </label>
                                                             <Input
-                                                                value={typeof value === "object" ? JSON.stringify(value) : (value ?? "")}
-                                                                onChange={(e) => handleDataFieldChange(idx, key, e.target.value)}
+                                                                value={field.value === null || field.value === undefined ? "" : String(field.value)}
+                                                                onChange={(e) => handleDataFieldChange(idx, field.path, e.target.value)}
                                                                 className="font-medium"
                                                             />
                                                         </div>
@@ -1042,7 +1381,7 @@ export default function JobDetailPage() {
             {/* Integration Selection */}
             <Modal
                 isOpen={showIntegrationModal}
-                onClose={() => setShowIntegrationModal(false)}
+                onClose={() => { setShowIntegrationModal(false); setIntegrationMessage(null) }}
                 title="Select Integration"
             >
                 <div className="space-y-4">
@@ -1095,22 +1434,31 @@ export default function JobDetailPage() {
                 </div>
             </Modal>
 
-            {/* LLM Results Modal with Export */}
+            {/* LLM Results Modal with Export + Streaming */}
             {showLlmResultsModal && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => setShowLlmResultsModal(false)}>
-                    <div className="bg-white rounded-lg shadow-xl p-6 max-w-4xl w-full mx-4 max-h-[80vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
-                        <div className="flex items-center justify-between mb-4">
-                            <h3 className="text-xl font-semibold">LLM Processing Results</h3>
-                            <button onClick={() => setShowLlmResultsModal(false)} className="text-slate-400 hover:text-slate-600 text-2xl">&times;</button>
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => { if (!llmStreaming) setShowLlmResultsModal(false) }}>
+                    <div className="bg-white rounded-lg shadow-xl p-6 max-w-6xl w-full mx-4 max-h-[92vh] flex flex-col" onClick={e => e.stopPropagation()}>
+                        <div className="flex items-center justify-between mb-4 flex-shrink-0">
+                            <div className="flex items-center gap-3">
+                                <h3 className="text-xl font-semibold">AI Agent Analysis Result</h3>
+                                {llmStreaming && (
+                                    <span className="flex items-center gap-1.5 text-sm text-blue-600">
+                                        <Loader2 className="h-4 w-4 animate-spin" />
+                                        Streaming...
+                                    </span>
+                                )}
+                            </div>
+                            <button onClick={() => { if (!llmStreaming) setShowLlmResultsModal(false) }} className={`text-slate-400 hover:text-slate-600 text-2xl ${llmStreaming ? 'opacity-30 cursor-not-allowed' : ''}`}>&times;</button>
                         </div>
 
-                        {/* Export Buttons */}
-                        <div className="flex flex-wrap gap-2 mb-4 pb-4 border-b">
+                        {/* Export Buttons — disabled during streaming */}
+                        <div className="flex flex-wrap gap-2 mb-4 pb-4 border-b flex-shrink-0">
                             <Button
                                 size="sm"
                                 variant="outline"
+                                disabled={llmStreaming}
                                 onClick={() => {
-                                    const text = llmResults.map(r => `=== ${r.filename} ===\n${r.success ? r.output : 'Error: ' + r.error}`).join('\n\n')
+                                    const text = llmResults.map((r: { filename: string; output: string; success: boolean; error?: string }) => r.success ? generateExportText(r.output, r.filename) : `=== ${r.filename} ===\nError: ${r.error}`).join('\n\n')
                                     navigator.clipboard.writeText(text)
                                     alert('Copied to clipboard!')
                                 }}
@@ -1120,47 +1468,14 @@ export default function JobDetailPage() {
                             <Button
                                 size="sm"
                                 variant="outline"
+                                disabled={llmStreaming}
                                 onClick={() => {
-                                    const csv = 'Filename,Status,Output\n' + llmResults.map(r =>
-                                        `"${r.filename}","${r.success ? 'Success' : 'Error'}","${(r.success ? r.output : r.error || '').replace(/"/g, '""')}"`
-                                    ).join('\n')
-                                    const blob = new Blob([csv], { type: 'text/csv' })
+                                    const html = llmResults.map((r: { filename: string; output: string; success: boolean; error?: string }) => r.success ? generateExportHtml(r.output, r.filename) : `<h2>${r.filename}</h2><p style="color:red;">Error: ${r.error}</p>`).join('')
+                                    const blob = new Blob([html], { type: 'application/msword;charset=utf-8' })
                                     const url = URL.createObjectURL(blob)
                                     const a = document.createElement('a')
                                     a.href = url
-                                    a.download = 'llm_results.csv'
-                                    a.click()
-                                }}
-                            >
-                                📊 Export CSV
-                            </Button>
-                            <Button
-                                size="sm"
-                                variant="outline"
-                                onClick={() => {
-                                    const html = `<html><body><table border="1"><tr><th>Filename</th><th>Status</th><th>Output</th></tr>` +
-                                        llmResults.map(r => `<tr><td>${r.filename}</td><td>${r.success ? 'Success' : 'Error'}</td><td>${r.success ? r.output : r.error}</td></tr>`).join('') +
-                                        `</table></body></html>`
-                                    const blob = new Blob([html], { type: 'application/vnd.ms-excel' })
-                                    const url = URL.createObjectURL(blob)
-                                    const a = document.createElement('a')
-                                    a.href = url
-                                    a.download = 'llm_results.xls'
-                                    a.click()
-                                }}
-                            >
-                                📗 Export Excel
-                            </Button>
-                            <Button
-                                size="sm"
-                                variant="outline"
-                                onClick={() => {
-                                    const content = llmResults.map(r => `## ${r.filename}\n\n${r.success ? r.output : 'Error: ' + r.error}\n\n---`).join('\n\n')
-                                    const blob = new Blob([content], { type: 'application/msword' })
-                                    const url = URL.createObjectURL(blob)
-                                    const a = document.createElement('a')
-                                    a.href = url
-                                    a.download = 'llm_results.doc'
+                                    a.download = 'validation_report.doc'
                                     a.click()
                                 }}
                             >
@@ -1169,13 +1484,12 @@ export default function JobDetailPage() {
                             <Button
                                 size="sm"
                                 variant="outline"
+                                disabled={llmStreaming}
                                 onClick={() => {
-                                    const printContent = llmResults.map(r =>
-                                        `<h2>${r.filename}</h2><p>${r.success ? r.output.replace(/\n/g, '<br>') : '<span style="color:red">Error: ' + r.error + '</span>'}</p><hr>`
-                                    ).join('')
+                                    const html = llmResults.map((r: { filename: string; output: string; success: boolean; error?: string }) => r.success ? generateExportHtml(r.output, r.filename) : `<h2>${r.filename}</h2><p style="color:red;">Error: ${r.error}</p>`).join('')
                                     const printWindow = window.open('', '_blank')
                                     if (printWindow) {
-                                        printWindow.document.write(`<html><head><title>LLM Results</title></head><body>${printContent}</body></html>`)
+                                        printWindow.document.write(html)
                                         printWindow.document.close()
                                         printWindow.print()
                                     }
@@ -1185,83 +1499,67 @@ export default function JobDetailPage() {
                             </Button>
                         </div>
 
-                        {/* Results */}
-                        <div className="space-y-4">
-                            {llmResults.map((result, idx) => (
-                                <div key={idx} className={`p-4 rounded-lg border ${result.success ? 'bg-green-50 border-green-200' : 'bg-red-50 border-red-200'}`}>
-                                    <div className="flex items-center justify-between mb-2">
-                                        <span className="font-semibold">{result.filename}</span>
-                                        <div className="flex items-center gap-2">
-                                            <span className={`text-xs px-2 py-0.5 rounded ${result.success ? 'bg-green-200 text-green-800' : 'bg-red-200 text-red-800'}`}>
-                                                {result.success ? 'Success' : 'Error'}
-                                            </span>
-                                            <button
-                                                className="text-xs text-blue-600 hover:underline"
-                                                onClick={() => {
-                                                    navigator.clipboard.writeText(result.success ? result.output : result.error || '')
-                                                    alert('Copied!')
-                                                }}
-                                            >
-                                                Copy
-                                            </button>
-                                        </div>
+                        {/* Content area — scrollable */}
+                        <div
+                            ref={llmStreamRef}
+                            className="flex-1 overflow-y-auto min-h-0"
+                            onScroll={(e) => {
+                                if (!llmStreaming) return
+                                const el = e.currentTarget
+                                const isNearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80
+                                userScrolledRef.current = !isNearBottom
+                            }}
+                        >
+                            {/* Streaming view */}
+                            {llmStreaming && (
+                                <div className="p-4 rounded-lg border border-blue-200 bg-blue-50/30">
+                                    <div className="flex items-center gap-2 mb-3">
+                                        <Loader2 className="h-4 w-4 animate-spin text-blue-500" />
+                                        <span className="text-sm font-medium text-blue-700">Receiving response...</span>
+                                        <span className="text-xs text-blue-500 ml-auto">{llmStreamText.length.toLocaleString()} chars</span>
                                     </div>
-                                    <div className="text-sm bg-white p-3 rounded border max-h-60 overflow-y-auto">
-                                        {result.success ? (
-                                            (() => {
-                                                const content = result.output
-                                                // Simple check for Markdown table
-                                                if (content.includes('|') && content.includes('---')) {
-                                                    try {
-                                                        const lines = content.trim().split('\n').filter(l => l.trim())
-                                                        // Find table start (lines with pipes)
-                                                        const tableLines = lines.filter(l => l.includes('|'))
-
-                                                        if (tableLines.length >= 3) {
-                                                            const headers = tableLines[0].split('|').filter(c => c.trim()).map(c => c.trim())
-                                                            const rows = tableLines.slice(2).map(line =>
-                                                                line.split('|').filter((c, i) => i > 0 && i < tableLines[0].split('|').length - 1).map(c => c.trim())
-                                                            )
-
-                                                            return (
-                                                                <div className="overflow-x-auto">
-                                                                    <table className="min-w-full border-collapse text-left">
-                                                                        <thead>
-                                                                            <tr className="bg-slate-100">
-                                                                                {headers.map((h, i) => (
-                                                                                    <th key={i} className="border p-2 font-medium">{h}</th>
-                                                                                ))}
-                                                                            </tr>
-                                                                        </thead>
-                                                                        <tbody>
-                                                                            {rows.map((row, i) => (
-                                                                                <tr key={i} className="border-b hover:bg-slate-50">
-                                                                                    {row.map((cell, j) => (
-                                                                                        <td key={j} className="border p-2">{cell}</td>
-                                                                                    ))}
-                                                                                </tr>
-                                                                            ))}
-                                                                        </tbody>
-                                                                    </table>
-                                                                </div>
-                                                            )
-                                                        }
-                                                    } catch {
-                                                        // Fallback to raw
-                                                    }
-                                                }
-                                                return <div className="whitespace-pre-wrap">{content}</div>
-                                            })()
-                                        ) : (
-                                            <div className="text-red-600 font-mono whitespace-pre-wrap">{result.error}</div>
-                                        )}
+                                    <div className="text-sm bg-white p-4 rounded border whitespace-pre-wrap font-mono leading-relaxed">
+                                        {llmStreamText}
+                                        <span className="inline-block w-2 h-4 bg-blue-500 animate-pulse ml-0.5 align-text-bottom" />
                                     </div>
                                 </div>
-                            ))}
+                            )}
+
+                            {/* Final results — shown after streaming completes */}
+                            {!llmStreaming && llmResults.length > 0 && (
+                                <div className="space-y-4">
+                                    {llmResults.map((result: { id: string; filename: string; output: string; success: boolean; error?: string }, idx: number) => (
+                                        <div key={idx}>
+                                            <div className="flex items-center justify-between mb-3">
+                                                <span className="font-semibold text-slate-800">{result.filename}</span>
+                                                <div className="flex items-center gap-2">
+                                                    <span className={`text-xs px-2 py-0.5 rounded ${result.success ? 'bg-emerald-100 text-emerald-800' : 'bg-red-100 text-red-800'}`}>
+                                                        {result.success ? 'Success' : 'Error'}
+                                                    </span>
+                                                    <button
+                                                        className="text-xs text-blue-600 hover:underline"
+                                                        onClick={() => {
+                                                            navigator.clipboard.writeText(result.success ? result.output : result.error || '')
+                                                            alert('Copied!')
+                                                        }}
+                                                    >
+                                                        Copy Raw
+                                                    </button>
+                                                </div>
+                                            </div>
+                                            {result.success ? (
+                                                <LlmResultRenderer content={result.output} />
+                                            ) : (
+                                                <div className="text-red-600 font-mono whitespace-pre-wrap bg-red-50 p-4 rounded-lg border border-red-200">{result.error}</div>
+                                            )}
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
                         </div>
 
-                        <div className="flex justify-end mt-4 pt-4 border-t">
-                            <Button onClick={() => setShowLlmResultsModal(false)}>Close</Button>
+                        <div className="flex justify-end mt-4 pt-4 border-t flex-shrink-0">
+                            <Button onClick={() => setShowLlmResultsModal(false)} disabled={llmStreaming}>Close</Button>
                         </div>
                     </div>
                 </div>

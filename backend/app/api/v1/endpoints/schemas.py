@@ -1,11 +1,19 @@
 from typing import List, Any
-from fastapi import APIRouter, Depends, HTTPException, status
+from urllib.parse import urlparse, urlencode
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
+import requests
 from app.api import deps
 from app.models.schema import DocumentSchema
+from app.models.document import Document
+from app.models.job import Job
+from app.models.setting import Setting
 from app.schemas.schema import DocumentSchema as DocumentSchemaSchema
 from app.schemas.schema import DocumentSchemaCreate, DocumentSchemaUpdate
 from app.models.user import User
+from app.services.schema_suggestion_service import SchemaSuggestionService
 from app.utils.activity_logger import log_activity, Actions
 
 router = APIRouter()
@@ -92,6 +100,119 @@ def create_schema(
     )
 
     return db_schema
+
+
+@router.post("/suggest-from-file")
+async def suggest_schema_from_file(
+    *,
+    db: Session = Depends(deps.get_db),
+    file: UploadFile = File(...),
+    document_type: str | None = None,
+    current_user: User = Depends(deps.get_current_active_user),
+) -> Any:
+    """
+    Suggest JSON schema fields from an uploaded document.
+    Uses configured schema_suggestion_endpoint + api_token from Settings.
+    """
+    del current_user
+
+    if not file.filename:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Filename is required")
+
+    file_bytes = await file.read()
+    if not file_bytes:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Uploaded file is empty")
+
+    service = SchemaSuggestionService(db)
+    try:
+        result = service.suggest_from_file(
+            file_bytes=file_bytes,
+            filename=file.filename,
+            content_type=file.content_type,
+            document_type=document_type,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Schema suggestion request failed: {str(exc)}",
+        )
+
+    return result
+
+class ImportSchemaRequest(BaseModel):
+    json_schema: str  # Raw JSON text from user
+
+
+@router.post("/validate-import")
+async def validate_import_schema(
+    payload: ImportSchemaRequest,
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_active_user),
+) -> Any:
+    """
+    Validate a JSON Schema string against the External API and parse its fields.
+    """
+    import json
+
+    # 1. Parse JSON client-side first to give early feedback
+    try:
+        schema_obj = json.loads(payload.json_schema)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid JSON: {exc}")
+
+    # 2. Load settings
+    setting = db.query(Setting).first()
+    if not setting:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Settings are not configured")
+
+    token = setting.api_token
+    suggestion_endpoint = setting.schema_suggestion_endpoint
+    verify_ssl = setting.verify_ssl if setting.verify_ssl is not None else False
+
+    if not suggestion_endpoint or not token:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Schema Suggestion Endpoint and Bearer Token are required in Settings",
+        )
+
+    # 3. Build validate-schema URL from base of schema_suggestion_endpoint
+    parsed = urlparse(suggestion_endpoint)
+    validate_url = f"{parsed.scheme}://{parsed.netloc}/validate-schema"
+
+    headers = {"Authorization": f"Bearer {token}"}
+
+    # 4. POST to External API as form-encoded
+    try:
+        resp = requests.post(
+            validate_url,
+            headers=headers,
+            data={"json_schema": payload.json_schema},
+            timeout=30,
+            verify=verify_ssl,
+        )
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"External API request failed: {exc}")
+
+    if not resp.ok:
+        detail = resp.text
+        try:
+            detail = resp.json().get("detail", detail)
+        except Exception:
+            pass
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail)
+
+    # 5. Parse fields from the original input schema
+    service = SchemaSuggestionService(db)
+    suggested_fields = service._schema_to_fields(schema_obj)
+
+    return {
+        "valid": True,
+        "schema": schema_obj,
+        "suggested_fields": suggested_fields,
+    }
+
 
 @router.get("/{schema_id}", response_model=DocumentSchemaSchema)
 def read_schema(
@@ -188,6 +309,23 @@ def delete_schema(
         details={"schema_name": schema.name}
     )
 
+    # Clear references before deletion to avoid FK constraint failures.
+    db.query(Document).filter(Document.schema_id == schema.id).update(
+        {Document.schema_id: None},
+        synchronize_session=False,
+    )
+    db.query(Job).filter(Job.schema_id == schema.id).update(
+        {Job.schema_id: None},
+        synchronize_session=False,
+    )
+
     db.delete(schema)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Cannot delete schema because it is still referenced by related records.",
+        )
     return schema

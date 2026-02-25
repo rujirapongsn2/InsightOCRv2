@@ -1,10 +1,10 @@
 // TypeScript types for Schema Creation Wizard
 
-export type FieldType = "text" | "number" | "date" | "currency" | "boolean"
+export type FieldType = "text" | "number" | "date" | "currency" | "boolean" | "array"
 
 export type DocumentType = "invoice" | "receipt" | "contract" | "po" | "other"
 
-export type WizardStep = 1 | 2 | 3 | 4
+export type WizardStep = 1 | 2
 
 export type StartingPoint = "template" | "ai" | "scratch" | "import"
 
@@ -15,12 +15,19 @@ export interface ValidationRule {
   format?: string
 }
 
+export interface ArrayItems {
+  type: string // e.g. 'object', 'string', 'number'
+  description?: string
+  properties?: Record<string, { type: string; description?: string }>
+}
+
 export interface SchemaField {
   id?: string // Temporary ID for frontend ordering (UUID)
   name: string
   type: FieldType
   description: string
   required: boolean
+  items?: ArrayItems // For array type fields (JSON Schema)
   validation_rules?: ValidationRule
   help_text?: string
   example?: string

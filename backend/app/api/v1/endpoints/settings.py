@@ -43,7 +43,17 @@ def get_settings(
 
     # Backfill defaults if missing
     if not setting.ocr_endpoint:
-        setting.ocr_endpoint = "https://111.223.37.41:9001/ai-process-file"
+        setting.ocr_endpoint = "https://111.223.37.41:9001/v3/ai-process-file"
+        db.add(setting)
+        db.commit()
+        db.refresh(setting)
+    if not setting.structured_output_endpoint:
+        setting.structured_output_endpoint = "https://111.223.37.41:9001/structured-output"
+        db.add(setting)
+        db.commit()
+        db.refresh(setting)
+    if not setting.schema_suggestion_endpoint:
+        setting.schema_suggestion_endpoint = "https://111.223.37.41:9001/suggest-schema"
         db.add(setting)
         db.commit()
         db.refresh(setting)
@@ -72,6 +82,8 @@ def update_settings(
     setting.ocr_engine = payload.ocr_engine
     setting.model = payload.model
     setting.ocr_endpoint = payload.ocr_endpoint
+    setting.structured_output_endpoint = payload.structured_output_endpoint
+    setting.schema_suggestion_endpoint = payload.schema_suggestion_endpoint
     setting.test_endpoint = payload.test_endpoint
     setting.api_token = payload.api_token
     setting.verify_ssl = payload.verify_ssl
@@ -95,6 +107,8 @@ def update_settings(
             "ocr_engine": payload.ocr_engine,
             "model": payload.model,
             "ocr_endpoint": payload.ocr_endpoint,
+            "structured_output_endpoint": payload.structured_output_endpoint,
+            "schema_suggestion_endpoint": payload.schema_suggestion_endpoint,
             "test_endpoint": payload.test_endpoint
         }
     )

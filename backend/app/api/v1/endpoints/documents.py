@@ -13,6 +13,7 @@ from app.models.setting import Setting
 from app.models.schema import DocumentSchema as SchemaModel
 from app.services.storage import get_storage_service
 from app.utils.activity_logger import log_activity, Actions
+from app.utils.job_logger import get_job_logger
 import shutil
 import os
 import uuid
@@ -207,10 +208,17 @@ async def upload_document(
     db.commit()
     db.refresh(db_document)
     
+    # Log to job specific file
+    try:
+        job_logger = get_job_logger(str(job_id))
+        job_logger.info(f"Document uploaded: {file.filename} (ID: {db_document.id}) by user {current_user.email}")
+    except Exception as e:
+        logger.error(f"Failed to log document upload to job logger: {e}")
+    
     return db_document
 
 class ProcessRequest(BaseModel):
-    schema_id: uuid.UUID
+    schema_id: Optional[uuid.UUID] = None
 
 class ProcessResponse(BaseModel):
     document_id: str
@@ -234,7 +242,7 @@ def process_document(
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    # Update schema_id and queue status
+    # Update schema selection (None means Auto) and queue status
     document.schema_id = process_request.schema_id
     document.status = "queued"
     document.processing_error = None  # Clear any previous errors
@@ -244,9 +252,26 @@ def process_document(
     # Import and dispatch Celery task
     from app.tasks.document_tasks import process_document_task
     
-    task = process_document_task.delay(str(document.id), str(process_request.schema_id))
+    task = process_document_task.delay(
+        str(document.id),
+        str(process_request.schema_id) if process_request.schema_id else None,
+    )
+
+    document.task_id = task.id
+    db.add(document)
+    db.commit()
     
     logger.info(f"Dispatched processing task {task.id} for document {document_id}")
+
+    try:
+        job_logger = get_job_logger(str(document.job_id))
+        schema_source = str(process_request.schema_id) if process_request.schema_id else "auto"
+        job_logger.info(
+            f"Processing queued for document {document.filename} (ID: {document_id}) "
+            f"using schema_source={schema_source}. Task ID: {task.id}"
+        )
+    except Exception:
+        pass
 
     return ProcessResponse(
         document_id=str(document.id),
@@ -255,12 +280,18 @@ def process_document(
         message="Document processing started in background. Poll /task-status for updates."
     )
 
+class ProgressInfo(BaseModel):
+    percent: int = 0
+    stage: str = ""
+    message: str = ""
+
 class TaskStatusResponse(BaseModel):
     document_id: str
     status: str
     extracted_data: Any = None
     processing_error: Optional[str] = None
     page_count: Optional[int] = None
+    progress: Optional[ProgressInfo] = None
 
 @router.get("/{document_id}/task-status", response_model=TaskStatusResponse)
 def get_task_status(
@@ -276,13 +307,31 @@ def get_task_status(
     document = db.query(Document).filter(Document.id == document_id).first()
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
+
+    progress: Optional[ProgressInfo] = None
+    if document.status == "processing":
+        try:
+            import redis as _redis_lib, json as _json
+            from app.core.config import settings as _cfg
+            _r = _redis_lib.from_url(_cfg.REDIS_URL, decode_responses=True)
+            _raw = _r.get(f"doc_progress:{document_id}")
+            if _raw:
+                _data = _json.loads(_raw)
+                progress = ProgressInfo(
+                    percent=_data.get("percent", 0),
+                    stage=_data.get("stage", ""),
+                    message=_data.get("message", ""),
+                )
+        except Exception:
+            pass
     
     return TaskStatusResponse(
         document_id=str(document.id),
         status=document.status,
         extracted_data=document.extracted_data,
         processing_error=document.processing_error,
-        page_count=document.page_count
+        page_count=document.page_count,
+        progress=progress,
     )
 
 @router.get("/{document_id}", response_model=DocumentSchema)
@@ -415,6 +464,16 @@ def update_document(
     db.add(document)
     db.commit()
     db.refresh(document)
+    
+    try:
+        job_logger = get_job_logger(str(document.job_id))
+        if document.status == "reviewed":
+            job_logger.info(f"Document {document.filename} (ID: {document.id}) has been reviewed.")
+        else:
+            job_logger.info(f"Document {document.filename} (ID: {document.id}) updated. Status: {document.status}")
+    except Exception:
+        pass
+        
     return document
 
 @router.get("/{document_id}/file")
@@ -525,6 +584,12 @@ def delete_document(
             resource_id=document_id,
             details={"filename": filename}
         )
+
+        try:
+            job_logger = get_job_logger(str(document.job_id))
+            job_logger.info(f"Document deleted: {filename} (ID: {document_id}) by user {current_user.email}")
+        except Exception:
+            pass
 
         return {"message": "Document deleted successfully", "id": document_id}
     except Exception as e:

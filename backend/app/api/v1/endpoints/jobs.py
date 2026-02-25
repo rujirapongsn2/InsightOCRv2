@@ -9,6 +9,7 @@ from app.schemas.job import Job as JobSchema
 from app.schemas.job import JobCreate
 from app.services.storage import get_storage_service
 from app.utils.activity_logger import log_activity, Actions
+from app.utils.job_logger import get_job_logger
 import logging
 
 logger = logging.getLogger(__name__)
@@ -69,6 +70,10 @@ def create_job(
         details={"job_name": db_job.name}
     )
 
+    # Job-specific log
+    job_logger = get_job_logger(str(db_job.id))
+    job_logger.info(f"Job created by user {current_user.email} (ID: {current_user.id}). Name: {db_job.name}")
+
     return db_job
 
 @router.get("/{job_id}", response_model=JobSchema)
@@ -126,6 +131,9 @@ def delete_job(
         raise HTTPException(status_code=403, detail="Not enough permissions")
 
     try:
+        job_logger = get_job_logger(str(job.id))
+        job_logger.info(f"Job deletion requested by user {current_user.email} (ID: {current_user.id}). Deleting storage files for {len(job.documents)} documents.")
+        
         # Cleanup storage files for all associated documents
         storage = get_storage_service()
         documents = db.query(Document).filter(Document.job_id == job.id).all()
@@ -151,9 +159,15 @@ def delete_job(
 
         db.delete(job)
         db.commit()
+        
+        job_logger.info(f"Job logically deleted from database successfully.")
     except Exception as e:
         db.rollback()
         logger.error(f"Failed to delete job {job_id}: {e}")
+        try:
+            job_logger.error(f"Failed to delete job: {e}", exc_info=True)
+        except:
+            pass
         raise HTTPException(status_code=500, detail="Failed to delete job")
 
     return {"message": "Job deleted successfully", "id": job_id}

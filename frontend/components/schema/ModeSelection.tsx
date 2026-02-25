@@ -65,7 +65,12 @@ export function ModeSelection() {
         </div>
 
         {/* Advanced Mode Card */}
-        <div className="border-2 border-slate-200 rounded-xl p-8 bg-white hover:border-slate-300 transition-all hover:shadow-md">
+        <div className="relative border-2 border-slate-200 rounded-xl p-8 bg-white hover:border-slate-300 transition-all hover:shadow-md">
+          <div className="absolute top-4 right-4">
+            <span className="inline-flex items-center px-3 py-1 rounded-full text-xs font-medium bg-amber-100 text-amber-800">
+              Comming soon
+            </span>
+          </div>
           <div className="space-y-4">
             <div className="p-3 bg-slate-100 rounded-lg w-fit">
               <Code2 className="h-8 w-8 text-slate-600" />
@@ -95,11 +100,13 @@ export function ModeSelection() {
               ))}
             </ul>
 
-            <Link href="/schemas/create" className="block">
-              <Button variant="outline" className="w-full mt-4 border-slate-300 hover:bg-slate-50">
-                Use Advanced Mode
-              </Button>
-            </Link>
+            <Button
+              variant="outline"
+              className="w-full mt-4 border-slate-300"
+              disabled
+            >
+              Use Advanced Mode
+            </Button>
 
             <p className="text-xs text-center text-slate-500 mt-2">
               For experienced users who know exactly what they need

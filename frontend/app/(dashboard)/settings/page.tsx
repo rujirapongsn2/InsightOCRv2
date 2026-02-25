@@ -5,8 +5,7 @@ import { useAuth } from "@/components/auth-provider"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { AlertCircle, CheckCircle2, Loader2 } from "lucide-react"
-import { AISettingsCard } from "@/components/settings/AISettingsCard"
+import { AlertCircle, CheckCircle2, Eye, EyeOff, Loader2 } from "lucide-react"
 import { getApiBaseUrl } from "@/lib/api"
 
 export default function SettingsPage() {
@@ -17,9 +16,13 @@ export default function SettingsPage() {
   }, [user?.role])
 
   // Separate endpoints for different purposes
-  const [ocrEndpoint, setOcrEndpoint] = useState("https://111.223.37.41:9001/ai-process-file")
-  const [testEndpoint, setTestEndpoint] = useState("https://111.223.37.41:9001/me")
-  const [token, setToken] = useState("ocr_ai_key_987654321fedcba")
+  const [ocrEndpoint, setOcrEndpoint] = useState("")
+  const [structuredOutputEndpoint, setStructuredOutputEndpoint] = useState("")
+  const [schemaSuggestionEndpoint, setSchemaSuggestionEndpoint] = useState("")
+  const [testEndpoint, setTestEndpoint] = useState("")
+  const [token, setToken] = useState("")
+  const [showToken, setShowToken] = useState(false)
+  const [isLoadingConfig, setIsLoadingConfig] = useState(true)
   const [ocrEngine, setOcrEngine] = useState("default")
   const [model, setModel] = useState("default")
   const [result, setResult] = useState<string | null>(null)
@@ -38,13 +41,16 @@ export default function SettingsPage() {
           // Show 'default' in UI if empty string is stored
           setOcrEngine(data.ocr_engine || 'default')
           setModel(data.model || 'default')
-          if (data.ocr_endpoint) setOcrEndpoint(data.ocr_endpoint)
-          if (data.test_endpoint) setTestEndpoint(data.test_endpoint)
-          // Don't show the full token validation/security might be better, but for now show what's saved
-          if (data.api_token) setToken(data.api_token)
+          setOcrEndpoint(data.ocr_endpoint ?? "")
+          setStructuredOutputEndpoint(data.structured_output_endpoint ?? "")
+          setSchemaSuggestionEndpoint(data.schema_suggestion_endpoint ?? "")
+          setTestEndpoint(data.test_endpoint ?? "")
+          setToken(data.api_token ?? "")
         }
       } catch (err) {
         console.error("Failed to load settings", err)
+      } finally {
+        setIsLoadingConfig(false)
       }
     }
     fetchConfig()
@@ -70,6 +76,8 @@ export default function SettingsPage() {
           ocr_engine: finalOcrEngine,
           model: finalModel,
           ocr_endpoint: ocrEndpoint,
+          structured_output_endpoint: structuredOutputEndpoint,
+          schema_suggestion_endpoint: schemaSuggestionEndpoint,
           test_endpoint: testEndpoint,
           api_token: token,
           verify_ssl: false
@@ -131,7 +139,10 @@ export default function SettingsPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle>External API Configuration</CardTitle>
+          <div className="flex items-center gap-2">
+            <CardTitle>External API Configuration</CardTitle>
+            {isLoadingConfig && <Loader2 className="h-4 w-4 animate-spin text-slate-400" />}
+          </div>
           <p className="text-sm text-slate-600 mt-1">
             Configure connection to your external AI service
           </p>
@@ -142,10 +153,37 @@ export default function SettingsPage() {
             <Input
               value={ocrEndpoint}
               onChange={(e) => setOcrEndpoint(e.target.value)}
-              placeholder="https://111.223.37.41:9001/ai-process-file"
+              placeholder="https://111.223.37.41:9001/v3/ai-process-file"
+              disabled={isLoadingConfig}
             />
             <p className="text-xs text-slate-500">
               Used for extracting text from documents (POST with file upload)
+            </p>
+          </div>
+
+          <div className="space-y-2">
+            <label className="text-sm font-medium">Schema Suggestion Endpoint</label>
+            <Input
+              value={schemaSuggestionEndpoint}
+              onChange={(e) => setSchemaSuggestionEndpoint(e.target.value)}
+              placeholder="https://111.223.37.41:9001/suggest-schema"
+              disabled={isLoadingConfig}
+            />
+            <p className="text-xs text-slate-500">
+              Used for suggesting JSON schema from document samples (POST with file upload)
+            </p>
+          </div>
+
+          <div className="space-y-2">
+            <label className="text-sm font-medium">Structured Output Endpoint</label>
+            <Input
+              value={structuredOutputEndpoint}
+              onChange={(e) => setStructuredOutputEndpoint(e.target.value)}
+              placeholder="https://111.223.37.41:9001/structured-output"
+              disabled={isLoadingConfig}
+            />
+            <p className="text-xs text-slate-500">
+              Used for extracting structured JSON output from processed document content
             </p>
           </div>
 
@@ -155,6 +193,7 @@ export default function SettingsPage() {
               value={testEndpoint}
               onChange={(e) => setTestEndpoint(e.target.value)}
               placeholder="https://111.223.37.41:9001/me"
+              disabled={isLoadingConfig}
             />
             <p className="text-xs text-slate-500">
               Used to verify API authentication (GET request)
@@ -163,17 +202,34 @@ export default function SettingsPage() {
 
           <div className="space-y-2">
             <label className="text-sm font-medium">Bearer Token</label>
-            <Input value={token} onChange={(e) => setToken(e.target.value)} />
+            <div className="relative">
+              <Input
+                value={token}
+                onChange={(e) => setToken(e.target.value)}
+                type={showToken ? "text" : "password"}
+                placeholder="Enter API key (required)"
+                className="pr-10"
+                disabled={isLoadingConfig}
+              />
+              <button
+                type="button"
+                onClick={() => setShowToken(!showToken)}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                aria-label={showToken ? "Hide token" : "Show token"}
+              >
+                {showToken ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+              </button>
+            </div>
             <p className="text-xs text-slate-500">
               API authentication token for both endpoints
             </p>
           </div>
 
           <div className="flex gap-2">
-            <Button type="button" variant="outline" onClick={handleSaveBackend}>
+            <Button type="button" variant="outline" onClick={handleSaveBackend} disabled={isLoadingConfig}>
               Save Connection Settings
             </Button>
-            <Button type="button" onClick={handleTest} disabled={loading}>
+            <Button type="button" onClick={handleTest} disabled={loading || isLoadingConfig}>
               {loading && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
               Test Connection
             </Button>
@@ -193,31 +249,6 @@ export default function SettingsPage() {
           )}
         </CardContent>
       </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Sample cURL Commands</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div>
-            <p className="text-sm font-medium mb-2">Test Connection:</p>
-            <pre className="bg-slate-900 text-slate-100 text-xs p-3 rounded-md overflow-auto">{`curl -X 'GET' \\
-  '${testEndpoint}' \\
-  -H 'accept: application/json' \\
-  -H 'Authorization: Bearer ${token}'`}</pre>
-          </div>
-          <div>
-            <p className="text-sm font-medium mb-2">OCR Processing:</p>
-            <pre className="bg-slate-900 text-slate-100 text-xs p-3 rounded-md overflow-auto">{`curl -X 'POST' \\
-  '${ocrEndpoint}' \\
-  -H 'Authorization: Bearer ${token}' \\
-  -F 'file=@document.pdf'`}</pre>
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* AI Settings Card */}
-      <AISettingsCard />
 
       <Card>
         <CardHeader>

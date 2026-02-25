@@ -30,9 +30,9 @@ export function AISuggestionUpload() {
         return
       }
 
-      // Validate file size (max 10MB)
-      if (selectedFile.size > 10 * 1024 * 1024) {
-        setError("File size must be less than 10MB")
+      // Validate file size (max 50MB)
+      if (selectedFile.size > 50 * 1024 * 1024) {
+        setError("File size must be less than 50MB")
         return
       }
 
@@ -205,7 +205,7 @@ export function AISuggestionUpload() {
               {file ? file.name : "Click to upload or drag and drop"}
             </p>
             <p className="text-xs text-slate-500 mt-1">
-              PDF, JPG, or PNG (max 10MB)
+              PDF, JPG, or PNG (max 50MB)
             </p>
           </div>
         </label>

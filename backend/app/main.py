@@ -14,6 +14,7 @@ from app.models.template import SchemaTemplate
 from app.models.ai_settings import AISettings
 from app.models.activity_log import ActivityLog
 from app.models.integration import Integration
+from app.models.integration_result import IntegrationResult
 from app.initial_data import init_db
 from app.initial_templates import init_system_templates
 from app.initial_ai_settings import init_ai_settings
@@ -32,7 +33,9 @@ with engine.connect() as conn:
     conn.execute(text("ALTER TABLE IF EXISTS settings ADD COLUMN IF NOT EXISTS verify_ssl boolean DEFAULT false"))
 
     # New separate endpoint columns
-    conn.execute(text("ALTER TABLE IF EXISTS settings ADD COLUMN IF NOT EXISTS ocr_endpoint varchar DEFAULT 'https://111.223.37.41:9001/ai-process-file'"))
+    conn.execute(text("ALTER TABLE IF EXISTS settings ADD COLUMN IF NOT EXISTS ocr_endpoint varchar DEFAULT 'https://111.223.37.41:9001/v3/ai-process-file'"))
+    conn.execute(text("ALTER TABLE IF EXISTS settings ADD COLUMN IF NOT EXISTS structured_output_endpoint varchar DEFAULT 'https://111.223.37.41:9001/structured-output'"))
+    conn.execute(text("ALTER TABLE IF EXISTS settings ADD COLUMN IF NOT EXISTS schema_suggestion_endpoint varchar DEFAULT 'https://111.223.37.41:9001/suggest-schema'"))
     conn.execute(text("ALTER TABLE IF EXISTS settings ADD COLUMN IF NOT EXISTS test_endpoint varchar DEFAULT 'https://111.223.37.41:9001/me'"))
 
     # Add schema_id to documents table for per-document schema selection
@@ -45,6 +48,9 @@ with engine.connect() as conn:
     conn.execute(text("ALTER TABLE IF EXISTS documents ADD COLUMN IF NOT EXISTS processing_error varchar NULL"))
     # Ensure job ownership column exists for dashboard queries
     conn.execute(text("ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS user_id uuid NULL"))
+    # Integration results: add type and name columns for generic history
+    conn.execute(text("ALTER TABLE IF EXISTS integration_results ADD COLUMN IF NOT EXISTS integration_type varchar(20) NULL"))
+    conn.execute(text("ALTER TABLE IF EXISTS integration_results ADD COLUMN IF NOT EXISTS integration_name varchar(255) NULL"))
 
     # Migrate existing data: if api_endpoint exists but ocr_endpoint doesn't, copy it
     conn.execute(text("""

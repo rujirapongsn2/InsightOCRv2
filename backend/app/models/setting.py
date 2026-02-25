@@ -11,7 +11,9 @@ class Setting(Base):
     model = Column(String, default="default")
 
     # Separate endpoints for different purposes
-    ocr_endpoint = Column(String, default="https://111.223.37.41:9001/ai-process-file")
+    ocr_endpoint = Column(String, default="https://111.223.37.41:9001/v3/ai-process-file")
+    structured_output_endpoint = Column(String, default="https://111.223.37.41:9001/structured-output")
+    schema_suggestion_endpoint = Column(String, default="https://111.223.37.41:9001/suggest-schema")
     test_endpoint = Column(String, default="https://111.223.37.41:9001/me")
 
     # Legacy field for backward compatibility (will be removed in future)
