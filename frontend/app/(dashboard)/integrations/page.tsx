@@ -743,26 +743,15 @@ export default function IntegrationsPage() {
                                 {/* Test Connection Section */}
                                 <div className="space-y-3 pt-4 border-t">
                                     <div className="text-sm font-semibold text-slate-700">Test Connection</div>
-                                    <div className="space-y-2">
-                                        <label className="text-sm font-medium">Test Input</label>
-                                        <Textarea
-                                            placeholder="Enter test data to verify LLM configuration..."
-                                            value={testInput}
-                                            onChange={(e) => setTestInput(e.target.value)}
-                                            disabled={isUser || testLoading}
-                                            rows={3}
-                                        />
-                                    </div>
+                                    <p className="text-xs text-slate-500">
+                                        Sends only <span className="font-mono">hello</span> to verify connectivity.
+                                    </p>
                                     <Button
                                         type="button"
                                         variant="outline"
                                         onClick={async () => {
                                             if (!formState.apiKey || !formState.model) {
                                                 alert("Please fill in API Key and Model first")
-                                                return
-                                            }
-                                            if (!testInput.trim()) {
-                                                alert("Please enter test input")
                                                 return
                                             }
                                             setTestLoading(true)
@@ -778,11 +767,7 @@ export default function IntegrationsPage() {
                                                         apiKey: formState.apiKey,
                                                         baseUrl: formState.baseUrl || undefined,
                                                         model: formState.model,
-                                                        reasoningEffort: formState.reasoningEffort,
-                                                        instructions: formState.instructions,
-                                                        userPrompt: formState.userPrompt || undefined,
-                                                        outputFormatPrompt: formState.outputFormatPrompt || undefined,
-                                                        testInput: testInput
+                                                        reasoningEffort: formState.reasoningEffort
                                                     })
                                                 })
                                                 const data = await response.json()
@@ -797,7 +782,7 @@ export default function IntegrationsPage() {
                                                 setTestLoading(false)
                                             }
                                         }}
-                                        disabled={isUser || testLoading || !testInput.trim()}
+                                        disabled={isUser || testLoading}
                                     >
                                         {testLoading ? "Testing..." : "Test Connection"}
                                     </Button>

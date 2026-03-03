@@ -311,10 +311,10 @@ class TestLLMRequest(BaseModel):
     baseUrl: Optional[str] = None
     model: str
     reasoningEffort: str = "low"
-    instructions: str
+    instructions: str = ""
     userPrompt: Optional[str] = None
     outputFormatPrompt: Optional[str] = None
-    testInput: str
+    testInput: str = ""
 
 
 class TestLLMResponse(BaseModel):
@@ -371,7 +371,8 @@ async def test_llm(
     current_user: User = Depends(deps.get_current_user)
 ):
     """
-    Test LLM configuration by sending a test request to OpenAI Responses API
+    Test LLM connectivity by sending a minimal hello request to OpenAI Responses API.
+    This endpoint intentionally ignores userPrompt/outputFormatPrompt/testInput.
     """
     try:
         # Initialize OpenAI client with provided credentials
@@ -381,19 +382,10 @@ async def test_llm(
         
         client = OpenAI(**client_kwargs)
 
-        # Compose input: userPrompt + testInput + outputFormatPrompt
-        composed_input = _build_llm_input(
-            doc_filename="test",
-            doc_input=request.testInput,
-            user_prompt=request.userPrompt,
-            output_format_prompt=request.outputFormatPrompt,
-        )
-
         # Build request params — reasoning.effort is only supported by o-series models
         create_params: Dict[str, Any] = {
             "model": request.model,
-            "instructions": request.instructions,
-            "input": composed_input,
+            "input": "hello",
         }
         if _supports_reasoning(request.model):
             create_params["reasoning"] = {"effort": request.reasoningEffort}

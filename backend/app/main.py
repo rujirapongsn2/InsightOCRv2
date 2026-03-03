@@ -40,6 +40,8 @@ with engine.connect() as conn:
 
     # Add schema_id to documents table for per-document schema selection
     conn.execute(text("ALTER TABLE IF EXISTS documents ADD COLUMN IF NOT EXISTS schema_id uuid NULL"))
+    # Add task_id for async processing correlation
+    conn.execute(text("ALTER TABLE IF EXISTS documents ADD COLUMN IF NOT EXISTS task_id varchar NULL"))
     # Add template_id to document_schemas table for template reference
     conn.execute(text("ALTER TABLE IF EXISTS document_schemas ADD COLUMN IF NOT EXISTS template_id uuid NULL"))
     # Add multi-page OCR support fields

@@ -36,10 +36,17 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     const router = useRouter()
     const pathname = usePathname()
 
+    const isLikelyJwt = (token: string) => token.split(".").length === 3
+
     useEffect(() => {
         const initAuth = async () => {
             const token = localStorage.getItem("token")
             if (!token) {
+                setLoading(false)
+                return
+            }
+            if (!isLikelyJwt(token)) {
+                localStorage.removeItem("token")
                 setLoading(false)
                 return
             }
@@ -68,6 +75,11 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     }, [])
 
     const login = async (token: string) => {
+        if (!isLikelyJwt(token)) {
+            localStorage.removeItem("token")
+            setUser(null)
+            return
+        }
         localStorage.setItem("token", token)
         // Fetch user data immediately
         try {
@@ -88,6 +100,11 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     const refreshUser = async () => {
         const token = localStorage.getItem("token")
         if (!token) {
+            setUser(null)
+            return
+        }
+        if (!isLikelyJwt(token)) {
+            localStorage.removeItem("token")
             setUser(null)
             return
         }
