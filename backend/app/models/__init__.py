@@ -8,3 +8,4 @@ from .setting import Setting
 from .activity_log import ActivityLog
 from .integration import Integration
 from .integration_result import IntegrationResult
+from .chat import ChatConversation, ChatMessage

@@ -83,7 +83,7 @@ services:
   celery_worker:
     build: ./backend
     container_name: softnix_ocr_celery
-    command: celery -A app.celery_app worker --loglevel=info --concurrency=2
+    command: celery -A app.celery_app worker --loglevel=info --concurrency=4
     volumes:
       - documents_uploads:/app/uploads
     env_file:
@@ -108,7 +108,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1G
+          memory: 2G
     restart: unless-stopped
 
   frontend:

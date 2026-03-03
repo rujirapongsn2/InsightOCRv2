@@ -57,22 +57,26 @@ export default function LoginPage() {
                     <div className="space-y-6">
                         <div className="inline-flex items-center gap-3 rounded-full bg-white/80 px-4 py-2 shadow-sm ring-1 ring-slate-200/60 backdrop-blur">
                             <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
-                            <span className="text-sm font-medium text-slate-700">Softnix InsightDOC</span>
+                            <span className="text-sm font-medium text-slate-700">Intelligence AI Application by Softnix</span>
                         </div>
                         <h1 className="text-4xl font-bold leading-tight text-slate-900">
-                            Secure workspace for your OCR pipeline
+                            Your Secure Workspace for Intelligent Documents
                         </h1>
                         <p className="text-lg text-slate-600 leading-relaxed">
-                            Access dashboards, manage schemas, and keep your documents flowing with enterprise-grade security.
+                            Access your AI-powered document workspace to transform information into trusted, actionable data.
                         </p>
-                        <div className="flex items-center gap-4 text-sm text-slate-600">
+                        <div className="flex flex-wrap items-center gap-3 text-sm text-slate-600">
                             <div className="flex items-center gap-2 px-3 py-2 rounded-full bg-white/80 shadow-sm ring-1 ring-slate-200/60 backdrop-blur">
                                 <span className="h-2 w-2 rounded-full bg-sky-500" />
-                                MFA-ready login
+                                Private AI Environment
                             </div>
                             <div className="flex items-center gap-2 px-3 py-2 rounded-full bg-white/80 shadow-sm ring-1 ring-slate-200/60 backdrop-blur">
                                 <span className="h-2 w-2 rounded-full bg-amber-500" />
-                                24/7 monitoring
+                                Enterprise-Grade Security
+                            </div>
+                            <div className="flex items-center gap-2 px-3 py-2 rounded-full bg-white/80 shadow-sm ring-1 ring-slate-200/60 backdrop-blur">
+                                <span className="h-2 w-2 rounded-full bg-emerald-500" />
+                                Agent-Ready Data Platform
                             </div>
                         </div>
                     </div>

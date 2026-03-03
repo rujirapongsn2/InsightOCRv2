@@ -4,15 +4,86 @@ A modern document processing system with OCR (Optical Character Recognition) and
 
 ![Softnix InsightDOC Dashboard](assets/dashboard_preview.png)
 
-## Features
+## Key Features
 
-- 🔐 **User Management & Authentication** - Role-based access control (Admin, Manager, User)
-- 📄 **Document Schema Management** - Define custom extraction schemas for different document types
-- 📋 **Job-based Processing** - Organize documents into jobs for batch processing
-- 🔍 **OCR Processing** - Extract text from PDF and image files
-- 🎯 **Structured Data Extraction** - Convert OCR text to structured JSON based on schemas
-- ✏️ **Review & Edit** - Review and correct extracted data before saving
-- ⚙️ **Configurable Settings** - Manage API endpoints and credentials through UI
+### 🔐 Authentication & User Management
+- JWT-based authentication with secure session handling
+- Role-based access control: **Admin**, **Manager**, **User**
+- User profile management and admin-managed user accounts
+- Activity log tracking per user (login, logout, failed login, etc.)
+
+### 📄 Document Schema Management
+- **Simple Mode (AI-Assisted Wizard)** — Upload a sample document, AI automatically suggests extraction fields based on OCR content
+- **Advanced Mode** — Manually define schema fields with full control over field names, types, and descriptions
+- Import/export schemas via JSON Schema format
+- Reusable **Schema Templates Library** — Pre-built templates organized by industry (Finance, Legal, Supply Chain, HR, Healthcare, Quality & Operations)
+- Schema versioning with edit history
+
+### 📋 Job-based Document Processing
+- Create jobs to group and batch-process related documents
+- Upload multiple PDF/image files (JPG, PNG) per job
+- Per-document schema assignment within a single job
+- **One-click "Process All"** to run OCR + extraction across all documents in a job
+- Real-time processing progress tracking via Redis-backed status updates
+
+### 🔍 OCR & Structured Data Extraction
+- Extract text from PDF and image files via external OCR API
+- Convert raw OCR text into **structured JSON** based on defined schemas
+- Async background processing powered by **Celery + Redis** task queue
+- Live streaming progress updates during processing (percent + stage)
+- Automatic retry on transient failures (up to 3 retries)
+
+### ✏️ Review & Edit Extracted Data
+- Side-by-side document viewer (PDF/image) and extracted data editor
+- Edit any extracted field inline before saving
+- Separate **Reviewed Data** vs **Extracted Data** states for audit trail
+- OCR quality warnings for low-confidence extractions
+- Reject button to flag documents that need re-processing
+
+### 🤖 LLM Integration & AI Validation
+- **LLM Integration** — Connect any OpenAI-compatible API (GPT-4o, o1, o3, etc.)
+- **Cross-document validation** — Send multiple documents to an LLM for comparison and discrepancy detection
+- **Reasoning effort control** — Set low / medium / high reasoning effort for supported models (o-series)
+- **Industry-specific LLM Templates** — Ready-to-use prompt templates for:
+  - Finance & Accounting (Invoice ↔ PO ↔ GRN verification, tax validation)
+  - Legal & Compliance (contract review, regulatory checks)
+  - Supply Chain (delivery order, GRN, shipment reconciliation)
+  - HR & Administration (employee onboarding, leave, payroll)
+  - Healthcare (patient data, lab results, medical forms)
+  - Quality & Operations (inspection reports, audit checklists)
+- **Streaming LLM responses** — Results appear token-by-token in real time
+- Export LLM validation results as **TXT**, **HTML/DOC**, or **PDF**
+
+### 💬 ChatDOC — Chat with Your Documents
+- Built-in chat panel per job powered by LLM integrations
+- Ask questions about document content in **Thai or English**
+- LLM has access to both structured extracted data and raw OCR text
+- Multi-turn conversation history with persistent conversation threads
+- Select which LLM integration to use per conversation
+
+### 🔌 Integrations
+- **API Integration** — Push extracted data to external endpoints (POST / PUT) with custom headers and payload templates
+- **Workflow / Webhook Integration** — Trigger n8n, Zapier, or any webhook-compatible workflow
+- **LLM Integration** — Connect OpenAI-compatible providers for AI-powered document analysis
+- Per-integration active/paused status control
+- Integration result history per document
+
+### 📊 Dashboard & Activity Logs
+- Overview dashboard with key statistics (jobs, documents, processing status)
+- **Full Activity Log** — Searchable audit trail of all system actions with timestamps, user, IP address, and action details
+- Paginated log viewer with action-type icons
+
+### ⚙️ Settings & Configuration
+- Configure **OCR API endpoint** and **Bearer Token** via UI (no restart required)
+- **AI Field Suggestion providers** — Add, test, and manage multiple AI providers for schema wizard
+- Test connection buttons for verifying API connectivity
+- Settings persisted in database and overridable per environment via `.env`
+
+### 🗄️ Storage & Infrastructure
+- Pluggable file storage: **Local**, **MinIO (S3-compatible)**, or **AWS S3**
+- Dockerized deployment with **8 services**: backend, frontend, nginx, gateway, PostgreSQL, Redis, MinIO, Celery worker
+- **Network isolation** — Internal Docker network keeps DB/Redis/MinIO unreachable from the public internet
+- Outbound-only external access via gateway proxy
 
 ## Tech Stack
 

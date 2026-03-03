@@ -8,6 +8,7 @@ import os
 import time
 from datetime import datetime
 from celery import shared_task
+from celery.exceptions import SoftTimeLimitExceeded
 from app.celery_app import celery_app
 from app.db.session import SessionLocal
 from app.models import Document, DocumentSchema as SchemaModel, Setting
@@ -610,7 +611,7 @@ def process_document_task(self, document_id: str, schema_id: str | None = None):
             def _set_progress(percent: int, stage: str) -> None:
                 if _redis_prog:
                     try:
-                        _redis_prog.set(_redis_prog_key, json.dumps({"percent": percent, "stage": stage, "message": ""}), ex=300)
+                        _redis_prog.set(_redis_prog_key, json.dumps({"percent": percent, "stage": stage, "message": ""}), ex=1800)
                     except Exception:
                         pass
 
@@ -736,7 +737,7 @@ def process_document_task(self, document_id: str, schema_id: str | None = None):
                     with requests.get(
                         stream_url,
                         headers=stream_headers,
-                        timeout=300,
+                        timeout=1500,
                         verify=verify_ssl,
                         stream=True,
                     ) as stream_response:
@@ -779,7 +780,7 @@ def process_document_task(self, document_id: str, schema_id: str | None = None):
                                         })
                                         if _redis and _redis_key:
                                             try:
-                                                _redis.set(_redis_key, _progress_data, ex=300)
+                                                _redis.set(_redis_key, _progress_data, ex=1800)
                                             except Exception:
                                                 pass
                                         job_logger.info(
@@ -801,7 +802,7 @@ def process_document_task(self, document_id: str, schema_id: str | None = None):
                     job_logger.warning(f"SSE stream failed ({stream_err}), falling back to polling")
                     # Fallback: poll /status until done
                     status_url = f"{ocr_endpoint.rstrip('/')}/{external_job_id}/status"
-                    for _ in range(120):
+                    for _ in range(600):
                         status_response = requests.get(
                             status_url, headers=headers, timeout=30, verify=verify_ssl,
                         )
@@ -913,6 +914,23 @@ def process_document_task(self, document_id: str, schema_id: str | None = None):
             "extracted_data": document.extracted_data
         }
 
+    except SoftTimeLimitExceeded:
+        logger.error(f"Soft time limit exceeded for document {document_id} — marking as failed")
+        try:
+            doc = db.query(Document).filter(Document.id == document_id).first()
+            if doc:
+                doc.status = "failed"
+                doc.processing_error = "Processing timeout: task exceeded time limit"
+                db.add(doc)
+                db.commit()
+                if doc.job_id:
+                    get_job_logger(str(doc.job_id)).error(
+                        f"Soft time limit exceeded for {doc.filename} — marked as failed"
+                    )
+        except Exception:
+            pass
+        return {"status": "failed", "error": "SoftTimeLimitExceeded"}
+
     except Exception as e:
         logger.exception(f"Processing failed for document {document_id}: {e}")
         try:
@@ -922,7 +940,7 @@ def process_document_task(self, document_id: str, schema_id: str | None = None):
                 jl.error(f"Unexpected processing error for document {db_doc.filename}: {e}", exc_info=True)
         except Exception:
             pass
-        
+
         # Update document status
         try:
             document = db.query(Document).filter(Document.id == document_id).first()
@@ -933,7 +951,7 @@ def process_document_task(self, document_id: str, schema_id: str | None = None):
                 db.commit()
         except:
             pass
-        
+
         return {"status": "failed", "error": str(e)}
     
     finally:

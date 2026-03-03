@@ -94,5 +94,10 @@ class Actions:
     VIEW_SETTINGS = "view_settings"
     UPDATE_SETTINGS = "update_settings"
 
+    # Chat actions
+    CHAT_CREATE_CONVERSATION = "chat_create_conversation"
+    CHAT_SEND_MESSAGE = "chat_send_message"
+    CHAT_DELETE_CONVERSATION = "chat_delete_conversation"
+
     # Other actions
     EXPORT_DATA = "export_data"

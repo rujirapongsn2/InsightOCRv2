@@ -3,7 +3,7 @@
 import { useEffect, useState, useRef, useMemo } from "react"
 import { useParams, useRouter } from "next/navigation"
 import Link from "next/link"
-import { ArrowLeft, Upload, FileText, Loader2, Eye, X, Trash2, AlertTriangle } from "lucide-react"
+import { ArrowLeft, Upload, FileText, Loader2, Eye, X, Trash2, AlertTriangle, MessageSquare } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Modal } from "@/components/ui/modal"
 import { Textarea } from "@/components/ui/textarea"
@@ -12,6 +12,7 @@ import dynamic from "next/dynamic"
 import { getApiBaseUrl } from "@/lib/api"
 import { useAuth } from "@/components/auth-provider"
 import LlmResultRenderer from "@/components/LlmResultRenderer"
+import ChatPanel from "@/components/chat/ChatPanel"
 import { generateExportHtml, generateExportText } from "@/lib/exportReportHtml"
 
 const PDFViewer = dynamic(
@@ -106,6 +107,7 @@ export default function JobDetailPage() {
     const [editedOcrText, setEditedOcrText] = useState("")
     const [editedData, setEditedData] = useState<ExtractedEntry[]>([])
     const fileInputRef = useRef<HTMLInputElement>(null)
+    const pollingIntervalsRef = useRef<Map<string, ReturnType<typeof setInterval>>>(new Map())
     const [showIntegrationModal, setShowIntegrationModal] = useState(false)
     const [selectedIntegration, setSelectedIntegration] = useState<string>("")
     const [sendingIntegration, setSendingIntegration] = useState(false)
@@ -122,6 +124,7 @@ export default function JobDetailPage() {
     const [deleteConfirmDoc, setDeleteConfirmDoc] = useState<Document | null>(null)
     const [deleting, setDeleting] = useState(false)
     // Delete confirmation (job)
+    const [chatOpen, setChatOpen] = useState(false)
     const [showDeleteJobConfirm, setShowDeleteJobConfirm] = useState(false)
     const [deletingJob, setDeletingJob] = useState(false)
     // Image viewer state
@@ -286,6 +289,12 @@ export default function JobDetailPage() {
             })
         })
         loadResultHistory()
+
+        return () => {
+            // Clear all active polling intervals on unmount
+            pollingIntervalsRef.current.forEach(interval => clearInterval(interval))
+            pollingIntervalsRef.current.clear()
+        }
     }, [jobId])
 
     const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -336,16 +345,30 @@ export default function JobDetailPage() {
         ))
     }
 
+    const MAX_POLL_MS = 35 * 60 * 1000  // 35 minutes
+
     const startPolling = (docId: string) => {
         const token = typeof window !== "undefined" ? localStorage.getItem("token") : null
+        const startTime = Date.now()
         setProcessingDocs(prev => new Set(prev).add(docId))
         const pollInterval = setInterval(async () => {
+            // Stop polling if max duration exceeded
+            if (Date.now() - startTime > MAX_POLL_MS) {
+                clearInterval(pollInterval)
+                pollingIntervalsRef.current.delete(docId)
+                setProcessingDocs(prev => { const s = new Set(prev); s.delete(docId); return s })
+                setDocProgress(prev => { const p = { ...prev }; delete p[docId]; return p })
+                await fetchDocuments()
+                return
+            }
+
             try {
                 const statusRes = await fetch(`${apiBase}/documents/${docId}/task-status`, {
                     headers: token ? { Authorization: `Bearer ${token}` } : undefined,
                 })
                 if (!statusRes.ok) {
                     clearInterval(pollInterval)
+                    pollingIntervalsRef.current.delete(docId)
                     setProcessingDocs(prev => { const s = new Set(prev); s.delete(docId); return s })
                     setDocProgress(prev => { const p = { ...prev }; delete p[docId]; return p })
                     return
@@ -365,6 +388,7 @@ export default function JobDetailPage() {
 
                 if (status.status === "extraction_completed" || status.status === "reviewed" || status.status === "failed") {
                     clearInterval(pollInterval)
+                    pollingIntervalsRef.current.delete(docId)
                     setProcessingDocs(prev => { const s = new Set(prev); s.delete(docId); return s })
                     setDocProgress(prev => { const p = { ...prev }; delete p[docId]; return p })
                     await fetchDocuments()
@@ -372,10 +396,12 @@ export default function JobDetailPage() {
             } catch (pollError) {
                 console.error("Polling error", pollError)
                 clearInterval(pollInterval)
+                pollingIntervalsRef.current.delete(docId)
                 setProcessingDocs(prev => { const s = new Set(prev); s.delete(docId); return s })
                 setDocProgress(prev => { const p = { ...prev }; delete p[docId]; return p })
             }
         }, 1000)
+        pollingIntervalsRef.current.set(docId, pollInterval)
         return pollInterval
     }
 
@@ -899,6 +925,8 @@ export default function JobDetailPage() {
         reviewed: documents.filter(d => d.status === 'reviewed').length
     }
     const allDocsReviewed = documents.length > 0 && documents.every(d => d.status === "reviewed")
+    const hasProcessedDocs = documents.some(d => d.status === "extraction_completed" || d.status === "reviewed")
+    const hasLlmIntegration = integrations.some(i => i.type === "llm")
 
     return (
         <div className="space-y-6">
@@ -1145,6 +1173,21 @@ export default function JobDetailPage() {
                                     Next: Send to Integration
                                 </Button>
                                 <p className="text-xs text-slate-500 mt-2">All documents are reviewed. Choose an integration channel to continue.</p>
+                            </div>
+                        )}
+
+                        {/* ChatDOC */}
+                        {hasProcessedDocs && hasLlmIntegration && (
+                            <div className="mt-4 pt-4 border-t">
+                                <Button
+                                    variant="outline"
+                                    className="w-full"
+                                    onClick={() => setChatOpen(true)}
+                                >
+                                    <MessageSquare className="h-4 w-4 mr-2" />
+                                    ChatDOC
+                                </Button>
+                                <p className="text-xs text-slate-500 mt-2">Ask questions or get summaries from your documents.</p>
                             </div>
                         )}
 
@@ -1635,6 +1678,14 @@ export default function JobDetailPage() {
                         </div>
                     </div>
                 </div>
+            )}
+
+            {/* ChatDOC Panel */}
+            {chatOpen && (
+                <ChatPanel
+                    jobId={jobId}
+                    onClose={() => setChatOpen(false)}
+                />
             )}
         </div>
     )

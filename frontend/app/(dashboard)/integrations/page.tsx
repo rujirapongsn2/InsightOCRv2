@@ -7,7 +7,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { Modal } from "@/components/ui/modal"
-import { Plus, Pencil, Trash2, Plug, Eye, ShieldCheck, Maximize2 } from "lucide-react"
+import { Plus, Pencil, Trash2, Plug, Eye, ShieldCheck, Maximize2, ChevronRight, ChevronDown, LayoutTemplate, X, FileCheck2, Receipt, Landmark, Scale, Lock, PackageCheck, Ship, BarChart2, Briefcase, ClipboardList, CalendarCheck, HeartPulse, FlaskConical, ClipboardCheck, TrendingUp, AlertOctagon, type LucideIcon } from "lucide-react"
 import { getApiBaseUrl } from "@/lib/api"
 import {
     getIntegrations,
@@ -16,6 +16,14 @@ import {
     deleteIntegration,
     type Integration as APIIntegration,
 } from "@/lib/integrations-api"
+import { LLM_TEMPLATES, TEMPLATE_CATEGORIES, type LLMIntegrationTemplate, type TemplateCategory } from "@/lib/integration-templates"
+
+const TEMPLATE_ICONS: Record<string, LucideIcon> = {
+    FileCheck2, Receipt, Landmark, Scale, ShieldCheck, Lock,
+    PackageCheck, Ship, BarChart2, Briefcase, ClipboardList,
+    CalendarCheck, HeartPulse, FlaskConical, ClipboardCheck,
+    TrendingUp, AlertOctagon,
+}
 
 type IntegrationType = "api" | "workflow" | "llm"
 
@@ -177,6 +185,10 @@ export default function IntegrationsPage() {
     // Loading and error states
     const [loading, setLoading] = useState(false)
     const [error, setError] = useState<string | null>(null)
+    const [expandedIntegrations, setExpandedIntegrations] = useState<Record<string, boolean>>({})
+    // Template modal states
+    const [showTemplateModal, setShowTemplateModal] = useState(false)
+    const [templateCategory, setTemplateCategory] = useState<"all" | TemplateCategory>("all")
 
     // Load integrations from API
     useEffect(() => {
@@ -201,6 +213,13 @@ export default function IntegrationsPage() {
         } finally {
             setLoading(false)
         }
+    }
+
+    const toggleIntegrationDetails = (integrationId: string) => {
+        setExpandedIntegrations((prev) => ({
+            ...prev,
+            [integrationId]: !prev[integrationId],
+        }))
     }
 
     // Migrate localStorage data to database (runs once)
@@ -251,8 +270,30 @@ export default function IntegrationsPage() {
         }
     }
 
+    const filteredTemplates = templateCategory === "all"
+        ? LLM_TEMPLATES
+        : LLM_TEMPLATES.filter(t => t.category === templateCategory)
+
     const openCreate = () => {
         setFormState(defaultFormState)
+        setEditingId(null)
+        setShowForm(true)
+    }
+
+    const applyTemplate = (template: LLMIntegrationTemplate) => {
+        setShowTemplateModal(false)
+        setTemplateCategory("all")
+        setFormState({
+            ...defaultFormState,
+            type: "llm",
+            name: template.name,
+            description: template.description,
+            model: template.config.model,
+            instructions: template.config.instructions,
+            userPrompt: template.config.userPrompt,
+            outputFormatPrompt: template.config.outputFormatPrompt,
+            reasoningEffort: template.config.reasoningEffort,
+        })
         setEditingId(null)
         setShowForm(true)
     }
@@ -1075,6 +1116,111 @@ export default function IntegrationsPage() {
                 </div>
             )}
 
+            {/* Template Browser Modal */}
+            {showTemplateModal && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+                    <div className="bg-white rounded-xl shadow-2xl w-full max-w-5xl flex flex-col" style={{ maxHeight: "calc(100vh - 4rem)" }}>
+                        {/* Header */}
+                        <div className="flex items-center justify-between px-6 py-4 border-b shrink-0">
+                            <div>
+                                <h2 className="text-xl font-semibold text-slate-900">Add From Template</h2>
+                                <p className="text-sm text-slate-500 mt-0.5">เลือกเทมเพลตสำเร็จรูปเพื่อเริ่มต้นอย่างรวดเร็ว — เพิ่มเพียง API Key และปรับแต่งตามต้องการ</p>
+                            </div>
+                            <button
+                                type="button"
+                                onClick={() => { setShowTemplateModal(false); setTemplateCategory("all") }}
+                                className="text-slate-400 hover:text-slate-600 transition-colors p-1 rounded"
+                            >
+                                <X className="h-5 w-5" />
+                            </button>
+                        </div>
+
+                        {/* Category filter pills */}
+                        <div className="px-6 py-3 bg-slate-50 border-b shrink-0">
+                            <div className="flex flex-wrap gap-2">
+                                <button
+                                    type="button"
+                                    onClick={() => setTemplateCategory("all")}
+                                    className={`px-3 py-1 rounded-full text-sm font-medium transition-colors ${
+                                        templateCategory === "all"
+                                            ? "bg-slate-900 text-white"
+                                            : "bg-white text-slate-600 border border-slate-200 hover:border-slate-300"
+                                    }`}
+                                >
+                                    ทั้งหมด ({LLM_TEMPLATES.length})
+                                </button>
+                                {(Object.keys(TEMPLATE_CATEGORIES) as TemplateCategory[]).map(cat => {
+                                    const catInfo = TEMPLATE_CATEGORIES[cat]
+                                    const count = LLM_TEMPLATES.filter(t => t.category === cat).length
+                                    return (
+                                        <button
+                                            key={cat}
+                                            type="button"
+                                            onClick={() => setTemplateCategory(cat)}
+                                            className={`px-3 py-1 rounded-full text-sm font-medium transition-colors ${
+                                                templateCategory === cat
+                                                    ? "bg-slate-900 text-white"
+                                                    : "bg-white text-slate-600 border border-slate-200 hover:border-slate-300"
+                                            }`}
+                                        >
+                                            {catInfo.labelTh} ({count})
+                                        </button>
+                                    )
+                                })}
+                            </div>
+                        </div>
+
+                        {/* Scrollable template grid */}
+                        <div className="overflow-y-auto flex-1 p-6">
+                            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                                {filteredTemplates.map(template => {
+                                    const cat = TEMPLATE_CATEGORIES[template.category]
+                                    const IconComp = TEMPLATE_ICONS[template.icon] ?? LayoutTemplate
+                                    return (
+                                        <div key={template.id} className="bg-white border border-slate-200 rounded-lg p-4 flex flex-col gap-3 hover:border-slate-300 hover:shadow-sm transition-all">
+                                            {/* Icon + Category badge */}
+                                            <div className="flex items-center gap-2">
+                                                <div className={`w-12 h-12 rounded-2xl flex items-center justify-center shrink-0 shadow-sm ${cat.iconBgClass}`}>
+                                                    <IconComp className={`h-6 w-6 ${cat.iconColorClass}`} />
+                                                </div>
+                                                <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${cat.badgeClass}`}>
+                                                    {cat.labelTh}
+                                                </span>
+                                            </div>
+                                            {/* Name */}
+                                            <h3 className="font-semibold text-slate-900 text-sm leading-snug">{template.name}</h3>
+                                            {/* Description */}
+                                            <p className="text-xs text-slate-500 leading-relaxed flex-1">{template.description}</p>
+                                            {/* Tags */}
+                                            <div className="flex flex-wrap gap-1">
+                                                {template.tags.slice(0, 4).map(tag => (
+                                                    <span key={tag} className="text-xs bg-slate-100 text-slate-600 px-2 py-0.5 rounded">
+                                                        {tag}
+                                                    </span>
+                                                ))}
+                                            </div>
+                                            {/* Footer */}
+                                            <div className="flex items-center justify-between pt-1 border-t border-slate-100">
+                                                <span className="text-xs text-slate-400 capitalize">
+                                                    {template.config.model} · reasoning: {template.config.reasoningEffort}
+                                                </span>
+                                                <Button
+                                                    size="sm"
+                                                    onClick={() => applyTemplate(template)}
+                                                    className="text-xs h-7 px-3"
+                                                >
+                                                    Use Template
+                                                </Button>
+                                            </div>
+                                        </div>
+                                    )
+                                })}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+
             <div className="flex items-center justify-between gap-4">
                 <div>
                     <h2 className="text-2xl font-bold tracking-tight">Integration</h2>
@@ -1085,10 +1231,16 @@ export default function IntegrationsPage() {
                     </p>
                 </div>
                 {(isAdmin || isManager) && (
-                    <Button onClick={openCreate}>
-                        <Plus className="mr-2 h-4 w-4" />
-                        Add Integration
-                    </Button>
+                    <div className="flex items-center gap-2">
+                        <Button variant="outline" onClick={() => setShowTemplateModal(true)}>
+                            <LayoutTemplate className="mr-2 h-4 w-4" />
+                            Add From Template
+                        </Button>
+                        <Button onClick={openCreate}>
+                            <Plus className="mr-2 h-4 w-4" />
+                            Add Integration
+                        </Button>
+                    </div>
                 )}
             </div>
 
@@ -1126,8 +1278,18 @@ export default function IntegrationsPage() {
                 {integrations.map((integration) => (
                     <div key={integration.id} className="bg-white rounded-lg border shadow-sm p-5">
                         <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-4">
-                            <div className="space-y-2">
-                                <div className="flex items-center gap-3 flex-wrap">
+                            <button
+                                type="button"
+                                className="space-y-2 text-left flex-1"
+                                onClick={() => toggleIntegrationDetails(integration.id)}
+                                aria-expanded={!!expandedIntegrations[integration.id]}
+                            >
+                                <div className="flex items-center gap-2 flex-wrap">
+                                    {expandedIntegrations[integration.id] ? (
+                                        <ChevronDown className="h-4 w-4 text-slate-500" />
+                                    ) : (
+                                        <ChevronRight className="h-4 w-4 text-slate-500" />
+                                    )}
                                     <span className="text-lg font-semibold text-slate-900">{integration.name}</span>
                                     <span className="rounded-full bg-slate-100 text-slate-700 px-3 py-1 text-xs capitalize">
                                         {integration.type === "workflow" ? "Workflow Automation" : integration.type.toUpperCase()}
@@ -1138,7 +1300,7 @@ export default function IntegrationsPage() {
                                 </div>
                                 <p className="text-slate-600">{integration.description}</p>
                                 <div className="text-xs text-slate-500">Updated {new Date(integration.updatedAt || integration.updated_at || integration.created_at || Date.now()).toLocaleString()}</div>
-                            </div>
+                            </button>
                             <div className="flex items-center gap-2">
                                 {isUser && (
                                     <div className="flex items-center gap-1 text-slate-500 text-sm">
@@ -1158,9 +1320,11 @@ export default function IntegrationsPage() {
                                 )}
                             </div>
                         </div>
-                        <div className="mt-4">
-                            {renderConfigDetails(integration)}
-                        </div>
+                        {expandedIntegrations[integration.id] && (
+                            <div className="mt-4 border-t pt-4">
+                                {renderConfigDetails(integration)}
+                            </div>
+                        )}
                     </div>
                 ))}
             </div>
