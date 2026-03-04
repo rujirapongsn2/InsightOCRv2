@@ -101,6 +101,31 @@ interface ContractComparisonReport {
   [key: string]: any
 }
 
+// ── Types for TOR / Spec Verification Report ──
+interface TorRequirement {
+  id: string | number
+  [key: string]: any
+}
+
+interface TorVerificationSummary {
+  spec_document?: string
+  datasheet_document?: string
+  total_requirements?: number
+  pass_count?: number
+  partial_count?: number
+  fail_count?: number
+  coverage_percent?: number
+  overall_verdict?: string
+  notes?: string
+  [key: string]: any
+}
+
+interface TorVerificationReport {
+  verification_summary: TorVerificationSummary
+  requirements: TorRequirement[]
+  [key: string]: any
+}
+
 // ── Helpers ──
 function tryParseRaw(text: string): any | null {
   try {
@@ -117,6 +142,14 @@ function tryParseJson(text: string): ValidationReport | null {
   const parsed = tryParseRaw(text)
   if (parsed && parsed.validation_summary && Array.isArray(parsed.validation_results)) {
     return parsed as ValidationReport
+  }
+  return null
+}
+
+function tryParseTorVerification(text: string): TorVerificationReport | null {
+  const parsed = tryParseRaw(text)
+  if (parsed && parsed.verification_summary && Array.isArray(parsed.requirements)) {
+    return parsed as TorVerificationReport
   }
   return null
 }
@@ -141,6 +174,76 @@ function tryParseContractComparison(text: string): ContractComparisonReport | nu
 function isMarkdown(text: string): boolean {
   const indicators = [/^#{1,6}\s/m, /\*\*[^*]+\*\*/, /^\s*[-*]\s/m, /\|.*\|.*\|/]
   return indicators.filter(r => r.test(text)).length >= 2
+}
+
+function isHtml(text: string): boolean {
+  const t = text.trim()
+  return /^<(!DOCTYPE|html|div|table|ul|ol|p|h[1-6]|section|article|main|body)/i.test(t) || (t.includes("</") && t.includes(">"))
+}
+
+// ── Generic JSON renderer for unknown schemas ──
+function GenericJsonView({ data }: { data: any }) {
+  if (Array.isArray(data)) {
+    if (data.length === 0) return <span className="text-[#718096] text-xs">[]</span>
+    // Array of objects → table
+    const isObjArray = data.every(item => item && typeof item === "object" && !Array.isArray(item))
+    if (isObjArray) {
+      const keys = Array.from(new Set(data.flatMap(item => Object.keys(item))))
+      return (
+        <div className="overflow-x-auto rounded-[8px] shadow-sm my-2">
+          <table className="min-w-full text-[12px] border-collapse">
+            <thead>
+              <tr className="bg-[#1a365d] text-white">
+                {keys.map(k => (
+                  <th key={k} className="px-3 py-2 text-left font-semibold capitalize">{k.replace(/_/g, " ")}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {data.map((row: any, idx: number) => (
+                <tr key={idx} className={`border-b border-[#e2e8f0] ${idx % 2 === 0 ? "bg-white" : "bg-[#f7fafc]"} hover:bg-[#ebf8ff]`}>
+                  {keys.map(k => (
+                    <td key={k} className="px-3 py-2 text-[#2d3748] align-top">
+                      {row[k] == null ? "—" : typeof row[k] === "object" ? <GenericJsonView data={row[k]} /> : String(row[k])}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )
+    }
+    // Array of primitives
+    return (
+      <ul className="list-disc list-inside space-y-1 text-[13px] text-[#2d3748]">
+        {data.map((item: any, idx: number) => (
+          <li key={idx}>{typeof item === "object" ? <GenericJsonView data={item} /> : String(item)}</li>
+        ))}
+      </ul>
+    )
+  }
+
+  if (data && typeof data === "object") {
+    return (
+      <div className="space-y-2">
+        {Object.entries(data).map(([key, val]) => (
+          <div key={key} className="bg-[#f7fafc] border border-[#e2e8f0] rounded-[8px] p-3">
+            <div className="text-xs font-semibold text-[#1a365d] capitalize mb-1">{key.replace(/_/g, " ")}</div>
+            {val == null ? (
+              <span className="text-[#718096] text-xs">—</span>
+            ) : typeof val === "object" ? (
+              <GenericJsonView data={val} />
+            ) : (
+              <div className="text-[13px] text-[#2d3748]">{String(val)}</div>
+            )}
+          </div>
+        ))}
+      </div>
+    )
+  }
+
+  return <span className="text-[13px] text-[#2d3748]">{String(data)}</span>
 }
 
 function formatThb(amount: number): string {
@@ -800,6 +903,147 @@ function ContractComparisonReportView({ report }: { report: ContractComparisonRe
   )
 }
 
+// ── TOR Verification Report renderer ──
+function TorVerificationReportView({ report }: { report: TorVerificationReport }) {
+  const [showRaw, setShowRaw] = useState(false)
+  const s = report.verification_summary
+
+  const verdictColor = (verdict: string) => {
+    const v = (verdict || "").toUpperCase()
+    if (v === "PASS") return "bg-[#f0fff4] text-[#276749] border-[#c6f6d5]"
+    if (v === "FAIL") return "bg-[#fff5f5] text-[#c53030] border-[#fed7d7]"
+    return "bg-[#fffaf0] text-[#c05621] border-[#feebc8]"
+  }
+
+  // Collect all unique keys across requirements (excluding 'id')
+  const reqKeys = Array.from(
+    new Set(report.requirements.flatMap(r => Object.keys(r).filter(k => k !== "id")))
+  )
+
+  return (
+    <div className="space-y-5">
+      {/* Summary header */}
+      <div className="bg-[#ebf8ff] border-l-4 border-[#2b6cb0] rounded-[10px] p-5 shadow-[0_2px_10px_rgba(0,0,0,0.05)]">
+        <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+          <div>
+            {s.spec_document && <div className="text-xs text-[#718096]">Spec: <span className="font-semibold text-[#2d3748]">{s.spec_document}</span></div>}
+            {s.datasheet_document && <div className="text-xs text-[#718096]">Datasheet: <span className="font-semibold text-[#2d3748]">{s.datasheet_document}</span></div>}
+          </div>
+          {s.overall_verdict && (
+            <span className={`text-sm font-bold px-3 py-1 rounded-full border ${verdictColor(s.overall_verdict)}`}>
+              {s.overall_verdict}
+            </span>
+          )}
+        </div>
+
+        {/* Stat boxes */}
+        <div className="flex gap-3 flex-wrap">
+          {s.total_requirements != null && (
+            <div className="flex-1 min-w-[80px] rounded-[8px] bg-white border border-[#e2e8f0] py-3 text-center shadow-sm">
+              <div className="text-2xl font-[800] text-[#1a365d]">{s.total_requirements}</div>
+              <div className="text-[11px] text-[#718096] mt-0.5">Total</div>
+            </div>
+          )}
+          {s.pass_count != null && (
+            <div className="flex-1 min-w-[80px] rounded-[8px] bg-[#f0fff4] border border-[#c6f6d5] py-3 text-center shadow-sm">
+              <div className="text-2xl font-[800] text-[#276749]">{s.pass_count}</div>
+              <div className="text-[11px] text-[#718096] mt-0.5">PASS</div>
+            </div>
+          )}
+          {s.partial_count != null && (
+            <div className="flex-1 min-w-[80px] rounded-[8px] bg-[#fffaf0] border border-[#feebc8] py-3 text-center shadow-sm">
+              <div className="text-2xl font-[800] text-[#c05621]">{s.partial_count}</div>
+              <div className="text-[11px] text-[#718096] mt-0.5">PARTIAL</div>
+            </div>
+          )}
+          {s.fail_count != null && (
+            <div className="flex-1 min-w-[80px] rounded-[8px] bg-[#fff5f5] border border-[#fed7d7] py-3 text-center shadow-sm">
+              <div className="text-2xl font-[800] text-[#c53030]">{s.fail_count}</div>
+              <div className="text-[11px] text-[#718096] mt-0.5">FAIL</div>
+            </div>
+          )}
+          {s.coverage_percent != null && (
+            <div className="flex-1 min-w-[80px] rounded-[8px] bg-white border border-[#e2e8f0] py-3 text-center shadow-sm">
+              <div className="text-2xl font-[800] text-[#2b6cb0]">{s.coverage_percent}%</div>
+              <div className="text-[11px] text-[#718096] mt-0.5">Coverage</div>
+            </div>
+          )}
+        </div>
+
+        {s.notes && (
+          <p className="text-[13px] text-[#2d3748] mt-3 leading-relaxed italic">{s.notes}</p>
+        )}
+      </div>
+
+      {/* Requirements table */}
+      {report.requirements.length > 0 && (
+        <div>
+          <h3 className="text-[15px] font-bold text-[#2b6cb0] border-l-4 border-[#2b6cb0] pl-3 mb-3">รายการ Requirements</h3>
+          <div className="overflow-x-auto rounded-[10px] shadow-[0_2px_10px_rgba(0,0,0,0.05)]">
+            <table className="min-w-full text-[12px] border-collapse">
+              <thead>
+                <tr className="bg-[#1a365d] text-white">
+                  <th className="px-3 py-2.5 text-left font-semibold w-10">#</th>
+                  {reqKeys.map(k => (
+                    <th key={k} className="px-3 py-2.5 text-left font-semibold capitalize">{k.replace(/_/g, " ")}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {report.requirements.map((req, idx) => {
+                  const statusVal = (req.status || req.verdict || req.result || "").toUpperCase()
+                  const rowBg = idx % 2 === 0 ? "bg-white" : "bg-[#f7fafc]"
+                  return (
+                    <tr key={idx} className={`border-b border-[#e2e8f0] ${rowBg} hover:bg-[#ebf8ff] transition-colors`}>
+                      <td className="px-3 py-[9px] text-[#718096] font-mono text-xs align-top">{req.id ?? idx + 1}</td>
+                      {reqKeys.map(k => {
+                        const val = req[k]
+                        const isStatusCol = k === "status" || k === "verdict" || k === "result"
+                        if (isStatusCol && val) {
+                          const v = String(val).toUpperCase()
+                          const sc = v === "PASS" ? "bg-[#f0fff4] text-[#276749]"
+                            : v === "FAIL" ? "bg-[#fff5f5] text-[#c53030]"
+                            : v === "PARTIAL" ? "bg-[#fffaf0] text-[#c05621]"
+                            : "bg-[#f7fafc] text-[#718096]"
+                          return (
+                            <td key={k} className="px-3 py-[9px] text-center align-top">
+                              <span className={`inline-block text-xs font-bold px-2 py-0.5 rounded-full ${sc}`}>{v}</span>
+                            </td>
+                          )
+                        }
+                        return (
+                          <td key={k} className="px-3 py-[9px] text-[#2d3748] align-top">
+                            {val == null ? "—" : typeof val === "object" ? JSON.stringify(val) : String(val)}
+                          </td>
+                        )
+                      })}
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* Raw JSON toggle */}
+      <div className="pt-3 border-t border-[#e2e8f0]">
+        <button
+          className="text-xs text-[#718096] hover:text-[#2b6cb0] transition-colors"
+          onClick={() => setShowRaw(!showRaw)}
+        >
+          {showRaw ? "ซ่อน" : "แสดง"} raw JSON
+        </button>
+        {showRaw && (
+          <pre className="mt-2 text-xs bg-[#f7fafc] border border-[#e2e8f0] rounded-lg p-3 overflow-x-auto max-h-60 overflow-y-auto font-mono text-[#2d3748]">
+            {JSON.stringify(report, null, 2)}
+          </pre>
+        )}
+      </div>
+    </div>
+  )
+}
+
 // ── Main component ──
 
 interface LlmResultRendererProps {
@@ -842,17 +1086,56 @@ export default function LlmResultRenderer({ content }: LlmResultRendererProps) {
     )
   }
 
-  // 2. Try Contract Comparison Report
+  // 2. Try TOR Verification Report
+  const torReport = tryParseTorVerification(content)
+  if (torReport) {
+    return <TorVerificationReportView report={torReport} />
+  }
+
+  // 3. Try Contract Comparison Report
   const contractReport = tryParseContractComparison(content)
   if (contractReport) {
     return <ContractComparisonReportView report={contractReport} />
   }
 
-  // 3. Try Markdown
+  // 4. Try HTML
+  if (isHtml(content)) {
+    return (
+      <div
+        className="prose prose-sm max-w-none text-slate-700"
+        dangerouslySetInnerHTML={{ __html: content }}
+      />
+    )
+  }
+
+  // 5. Try Markdown
   if (isMarkdown(content)) {
     return <MarkdownView text={content} />
   }
 
-  // 4. Fallback: plain text
+  // 6. Try any valid JSON (generic renderer)
+  const anyJson = tryParseRaw(content)
+  if (anyJson !== null) {
+    return (
+      <div className="space-y-3">
+        <GenericJsonView data={anyJson} />
+        <div className="pt-3 border-t border-[#e2e8f0]">
+          <button
+            className="text-xs text-[#718096] hover:text-[#2b6cb0] transition-colors"
+            onClick={() => setShowRaw(!showRaw)}
+          >
+            {showRaw ? "ซ่อน" : "แสดง"} raw JSON
+          </button>
+          {showRaw && (
+            <pre className="mt-2 text-xs bg-[#f7fafc] border border-[#e2e8f0] rounded-lg p-3 overflow-x-auto max-h-60 overflow-y-auto font-mono text-[#2d3748]">
+              {JSON.stringify(anyJson, null, 2)}
+            </pre>
+          )}
+        </div>
+      </div>
+    )
+  }
+
+  // 7. Fallback: plain text
   return <div className="whitespace-pre-wrap text-slate-700 leading-relaxed">{content}</div>
 }

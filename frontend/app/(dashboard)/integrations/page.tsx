@@ -8,7 +8,7 @@ import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { Modal } from "@/components/ui/modal"
 import { Plus, Pencil, Trash2, Plug, Eye, ShieldCheck, Maximize2, ChevronRight, ChevronDown, LayoutTemplate, X, FileCheck2, Receipt, Landmark, Scale, Lock, PackageCheck, Ship, BarChart2, Briefcase, ClipboardList, CalendarCheck, HeartPulse, FlaskConical, ClipboardCheck, TrendingUp, AlertOctagon, type LucideIcon } from "lucide-react"
-import { getApiBaseUrl } from "@/lib/api"
+import { getApiBaseUrl, handleAuthError } from "@/lib/api"
 import {
     getIntegrations,
     createIntegration,
@@ -770,6 +770,7 @@ export default function IntegrationsPage() {
                                                         reasoningEffort: formState.reasoningEffort
                                                     })
                                                 })
+                                                handleAuthError(response)
                                                 const data = await response.json()
                                                 if (response.ok) {
                                                     setTestResult(`✓ ${data.output || "Success!"}`)

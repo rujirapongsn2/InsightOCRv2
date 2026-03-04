@@ -40,7 +40,7 @@ class Settings(BaseSettings):
     # JWT
     SECRET_KEY: str # Set via env var
     ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 480
 
     # Extra CORS origins (comma-separated) to append beyond BACKEND_CORS_ORIGINS
     BACKEND_EXTRA_CORS_ORIGINS: str = ""

@@ -3,7 +3,7 @@
  * Handles all API calls related to integrations
  */
 
-import { getApiBaseUrl } from "./api"
+import { getApiBaseUrl, handleAuthError } from "./api"
 
 const API_BASE = getApiBaseUrl()
 
@@ -69,6 +69,7 @@ export async function getIntegrations(
     },
   })
 
+  handleAuthError(response)
   if (!response.ok) {
     throw new Error(`Failed to fetch integrations: ${response.statusText}`)
   }
@@ -87,6 +88,7 @@ export async function getActiveIntegrations(token: string): Promise<Integration[
     },
   })
 
+  handleAuthError(response)
   if (!response.ok) {
     throw new Error(`Failed to fetch active integrations: ${response.statusText}`)
   }
@@ -105,6 +107,7 @@ export async function getIntegration(token: string, id: string): Promise<Integra
     },
   })
 
+  handleAuthError(response)
   if (!response.ok) {
     throw new Error(`Failed to fetch integration: ${response.statusText}`)
   }
@@ -128,6 +131,7 @@ export async function createIntegration(
     body: JSON.stringify(data),
   })
 
+  handleAuthError(response)
   if (!response.ok) {
     const error = await response.json().catch(() => ({ detail: response.statusText }))
     throw new Error(error.detail || "Failed to create integration")
@@ -153,6 +157,7 @@ export async function updateIntegration(
     body: JSON.stringify(data),
   })
 
+  handleAuthError(response)
   if (!response.ok) {
     const error = await response.json().catch(() => ({ detail: response.statusText }))
     throw new Error(error.detail || "Failed to update integration")
@@ -173,6 +178,7 @@ export async function deleteIntegration(token: string, id: string): Promise<void
     },
   })
 
+  handleAuthError(response)
   if (!response.ok) {
     const error = await response.json().catch(() => ({ detail: response.statusText }))
     throw new Error(error.detail || "Failed to delete integration")
