@@ -82,7 +82,7 @@ wait_for_healthy() {
 
 write_build_info() {
   local commit_sha="$1"
-  local short_commit_sha="${commit_sha:0:12}"
+  local short_commit_sha="${commit_sha:0:7}"
   local branch_name="${2:-unknown}"
   local updated_at
   updated_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
@@ -127,7 +127,7 @@ update_stack() {
   if [ "$before_sha" = "$after_sha" ]; then
     echo "Already up to date."
   else
-    echo "Updated to commit ${after_sha:0:12}"
+    echo "Updated to commit ${after_sha:0:7}"
   fi
 
   echo "Stack is ready."

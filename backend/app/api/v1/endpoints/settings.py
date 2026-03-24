@@ -22,7 +22,7 @@ def get_app_commit_sha() -> str | None:
         data = json.loads(BUILD_INFO_PATH.read_text(encoding="utf-8"))
         sha = data.get("short_commit_sha") or data.get("commit_sha")
         if isinstance(sha, str) and sha.strip():
-            return sha.strip()
+            return sha.strip()[:7]
     except Exception:
         return None
     return None
