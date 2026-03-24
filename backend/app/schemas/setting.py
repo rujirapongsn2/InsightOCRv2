@@ -22,6 +22,7 @@ class SettingUpdate(SettingBase):
 
 class Setting(SettingBase):
     id: UUID
+    app_commit_sha: str | None = None
 
     class Config:
         from_attributes = True

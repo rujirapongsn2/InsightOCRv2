@@ -1,3 +1,5 @@
+import json
+from pathlib import Path
 from typing import Any, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, HttpUrl
@@ -10,6 +12,20 @@ from app.schemas.setting import Setting as SettingSchema, SettingUpdate
 from app.utils.activity_logger import log_activity, Actions
 
 router = APIRouter()
+BUILD_INFO_PATH = Path(__file__).resolve().parents[4] / ".build-info.json"
+
+
+def get_app_commit_sha() -> str | None:
+    try:
+        if not BUILD_INFO_PATH.exists():
+            return None
+        data = json.loads(BUILD_INFO_PATH.read_text(encoding="utf-8"))
+        sha = data.get("short_commit_sha") or data.get("commit_sha")
+        if isinstance(sha, str) and sha.strip():
+            return sha.strip()
+    except Exception:
+        return None
+    return None
 
 
 class EndpointTestRequest(BaseModel):
@@ -28,6 +44,7 @@ def get_settings(
         db.add(setting)
         db.commit()
         db.refresh(setting)
+    setattr(setting, "app_commit_sha", get_app_commit_sha())
 
     # Migrate legacy api_endpoint to new fields if needed
     if setting.api_endpoint and (not setting.ocr_endpoint or not setting.test_endpoint):
@@ -63,6 +80,7 @@ def get_settings(
         db.commit()
         db.refresh(setting)
 
+    setattr(setting, "app_commit_sha", get_app_commit_sha())
     return setting
 
 
@@ -95,6 +113,7 @@ def update_settings(
     db.add(setting)
     db.commit()
     db.refresh(setting)
+    setattr(setting, "app_commit_sha", get_app_commit_sha())
 
     # Log activity
     log_activity(

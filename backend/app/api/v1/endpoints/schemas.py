@@ -145,6 +145,60 @@ class ImportSchemaRequest(BaseModel):
     json_schema: str  # Raw JSON text from user
 
 
+def _repair_truncated_json(text: str) -> str | None:
+    """
+    Repair a JSON document that is otherwise valid but truncated at EOF.
+    Only handles missing closing braces/brackets and leaves other syntax errors
+    untouched.
+    """
+    stack: list[str] = []
+    in_string = False
+    escape = False
+
+    for char in text:
+        if in_string:
+            if escape:
+                escape = False
+                continue
+            if char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            stack.append("}")
+        elif char == "[":
+            stack.append("]")
+        elif char in "}]":
+            if not stack or stack.pop() != char:
+                return None
+
+    if in_string or not stack:
+        return None
+
+    return text + "".join(reversed(stack))
+
+
+def _extract_schema_object(payload: Any) -> dict[str, Any]:
+    """
+    Accept either a raw JSON Schema object or an envelope that contains it
+    under a top-level `schema` key.
+    """
+    if not isinstance(payload, dict):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Imported JSON must be an object.",
+        )
+
+    if "schema" in payload and isinstance(payload["schema"], dict):
+        return payload["schema"]
+
+    return payload
+
+
 @router.post("/validate-import")
 async def validate_import_schema(
     payload: ImportSchemaRequest,
@@ -158,9 +212,19 @@ async def validate_import_schema(
 
     # 1. Parse JSON client-side first to give early feedback
     try:
-        schema_obj = json.loads(payload.json_schema)
+        raw_obj = json.loads(payload.json_schema)
     except json.JSONDecodeError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid JSON: {exc}")
+        repaired = _repair_truncated_json(payload.json_schema)
+        if repaired is None:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid JSON: {exc}")
+
+        try:
+            raw_obj = json.loads(repaired)
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid JSON: {exc}")
+
+    schema_obj = _extract_schema_object(raw_obj)
+    schema_json = json.dumps(schema_obj)
 
     # 2. Load settings
     setting = db.query(Setting).first()
@@ -188,7 +252,7 @@ async def validate_import_schema(
         resp = requests.post(
             validate_url,
             headers=headers,
-            data={"json_schema": payload.json_schema},
+            data={"json_schema": schema_json},
             timeout=30,
             verify=verify_ssl,
         )

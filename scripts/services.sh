@@ -10,6 +10,7 @@ Softnix InsightDOC service helper
 Usage:
   services.sh up           # start all services (frontend, backend, db, redis, minio)
   services.sh down         # stop and remove containers
+  services.sh update       # pull latest code and refresh the running stack
   services.sh restart api  # restart backend only
   services.sh restart web  # restart frontend only
   services.sh restart all  # restart all containers
@@ -53,6 +54,85 @@ rebuild_service() {
   $COMPOSE up -d --build --no-deps "$svc"
 }
 
+wait_for_healthy() {
+  local container_name="$1"
+  local timeout_seconds="${2:-180}"
+  local elapsed=0
+  local status=""
+
+  while [ "$elapsed" -lt "$timeout_seconds" ]; do
+    status="$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$container_name" 2>/dev/null || true)"
+    case "$status" in
+      healthy|running)
+        return 0
+        ;;
+      unhealthy|exited|dead)
+        echo "${container_name} is ${status}" >&2
+        return 1
+        ;;
+    esac
+
+    sleep 3
+    elapsed=$((elapsed + 3))
+  done
+
+  echo "Timed out waiting for ${container_name} to become healthy" >&2
+  return 1
+}
+
+write_build_info() {
+  local commit_sha="$1"
+  local short_commit_sha="${commit_sha:0:12}"
+  local branch_name="${2:-unknown}"
+  local updated_at
+  updated_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+
+  cat > backend/.build-info.json <<EOF
+{"commit_sha":"${commit_sha}","short_commit_sha":"${short_commit_sha}","branch":"${branch_name}","updated_at":"${updated_at}"}
+EOF
+}
+
+update_stack() {
+  require_compose
+  if ! command -v git >/dev/null 2>&1; then
+    echo "git is not installed or not on PATH" >&2
+    exit 1
+  fi
+
+  local before_sha after_sha branch_name
+  before_sha="$(git rev-parse HEAD)"
+  branch_name="$(git branch --show-current)"
+  branch_name="${branch_name:-unknown}"
+
+  echo "Fetching latest code from origin..."
+  git fetch origin --prune
+
+  echo "Pulling latest changes..."
+  git pull --rebase --autostash
+
+  after_sha="$(git rev-parse HEAD)"
+  write_build_info "$after_sha" "$branch_name"
+
+  echo "Rebuilding application services..."
+  $COMPOSE up -d --build backend celery_worker frontend gateway
+
+  echo "Refreshing nginx..."
+  $COMPOSE restart nginx
+
+  echo "Waiting for services to become healthy..."
+  wait_for_healthy softnix_ocr_backend
+  wait_for_healthy softnix_ocr_frontend
+  wait_for_healthy softnix_ocr_nginx
+
+  if [ "$before_sha" = "$after_sha" ]; then
+    echo "Already up to date."
+  else
+    echo "Updated to commit ${after_sha:0:12}"
+  fi
+
+  echo "Stack is ready."
+}
+
 case "${1:-}" in
   up)
     require_compose
@@ -61,6 +141,9 @@ case "${1:-}" in
   down)
     require_compose
     $COMPOSE down
+    ;;
+  update)
+    update_stack
     ;;
   restart)
     require_compose

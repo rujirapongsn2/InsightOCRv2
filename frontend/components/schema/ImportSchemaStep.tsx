@@ -9,6 +9,45 @@ import { SchemaField } from "@/types/schema"
 
 type Tab = "upload" | "paste"
 
+function repairTruncatedJson(text: string): string | null {
+  const stack: string[] = []
+  let inString = false
+  let escape = false
+
+  for (const char of text) {
+    if (inString) {
+      if (escape) {
+        escape = false
+        continue
+      }
+      if (char === "\\") {
+        escape = true
+      } else if (char === '"') {
+        inString = false
+      }
+      continue
+    }
+
+    if (char === '"') {
+      inString = true
+    } else if (char === "{") {
+      stack.push("}")
+    } else if (char === "[") {
+      stack.push("]")
+    } else if (char === "}" || char === "]") {
+      if (stack.length === 0 || stack.pop() !== char) {
+        return null
+      }
+    }
+  }
+
+  if (inString || stack.length === 0) {
+    return null
+  }
+
+  return text + stack.reverse().join("")
+}
+
 export function ImportSchemaStep() {
   const { resetWizard, setFields, nextStep } = useSchemaWizard()
 
@@ -48,11 +87,23 @@ export function ImportSchemaStep() {
     setValidationError(null)
 
     // Client-side JSON parse check
+    let parsedText = jsonText
     try {
-      JSON.parse(jsonText)
+      JSON.parse(parsedText)
     } catch (err) {
-      setValidationError(`Invalid JSON syntax: ${(err as Error).message}`)
-      return
+      const repaired = repairTruncatedJson(parsedText)
+      if (!repaired) {
+        setValidationError(`Invalid JSON syntax: ${(err as Error).message}`)
+        return
+      }
+
+      try {
+        JSON.parse(repaired)
+        parsedText = repaired
+      } catch (repairErr) {
+        setValidationError(`Invalid JSON syntax: ${(repairErr as Error).message}`)
+        return
+      }
     }
 
     setIsValidating(true)
@@ -64,7 +115,7 @@ export function ImportSchemaStep() {
           "Content-Type": "application/json",
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
-        body: JSON.stringify({ json_schema: jsonText }),
+        body: JSON.stringify({ json_schema: parsedText }),
       })
 
       const data = await res.json()

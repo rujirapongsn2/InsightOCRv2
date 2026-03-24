@@ -318,6 +318,139 @@ def extract_structured_from_markdown(content: str) -> dict[str, Any] | None:
     return result
 
 
+def extract_key_fields_from_text(content: str) -> dict[str, Any]:
+    """
+    Extract common invoice header fields from raw OCR/AI text.
+    This is a fallback for documents where the structured response is partial.
+    """
+    if not content or not isinstance(content, str):
+        return {}
+
+    result: dict[str, Any] = {}
+    lines = [line.strip() for line in content.splitlines()]
+
+    def set_if_missing(key: str, value: str | None) -> None:
+        if not value:
+            return
+        value = value.strip()
+        if not value:
+            return
+        if key not in result or result[key] in (None, "", [], {}):
+            result[key] = value
+
+    def is_boundary(line: str) -> bool:
+        normalized = line.strip().replace("：", ":")
+        return bool(re.match(
+            r"^(?:"
+            r"invoice\s*no\.?|document\s*no\.?|doc\s*no\.?|no\.?|เลขที่|หมายเลขเอกสาร|"
+            r"invoice\s*date|document\s*date|date|วันที่|"
+            r"buyer|ผู้ซื้อ|seller|ผู้ขาย|customer|vendor|supplier|"
+            r"item|items|line\s*items|description|qty|quantity|unit\s*price|amount|"
+            r"summary|totals?|total|vat|grand\s*total|รวมเงิน|ภาษี"
+            r")\b",
+            normalized,
+            re.IGNORECASE,
+        ))
+
+    def extract_after_colon(text: str) -> str:
+        return text.split(":", 1)[1].strip() if ":" in text else ""
+
+    current_block: str | None = None
+    block_lines: list[str] = []
+
+    def flush_block() -> None:
+        nonlocal current_block, block_lines
+        if current_block and block_lines:
+            value = " ".join(part for part in block_lines if part).strip()
+            set_if_missing(current_block, value)
+        current_block = None
+        block_lines = []
+
+    for line in lines:
+        if not line:
+            continue
+
+        normalized = line.replace("：", ":").strip()
+
+        doc_no_match = re.match(
+            r"^(?:document\s*no\.?|doc\s*no\.?|invoice\s*no\.?|no\.?|เลขที่|หมายเลขเอกสาร)\s*(?:\([^)]*\))?\s*:\s*(.+)$",
+            normalized,
+            re.IGNORECASE,
+        )
+        if doc_no_match:
+            set_if_missing("document_number", doc_no_match.group(1))
+            continue
+
+        date_match = re.match(
+            r"^(?:document\s*date|invoice\s*date|date|วันที่)\s*(?:\([^)]*\))?\s*:\s*(.+)$",
+            normalized,
+            re.IGNORECASE,
+        )
+        if date_match:
+            set_if_missing("document_date", date_match.group(1))
+            continue
+
+        seller_label = re.match(
+            r"^(?:seller|ผู้ขาย|vendor|supplier)\s*(?:\([^)]*\))?\s*:?\s*(.*)$",
+            normalized,
+            re.IGNORECASE,
+        )
+        if seller_label and seller_label.group(0).lower().startswith(("seller", "ผู้ขาย", "vendor", "supplier")):
+            flush_block()
+            current_block = "seller"
+            initial = seller_label.group(1).strip() or extract_after_colon(normalized)
+            if initial:
+                block_lines.append(initial)
+            continue
+
+        buyer_label = re.match(
+            r"^(?:buyer|ผู้ซื้อ|customer|bill to|ship to)\s*(?:\([^)]*\))?\s*:?\s*(.*)$",
+            normalized,
+            re.IGNORECASE,
+        )
+        if buyer_label and buyer_label.group(0).lower().startswith(("buyer", "ผู้ซื้อ", "customer", "bill to", "ship to")):
+            flush_block()
+            current_block = "buyer"
+            initial = buyer_label.group(1).strip() or extract_after_colon(normalized)
+            if initial:
+                block_lines.append(initial)
+            continue
+
+        if current_block:
+            if is_boundary(normalized):
+                flush_block()
+            else:
+                block_lines.append(normalized)
+                continue
+
+        inline_match = re.match(r"^(.{1,60}?)\s*:\s*(.+)$", normalized)
+        if inline_match:
+            label = inline_match.group(1).strip().lower()
+            value = inline_match.group(2).strip()
+            if any(token in label for token in ("เลขที่", "document no", "invoice no", "doc no", "no.")):
+                set_if_missing("document_number", value)
+            elif any(token in label for token in ("วันที่", "document date", "invoice date", "date")):
+                set_if_missing("document_date", value)
+            elif any(token in label for token in ("seller", "ผู้ขาย", "vendor", "supplier")):
+                set_if_missing("seller", value)
+            elif any(token in label for token in ("buyer", "ผู้ซื้อ", "customer", "bill to", "ship to")):
+                set_if_missing("buyer", value)
+
+    flush_block()
+    return result
+
+
+def merge_missing_fields(primary: Any, fallback: dict[str, Any]) -> Any:
+    if not isinstance(primary, dict) or not fallback:
+        return primary
+
+    merged = dict(primary)
+    for key, value in fallback.items():
+        if key not in merged or merged[key] in (None, "", [], {}):
+            merged[key] = value
+    return merged
+
+
 def map_field_type_to_json_schema(field_type: str, field_description: str) -> dict[str, Any]:
     normalized_type = (field_type or "text").lower()
 
@@ -398,42 +531,50 @@ def extract_status(payload: dict[str, Any]) -> str:
 
 
 def extract_ai_text(result_payload: dict[str, Any]) -> str:
+    def append_unique(parts: list[str], value: Any) -> None:
+        if isinstance(value, str):
+            text = value.strip()
+            if text and text not in parts:
+                parts.append(text)
+
     ai_processing = result_payload.get("ai_processing")
     if isinstance(ai_processing, str):
-        return ai_processing
+        return ai_processing.strip()
+
+    combined_parts: list[str] = []
     if isinstance(ai_processing, dict):
         for key in ("content", "text", "output", "result"):
-            value = ai_processing.get(key)
-            if isinstance(value, str) and value.strip():
-                return value
+            append_unique(combined_parts, ai_processing.get(key))
 
     pages = result_payload.get("results", {}).get("pages")
     if not isinstance(pages, list):
         pages = result_payload.get("pages") if isinstance(result_payload.get("pages"), list) else []
 
-    page_contents: list[str] = []
     for page in pages:
         if not isinstance(page, dict):
             continue
 
         page_ai = page.get("ai_processing")
+        page_parts: list[str] = []
         if isinstance(page_ai, dict):
-            content = page_ai.get("content")
-            if isinstance(content, str) and content.strip():
-                page_contents.append(content)
-                continue
+            for key in ("content", "text", "output", "result"):
+                append_unique(page_parts, page_ai.get(key))
         elif isinstance(page_ai, str) and page_ai.strip():
-            page_contents.append(page_ai)
-            continue
+            append_unique(page_parts, page_ai)
 
         fallback_ocr_text = page.get("ocr_text")
-        if isinstance(fallback_ocr_text, str) and fallback_ocr_text.strip():
-            page_contents.append(fallback_ocr_text)
+        append_unique(page_parts, fallback_ocr_text)
 
-    return "\n\n".join(page_contents).strip()
+        for part in page_parts:
+            append_unique(combined_parts, part)
+
+    return "\n\n".join(combined_parts).strip()
 
 
 def extract_structured_data(result_payload: dict[str, Any]) -> Any:
+    combined_text = extract_ai_text(result_payload)
+    text_extracted = extract_key_fields_from_text(combined_text)
+
     candidate_paths = [
         result_payload.get("structured_data"),
         result_payload.get("data", {}).get("structured_data") if isinstance(result_payload.get("data"), dict) else None,
@@ -450,10 +591,12 @@ def extract_structured_data(result_payload: dict[str, Any]) -> Any:
         if isinstance(candidate, dict) and "schema_source" in candidate and "data" in candidate:
             inner = candidate["data"]
             if inner not in (None, {}, []):
-                return inner
+                return merge_missing_fields(inner, text_extracted)
             continue
         parsed = parse_extracted_json(candidate)
         if parsed not in (None, {}, []):
+            if isinstance(parsed, dict):
+                return merge_missing_fields(parsed, text_extracted)
             return parsed
 
     pages = result_payload.get("results", {}).get("pages")
@@ -485,6 +628,8 @@ def extract_structured_data(result_payload: dict[str, Any]) -> Any:
                 continue
             parsed = parse_extracted_json(candidate)
             if parsed not in (None, {}, []):
+                if isinstance(parsed, dict):
+                    return merge_missing_fields(parsed, text_extracted)
                 return parsed
 
     # Fallback: extract structured fields from ai_processing.content markdown
@@ -497,17 +642,25 @@ def extract_structured_data(result_payload: dict[str, Any]) -> Any:
             continue
         page_ai = page.get("ai_processing")
         if isinstance(page_ai, dict):
-            content = page_ai.get("content")
-            if isinstance(content, str) and content.strip():
-                combined_content_parts.append(content.strip())
+            for key in ("content", "text", "output", "result"):
+                value = page_ai.get(key)
+                if isinstance(value, str) and value.strip():
+                    combined_content_parts.append(value.strip())
         elif isinstance(page_ai, str) and page_ai.strip():
             combined_content_parts.append(page_ai.strip())
+
+        fallback_ocr_text = page.get("ocr_text")
+        if isinstance(fallback_ocr_text, str) and fallback_ocr_text.strip():
+            combined_content_parts.append(fallback_ocr_text.strip())
 
     if combined_content_parts:
         combined = "\n\n".join(combined_content_parts)
         markdown_extracted = extract_structured_from_markdown(combined)
         if markdown_extracted not in (None, {}):
-            return markdown_extracted
+            return merge_missing_fields(markdown_extracted, text_extracted)
+
+        if text_extracted:
+            return text_extracted
 
     return None
 

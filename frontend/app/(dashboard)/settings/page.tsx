@@ -25,6 +25,7 @@ export default function SettingsPage() {
   const [isLoadingConfig, setIsLoadingConfig] = useState(true)
   const [ocrEngine, setOcrEngine] = useState("default")
   const [model, setModel] = useState("default")
+  const [appCommitSha, setAppCommitSha] = useState("")
   const [result, setResult] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
@@ -46,6 +47,7 @@ export default function SettingsPage() {
           setSchemaSuggestionEndpoint(data.schema_suggestion_endpoint ?? "")
           setTestEndpoint(data.test_endpoint ?? "")
           setToken(data.api_token ?? "")
+          setAppCommitSha(data.app_commit_sha ?? "")
         }
       } catch (err) {
         console.error("Failed to load settings", err)
@@ -135,6 +137,9 @@ export default function SettingsPage() {
       <div className="space-y-2">
         <h2 className="text-2xl font-bold tracking-tight">Settings</h2>
         <p className="text-slate-600">Configure and test external API endpoint.</p>
+        <p className="text-xs text-slate-500">
+          Update commit: <span className="font-mono text-slate-700">{appCommitSha || "unknown"}</span>
+        </p>
       </div>
 
       <Card>

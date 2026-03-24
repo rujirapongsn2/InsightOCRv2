@@ -35,3 +35,4 @@ temp_*.py
 fix_*.py
 update_*.py
 *.backup
+/backend/.build-info.json
