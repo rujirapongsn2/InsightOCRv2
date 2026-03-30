@@ -1,5 +1,6 @@
 "use client"
 
+import { useEffect, useState } from "react"
 import { BookOpenText, Route, TerminalSquare } from "lucide-react"
 
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -24,10 +25,19 @@ type WorkflowStep = {
 export function ApiWorkflowDocs({ apiBaseUrl, tokenExample }: ApiWorkflowDocsProps) {
   const externalBaseUrl = `${apiBaseUrl}/external`
   const authHeader = `Authorization: Bearer ${tokenExample}`
-  const needsInsecureTls =
-    typeof window !== "undefined" &&
-    window.location.protocol === "https:" &&
-    ["127.0.0.1", "localhost"].includes(window.location.hostname)
+  const [needsInsecureTls, setNeedsInsecureTls] = useState(false)
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return
+    }
+
+    setNeedsInsecureTls(
+      window.location.protocol === "https:" &&
+      ["127.0.0.1", "localhost"].includes(window.location.hostname)
+    )
+  }, [])
+
   const curlBase = needsInsecureTls ? "curl -sS -k" : "curl -sS"
 
   const endpoints: EndpointDoc[] = [

@@ -8,6 +8,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { AlertCircle, Copy, KeyRound, Save, Shield, Trash2 } from "lucide-react"
 import { getApiBaseUrl } from "@/lib/api"
 import { ApiWorkflowDocs } from "@/components/profile/ApiWorkflowDocs"
+import { AgentSkillDownloads } from "@/components/profile/AgentSkillDownloads"
 
 interface APIAccessToken {
   id: string
@@ -408,6 +409,7 @@ export default function ProfilePage() {
       </Card>
 
       <ApiWorkflowDocs apiBaseUrl={apiBaseUrl} tokenExample={tokenExample} />
+      <AgentSkillDownloads apiBaseUrl={apiBaseUrl} getAuthHeader={getAuthHeader} />
     </div>
   )
 }

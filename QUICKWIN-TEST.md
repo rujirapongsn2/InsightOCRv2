@@ -22,8 +22,22 @@ Date: 2026-03-30
 
 4. Profile page
    - Confirmed `https://127.0.0.1/profile` contains the new `API Workflow Docs` section and endpoint examples.
+   - Confirmed `https://127.0.0.1/profile` contains the new `AI Agent Skill Package` section with a single `Download Softnix-InsightDOC.zip` action.
+   - Confirmed the package preview shows `SKILL.md`, `.env`, `README.md`, and `scripts/insightocr.sh`.
+   - Confirmed the `/profile` page renders without the previous React hydration error after moving browser-only URL detection behind client mount.
 
-5. End-to-end agent workflow
+5. Skill package download
+   - Confirmed `GET /api/v1/users/me/agent-skill-pack` returns `200` with `Content-Type: application/zip`.
+   - Confirmed the downloaded file name is `Softnix-InsightDOC.zip`.
+   - Confirmed the zip contains:
+     - `Softnix-InsightDOC/SKILL.md`
+     - `Softnix-InsightDOC/.env`
+     - `Softnix-InsightDOC/README.md`
+     - `Softnix-InsightDOC/scripts/insightocr.sh`
+   - Confirmed `SKILL.md` contains the standard frontmatter and InsightDOC workflow instructions.
+   - Confirmed `.env` contains editable placeholders for token, API URLs, defaults, and `CURL_INSECURE`.
+
+6. End-to-end agent workflow
    - Used a personal access token against the `Comply TOR` job flow.
    - Confirmed `GET /api/v1/external/jobs` returned the `Comply TOR` job and `GET /api/v1/external/integrations` returned the `Comply TOR` integration.
    - Confirmed `GET /api/v1/external/jobs/{job_id}/documents` returned the expected two reviewed documents.

@@ -1,15 +1,32 @@
 from typing import Any, List
-from fastapi import APIRouter, Body, Depends, HTTPException, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response
 from fastapi.encoders import jsonable_encoder
 from pydantic.networks import EmailStr
 from sqlalchemy.orm import Session
 from app.api import deps
+from app.core.config import settings
 from app.core import security
 from app.models.user import User
+from app.services.agent_skill_pack import SKILL_PACK_NAME, build_skill_pack_archive
 from app.schemas.user import User as UserSchema, UserCreate, UserUpdate, UserSelfUpdate
 from app.utils.activity_logger import log_activity, Actions
 
 router = APIRouter()
+
+
+def _build_api_urls(request: Request) -> tuple[str, str, bool]:
+    forwarded_proto = request.headers.get("x-forwarded-proto")
+    forwarded_host = request.headers.get("x-forwarded-host")
+
+    scheme = forwarded_proto or request.url.scheme
+    host = forwarded_host or request.headers.get("host") or request.url.netloc
+    origin = f"{scheme}://{host}"
+    api_base_url = f"{origin}{settings.API_V1_STR}"
+    external_base_url = f"{api_base_url}/external"
+
+    host_only = host.split(":", 1)[0]
+    curl_insecure = host_only in {"127.0.0.1", "localhost"}
+    return api_base_url, external_base_url, curl_insecure
 
 @router.get("/", response_model=List[UserSchema])
 def read_users(
@@ -76,6 +93,38 @@ def read_user_me(
     Get current user.
     """
     return current_user
+
+
+@router.get("/me/agent-skill-pack")
+def download_agent_skill_pack(
+    request: Request,
+    current_user: User = Depends(deps.get_current_active_user),
+    db: Session = Depends(deps.get_db),
+) -> Response:
+    api_base_url, external_base_url, curl_insecure = _build_api_urls(request)
+    archive_bytes = build_skill_pack_archive(
+        api_base_url=api_base_url,
+        external_base_url=external_base_url,
+        curl_insecure=curl_insecure,
+    )
+
+    client_ip = request.client.host if request.client else None
+    user_agent = request.headers.get("user-agent")
+    log_activity(
+        db=db,
+        user_id=current_user.id,
+        action=Actions.EXPORT_DATA,
+        resource_type="agent_skill_pack",
+        details={"package_name": SKILL_PACK_NAME},
+        ip_address=client_ip,
+        user_agent=user_agent,
+    )
+
+    headers = {
+        "Content-Disposition": f'attachment; filename="{SKILL_PACK_NAME}.zip"',
+        "Content-Type": "application/zip",
+    }
+    return Response(content=archive_bytes, media_type="application/zip", headers=headers)
 
 @router.get("/{user_id}", response_model=UserSchema)
 def read_user_by_id(
