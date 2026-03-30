@@ -353,7 +353,8 @@ class SendLLMResponse(BaseModel):
 
 
 class SendToIntegrationRequest(BaseModel):
-    integration_id: UUID
+    integration_id: Optional[UUID] = None
+    integration_name: Optional[str] = None
     job_id: Optional[UUID] = None
     job_name: str
     documents: List[DocumentInput]
@@ -363,6 +364,29 @@ class SendToIntegrationResponse(BaseModel):
     success: bool
     message: str
     results: Optional[List[DocumentResult]] = None
+
+
+def _resolve_send_target_integration(db: Session, request: SendToIntegrationRequest):
+    if request.integration_id is not None:
+        integration = crud_integration.get(db=db, integration_id=request.integration_id)
+        if not integration:
+            raise HTTPException(status_code=404, detail="Integration not found")
+        return integration
+
+    if not request.integration_name or not request.integration_name.strip():
+        raise HTTPException(status_code=400, detail="integration_id or integration_name is required")
+
+    normalized_name = request.integration_name.strip().lower()
+    matches = [
+        integration
+        for integration in crud_integration.get_all_active(db=db)
+        if integration.name and integration.name.strip().lower() == normalized_name
+    ]
+    if not matches:
+        raise HTTPException(status_code=404, detail="Integration not found")
+    if len(matches) > 1:
+        raise HTTPException(status_code=409, detail="Multiple integrations share this name; use integration_id instead")
+    return matches[0]
 
 
 @router.post("/test-llm", response_model=TestLLMResponse)
@@ -535,9 +559,7 @@ async def send_to_integration_stream(
     client_ip = http_request.client.host if http_request.client else None
     user_agent = http_request.headers.get("user-agent")
 
-    integration = crud_integration.get(db=db, integration_id=request.integration_id)
-    if not integration:
-        raise HTTPException(status_code=404, detail="Integration not found")
+    integration = _resolve_send_target_integration(db, request)
 
     if integration.type != "llm":
         raise HTTPException(status_code=400, detail="Streaming is only supported for LLM integrations")
@@ -713,9 +735,7 @@ async def send_to_integration(
     integration = None
 
     try:
-        integration = crud_integration.get(db=db, integration_id=request.integration_id)
-        if not integration:
-            raise HTTPException(status_code=404, detail="Integration not found")
+        integration = _resolve_send_target_integration(db, request)
 
         print(f"[DEBUG] Integration type: {integration.type}")
         print(f"[DEBUG] Integration config: {integration.config}")

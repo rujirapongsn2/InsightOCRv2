@@ -17,6 +17,7 @@ class DocumentUpdate(BaseModel):
     schema_id: Optional[UUID] = None
     extracted_data: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]] = None
     reviewed_data: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]] = None
+    review_decision: Optional[str] = None
 
 class Document(DocumentBase):
     id: UUID
@@ -27,6 +28,9 @@ class Document(DocumentBase):
     ocr_text: Optional[str] = None
     extracted_data: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]] = None
     reviewed_data: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]] = None
+    review_decision: Optional[str] = None
+    reviewed_at: Optional[datetime] = None
+    reviewed_by: Optional[UUID] = None
     uploaded_at: datetime
     page_count: Optional[int] = None
     ocr_pages: Optional[List[Dict[str, Any]]] = None

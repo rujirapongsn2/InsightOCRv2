@@ -15,6 +15,7 @@ from app.models.ai_settings import AISettings
 from app.models.activity_log import ActivityLog
 from app.models.integration import Integration
 from app.models.integration_result import IntegrationResult
+from app.models.api_access_token import APIAccessToken
 from app.initial_data import init_db
 from app.initial_templates import init_system_templates
 from app.initial_ai_settings import init_ai_settings
@@ -48,6 +49,9 @@ with engine.connect() as conn:
     conn.execute(text("ALTER TABLE IF EXISTS documents ADD COLUMN IF NOT EXISTS page_count integer NULL"))
     conn.execute(text("ALTER TABLE IF EXISTS documents ADD COLUMN IF NOT EXISTS ocr_pages jsonb NULL"))
     conn.execute(text("ALTER TABLE IF EXISTS documents ADD COLUMN IF NOT EXISTS processing_error varchar NULL"))
+    conn.execute(text("ALTER TABLE IF EXISTS documents ADD COLUMN IF NOT EXISTS review_decision varchar NULL"))
+    conn.execute(text("ALTER TABLE IF EXISTS documents ADD COLUMN IF NOT EXISTS reviewed_at timestamptz NULL"))
+    conn.execute(text("ALTER TABLE IF EXISTS documents ADD COLUMN IF NOT EXISTS reviewed_by uuid NULL"))
     # Ensure job ownership column exists for dashboard queries
     conn.execute(text("ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS user_id uuid NULL"))
     # Integration results: add type and name columns for generic history

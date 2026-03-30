@@ -3,6 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from app.models.user import User
 from sqlalchemy.orm import Session
 from app.api import deps
+from app.api.permissions import ensure_job_access, is_admin_user
 from app.models.job import Job
 from app.models.document import Document
 from app.schemas.job import Job as JobSchema
@@ -16,11 +17,6 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-def _normalize_role(role: str | None) -> str:
-    if not role:
-        return "user"
-    return "manager" if role == "documents_admin" else role
-
 @router.get("/", response_model=List[JobSchema])
 def read_jobs(
     db: Session = Depends(deps.get_db),
@@ -31,8 +27,7 @@ def read_jobs(
     """
     Retrieve jobs.
     """
-    normalized_role = _normalize_role(current_user.role)
-    is_admin = current_user.is_superuser or normalized_role == "admin"
+    is_admin = is_admin_user(current_user)
     if is_admin:
         jobs = db.query(Job).offset(skip).limit(limit).all()
     else:
@@ -44,7 +39,7 @@ def create_job(
     *,
     db: Session = Depends(deps.get_db),
     job_in: JobCreate,
-    current_user = Depends(deps.get_current_user),
+    current_user: User = Depends(deps.get_current_active_user),
 ) -> Any:
     """
     Create new job.
@@ -89,10 +84,7 @@ def read_job(
     job = db.query(Job).filter(Job.id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    normalized_role = _normalize_role(current_user.role)
-    is_admin = current_user.is_superuser or normalized_role == "admin"
-    if not is_admin and job.user_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Not enough permissions")
+    ensure_job_access(current_user, job)
 
     # Convert to dict and add user_name
     job_dict = {
@@ -124,8 +116,7 @@ def delete_job(
         raise HTTPException(status_code=404, detail="Job not found")
 
     # Check permissions: superuser, admin role, or job owner
-    normalized_role = _normalize_role(current_user.role)
-    is_admin = current_user.is_superuser or normalized_role == "admin"
+    is_admin = is_admin_user(current_user)
     is_owner = job.user_id == current_user.id
     if not is_admin and not is_owner:
         raise HTTPException(status_code=403, detail="Not enough permissions")

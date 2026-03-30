@@ -1,9 +1,11 @@
+from datetime import datetime, timezone
 from typing import List, Any, Optional
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from app.models.user import User
 from sqlalchemy.orm import Session
 from app.api import deps
+from app.api.permissions import ensure_document_access, ensure_job_access, is_admin_user
 from app.models.document import Document
 from app.models.job import Job
 from app.schemas.document import Document as DocumentSchema
@@ -160,6 +162,10 @@ def read_job_documents(
     """
     List documents belonging to a job.
     """
+    job = db.query(Job).filter(Job.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    ensure_job_access(current_user, job)
     documents = db.query(Document).filter(Document.job_id == job_id).all()
     return documents
 
@@ -178,6 +184,7 @@ async def upload_document(
     job = db.query(Job).filter(Job.id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    ensure_job_access(current_user, job)
 
     # Move job out of draft once a document is uploaded
     if job.status == "draft":
@@ -241,6 +248,7 @@ def process_document(
     document = db.query(Document).filter(Document.id == document_id).first()
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
+    ensure_document_access(current_user, document)
 
     # Update schema selection (None means Auto) and queue status
     document.schema_id = process_request.schema_id
@@ -307,6 +315,7 @@ def get_task_status(
     document = db.query(Document).filter(Document.id == document_id).first()
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
+    ensure_document_access(current_user, document)
 
     progress: Optional[ProgressInfo] = None
     if document.status == "processing":
@@ -347,6 +356,7 @@ def read_document(
     document = db.query(Document).filter(Document.id == document_id).first()
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
+    ensure_document_access(current_user, document)
     return document
 
 @router.post("/extract-ocr")
@@ -434,6 +444,11 @@ async def extract_ocr_for_suggestion(
 
 from app.schemas.document import DocumentUpdate
 
+
+class ReviewDecisionRequest(BaseModel):
+    decision: str
+    reviewed_data: Optional[Any] = None
+
 @router.put("/{document_id}", response_model=DocumentSchema)
 def update_document(
     *,
@@ -448,6 +463,7 @@ def update_document(
     document = db.query(Document).filter(Document.id == document_id).first()
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
+    ensure_document_access(current_user, document)
     
     update_data = document_in.dict(exclude_unset=True)
     for field, value in update_data.items():
@@ -456,9 +472,14 @@ def update_document(
     # If reviewed_data is present, we can mark as reviewed if status not explicitly set
     if "reviewed_data" in update_data and "status" not in update_data:
         document.status = "reviewed"
+    if document.status == "reviewed":
+        document.reviewed_at = datetime.now(timezone.utc)
+        document.reviewed_by = current_user.id
+        if document.review_decision is None:
+            document.review_decision = "confirmed"
 
     # Keep parent job status in sync with document review lifecycle
-    if document.status == "reviewed" and document.job:
+    if document.status in ["reviewed", "rejected"] and document.job:
         document.job.status = "review"
 
     db.add(document)
@@ -476,6 +497,67 @@ def update_document(
         
     return document
 
+
+@router.post("/{document_id}/decision", response_model=DocumentSchema)
+def set_document_review_decision(
+    *,
+    db: Session = Depends(deps.get_db),
+    document_id: str,
+    payload: ReviewDecisionRequest,
+    current_user: User = Depends(deps.get_current_active_user),
+) -> Any:
+    document = db.query(Document).filter(Document.id == document_id).first()
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+    ensure_document_access(current_user, document)
+
+    normalized_decision = payload.decision.strip().lower()
+    if normalized_decision not in {"confirm", "yes", "reject"}:
+        raise HTTPException(status_code=400, detail="Decision must be one of: confirm, yes, reject")
+
+    if payload.reviewed_data is not None:
+        document.reviewed_data = payload.reviewed_data
+
+    document.reviewed_at = datetime.now(timezone.utc)
+    document.reviewed_by = current_user.id
+
+    if normalized_decision in {"confirm", "yes"}:
+        document.review_decision = "confirmed"
+        document.status = "reviewed"
+    else:
+        document.review_decision = "rejected"
+        document.status = "rejected"
+
+    if document.job:
+        document.job.status = "review"
+
+    db.add(document)
+    db.commit()
+    db.refresh(document)
+
+    try:
+        job_logger = get_job_logger(str(document.job_id))
+        job_logger.info(
+            f"Document {document.filename} (ID: {document.id}) review decision set to {document.review_decision} "
+            f"by user {current_user.email}"
+        )
+    except Exception:
+        pass
+
+    log_activity(
+        db=db,
+        user_id=current_user.id,
+        action=Actions.REVIEW_DOCUMENT,
+        resource_type="document",
+        resource_id=document.id,
+        details={
+            "filename": document.filename,
+            "review_status": document.review_decision,
+        },
+    )
+
+    return document
+
 @router.get("/{document_id}/file")
 def download_document_file(
     *,
@@ -489,6 +571,7 @@ def download_document_file(
     document = db.query(Document).filter(Document.id == document_id).first()
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
+    ensure_document_access(current_user, document)
 
     storage = get_storage_service()
     
@@ -555,13 +638,13 @@ def delete_document(
     document = db.query(Document).filter(Document.id == document_id).first()
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
+    ensure_document_access(current_user, document)
 
     # Check if user has permission to delete (owner or admin)
-    # Assuming documents are associated with jobs owned by users
-    if document.job_id:
-        job = db.query(Job).filter(Job.id == document.job_id).first()
-        if job and job.user_id != current_user.id and not current_user.is_admin:
-            raise HTTPException(status_code=403, detail="Not enough permissions")
+    if document.job_id and document.job is not None:
+        ensure_job_access(current_user, document.job)
+    elif not is_admin_user(current_user):
+        raise HTTPException(status_code=403, detail="Not enough permissions")
 
     try:
         # Store filename for logging

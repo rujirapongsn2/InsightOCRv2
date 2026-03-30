@@ -20,3 +20,4 @@ class User(Base):
 
     # Relationships
     integrations = relationship("Integration", back_populates="user", cascade="all, delete-orphan")
+    api_access_tokens = relationship("APIAccessToken", back_populates="user", cascade="all, delete-orphan")

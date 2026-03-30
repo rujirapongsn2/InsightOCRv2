@@ -89,6 +89,8 @@ class Actions:
     UPDATE_USER = "update_user"
     DELETE_USER = "delete_user"
     CHANGE_PASSWORD = "change_password"
+    CREATE_API_TOKEN = "create_api_token"
+    REVOKE_API_TOKEN = "revoke_api_token"
 
     # Settings actions
     VIEW_SETTINGS = "view_settings"

@@ -26,6 +26,9 @@ class Document(Base):
 
     extracted_data = Column(JSON, nullable=True)
     reviewed_data = Column(JSON, nullable=True)
+    review_decision = Column(String, nullable=True)
+    reviewed_at = Column(DateTime(timezone=True), nullable=True)
+    reviewed_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     extraction_confidence = Column(Float, nullable=True)
     
     uploaded_at = Column(DateTime(timezone=True), server_default=func.now())

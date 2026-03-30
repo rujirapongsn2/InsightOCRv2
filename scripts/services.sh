@@ -52,6 +52,33 @@ rebuild_service() {
   local svc="$1"
   echo "Rebuilding and restarting ${svc}..."
   $COMPOSE up -d --build --no-deps "$svc"
+  if [ "$svc" = "backend" ] || [ "$svc" = "frontend" ]; then
+    echo "Refreshing nginx upstreams..."
+    $COMPOSE restart nginx
+  fi
+  wait_for_service_group "$svc"
+}
+
+wait_for_service_group() {
+  local svc="$1"
+  case "$svc" in
+    backend)
+      wait_for_healthy softnix_ocr_backend
+      wait_for_healthy softnix_ocr_nginx
+      ;;
+    frontend)
+      wait_for_healthy softnix_ocr_frontend
+      wait_for_healthy softnix_ocr_nginx
+      ;;
+    celery_worker)
+      wait_for_healthy softnix_ocr_backend
+      ;;
+    all)
+      wait_for_healthy softnix_ocr_backend
+      wait_for_healthy softnix_ocr_frontend
+      wait_for_healthy softnix_ocr_nginx
+      ;;
+  esac
 }
 
 wait_for_healthy() {
@@ -137,6 +164,8 @@ case "${1:-}" in
   up)
     require_compose
     $COMPOSE up -d --build
+    $COMPOSE restart nginx
+    wait_for_service_group all
     ;;
   down)
     require_compose
@@ -163,7 +192,12 @@ case "${1:-}" in
       api|backend) rebuild_service backend ;;
       web|frontend) rebuild_service frontend ;;
       worker|celery) rebuild_service celery_worker ;;
-      all) $COMPOSE up -d --build ;;
+      all)
+        $COMPOSE up -d --build
+        echo "Refreshing nginx upstreams..."
+        $COMPOSE restart nginx
+        wait_for_service_group all
+        ;;
       *) echo "Unknown service '$svc'"; usage; exit 1 ;;
     esac
     ;;
