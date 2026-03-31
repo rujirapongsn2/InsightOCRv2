@@ -11,7 +11,7 @@ SKILL_PACK_NAME = "Softnix-InsightDOC"
 def _build_skill_md(api_base_url: str, external_base_url: str) -> str:
     return f"""---
 name: Softnix-InsightDOC
-description: Use when an AI agent needs to operate InsightDOC through the external workflow API for job management, document upload, OCR processing, review, confirmation, rejection, and integration dispatch.
+description: Use when an AI agent needs to operate InsightDOC through the external workflow API for job management, document upload, OCR processing, review, confirmation, rejection, and integration dispatch. The helper script accepts either UUIDs or human-readable names for jobs, schemas, and integrations.
 ---
 
 # Softnix-InsightDOC
@@ -32,6 +32,12 @@ Use this skill when the task is to automate or assist an InsightDOC workflow thr
 - `.env`: editable runtime configuration
 - `README.md`: setup and usage notes
 - `scripts/insightocr.sh`: shell helper for the main API operations
+
+## Name Resolution
+
+- You may pass either a UUID or a human-readable name to the helper script for jobs, schemas, and integrations.
+- The script resolves exact matches first, then unique partial matches.
+- If a name is ambiguous, the script fails fast and asks for a more specific name or UUID.
 
 ## Operating Rules
 
@@ -63,13 +69,14 @@ Use this skill when the task is to automate or assist an InsightDOC workflow thr
 ```bash
 ./scripts/insightocr.sh jobs
 ./scripts/insightocr.sh create-job "Invoice Batch"
-./scripts/insightocr.sh upload JOB_ID /absolute/path/to/file.pdf
-./scripts/insightocr.sh process DOCUMENT_ID SCHEMA_ID
+./scripts/insightocr.sh create-job "Invoice Batch" "Created by agent" "Invoice Schema"
+./scripts/insightocr.sh upload "Comply TOR" /absolute/path/to/file.pdf
+./scripts/insightocr.sh process DOCUMENT_ID "Invoice Schema"
 ./scripts/insightocr.sh status DOCUMENT_ID
 ./scripts/insightocr.sh review DOCUMENT_ID '{{"reviewed_data": {{"document_number": "INV-0001"}}}}'
 ./scripts/insightocr.sh decision DOCUMENT_ID confirm
 ./scripts/insightocr.sh integrations
-./scripts/insightocr.sh send JOB_ID "Comply TOR"
+./scripts/insightocr.sh send "Comply TOR" "Comply TOR"
 ```
 
 ## Direct API Examples
@@ -119,7 +126,7 @@ This package contains a portable AI-agent skill for InsightDOC.
 
 1. Edit `.env`
 2. Set `INSIGHTOCR_API_TOKEN` to a personal access token from the InsightDOC Profile page
-3. Adjust optional defaults such as job name, schema id, and integration name
+3. Adjust optional defaults such as job name, schema name or id, and integration name
 4. Run helper commands from the package root
 
 ## Default URLs
@@ -133,13 +140,14 @@ This package contains a portable AI-agent skill for InsightDOC.
 ./scripts/insightocr.sh jobs
 ./scripts/insightocr.sh schemas
 ./scripts/insightocr.sh create-job "Invoice Batch"
-./scripts/insightocr.sh upload JOB_ID /absolute/path/to/file.pdf
-./scripts/insightocr.sh process DOCUMENT_ID
+./scripts/insightocr.sh create-job "Invoice Batch" "Created by agent" "Invoice Schema"
+./scripts/insightocr.sh upload "Comply TOR" /absolute/path/to/file.pdf
+./scripts/insightocr.sh process DOCUMENT_ID "Invoice Schema"
 ./scripts/insightocr.sh status DOCUMENT_ID
 ./scripts/insightocr.sh review DOCUMENT_ID '{{"reviewed_data": {{"document_number": "INV-001"}}}}'
 ./scripts/insightocr.sh decision DOCUMENT_ID confirm
 ./scripts/insightocr.sh integrations
-./scripts/insightocr.sh send JOB_ID "Comply TOR"
+./scripts/insightocr.sh send "Comply TOR" "Comply TOR"
 ```
 
 ## Notes
@@ -161,6 +169,7 @@ INSIGHTOCR_EXTERNAL_BASE_URL={external_base_url}
 
 # Optional defaults for your agent or helper script
 INSIGHTOCR_DEFAULT_JOB_NAME=
+INSIGHTOCR_DEFAULT_SCHEMA_NAME=
 INSIGHTOCR_DEFAULT_SCHEMA_ID=
 INSIGHTOCR_DEFAULT_INTEGRATION_NAME=
 
@@ -208,6 +217,83 @@ fi
 
 AUTH_HEADER="Authorization: Bearer ${INSIGHTOCR_API_TOKEN}"
 
+is_uuid() {
+  [[ "$1" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]
+}
+
+resolve_ref() {
+  local endpoint="$1"
+  local label="$2"
+  local ref="$3"
+
+  if [[ -z "${ref}" ]]; then
+    echo "Missing ${label} reference" >&2
+    exit 1
+  fi
+
+  if is_uuid "${ref}"; then
+    printf '%s' "${ref}"
+    return 0
+  fi
+
+  local response
+  response="$(request -H "${AUTH_HEADER}" "${INSIGHTOCR_EXTERNAL_BASE_URL}${endpoint}")"
+  JSON_RESPONSE="${response}" python3 - "${label}" "${ref}" <<'PY'
+import json
+import os
+import re
+import sys
+
+label = sys.argv[1]
+needle = re.sub(r"\s+", " ", sys.argv[2].strip().lower())
+
+try:
+    items = json.loads(os.environ["JSON_RESPONSE"])
+except Exception as exc:
+    print(f"Failed to parse {label} list response: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+
+if not isinstance(items, list):
+    print(f"Unexpected {label} list response format", file=sys.stderr)
+    raise SystemExit(1)
+
+def normalize(value):
+    return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+exact_matches = [item for item in items if normalize(item.get("name")) == needle]
+if len(exact_matches) == 1:
+    print(exact_matches[0]["id"])
+    raise SystemExit(0)
+if len(exact_matches) > 1:
+    names = ", ".join(str(item.get("name") or item.get("id")) for item in exact_matches)
+    print(f"Ambiguous {label} '{sys.argv[2]}': {names}", file=sys.stderr)
+    raise SystemExit(1)
+
+contains_matches = [item for item in items if needle in normalize(item.get("name"))]
+if len(contains_matches) == 1:
+    print(contains_matches[0]["id"])
+    raise SystemExit(0)
+if not contains_matches:
+    print(f"{label} '{sys.argv[2]}' not found", file=sys.stderr)
+else:
+    names = ", ".join(str(item.get("name") or item.get("id")) for item in contains_matches)
+    print(f"Ambiguous {label} '{sys.argv[2]}': {names}", file=sys.stderr)
+raise SystemExit(1)
+PY
+}
+
+resolve_job_id() {
+  resolve_ref "/jobs" "job" "$1"
+}
+
+resolve_schema_id() {
+  resolve_ref "/schemas" "schema" "$1"
+}
+
+resolve_integration_id() {
+  resolve_ref "/integrations" "integration" "$1"
+}
+
 json_dump() {
   python3 - "$@" <<'PY'
 import json
@@ -228,10 +314,10 @@ elif mode == "process":
     schema_id = sys.argv[2] if len(sys.argv) > 2 else ""
     payload = {"schema_id": None if schema_id in ("", "null", "None") else schema_id}
 elif mode == "send":
-    integration_name = sys.argv[2]
+    integration_id = sys.argv[2]
     include_unconfirmed = (sys.argv[3].lower() == "true") if len(sys.argv) > 3 else False
     payload = {
-        "integration_name": integration_name,
+        "integration_id": integration_id,
         "include_unconfirmed": include_unconfirmed,
     }
 elif mode == "raw":
@@ -254,13 +340,13 @@ Usage:
   ./scripts/insightocr.sh jobs
   ./scripts/insightocr.sh schemas
   ./scripts/insightocr.sh integrations
-  ./scripts/insightocr.sh create-job "Job Name" ["Description"] [SCHEMA_ID]
-  ./scripts/insightocr.sh upload JOB_ID /absolute/path/to/file.pdf
-  ./scripts/insightocr.sh process DOCUMENT_ID [SCHEMA_ID]
+  ./scripts/insightocr.sh create-job "Job Name" ["Description"] [SCHEMA_NAME_OR_ID]
+  ./scripts/insightocr.sh upload JOB_NAME_OR_ID /absolute/path/to/file.pdf
+  ./scripts/insightocr.sh process DOCUMENT_ID [SCHEMA_NAME_OR_ID]
   ./scripts/insightocr.sh status DOCUMENT_ID
   ./scripts/insightocr.sh review DOCUMENT_ID '{"reviewed_data":{"document_number":"INV-001"}}'
   ./scripts/insightocr.sh decision DOCUMENT_ID confirm
-  ./scripts/insightocr.sh send JOB_ID "Integration Name" [true|false]
+  ./scripts/insightocr.sh send JOB_NAME_OR_ID INTEGRATION_NAME_OR_ID [true|false]
 EOF
 }
 
@@ -279,31 +365,40 @@ case "${command}" in
   create-job)
     name="${2:-${INSIGHTOCR_DEFAULT_JOB_NAME:-}}"
     description="${3:-Created by agent}"
-    schema_id="${4:-${INSIGHTOCR_DEFAULT_SCHEMA_ID:-}}"
+    schema_ref="${4:-${INSIGHTOCR_DEFAULT_SCHEMA_NAME:-${INSIGHTOCR_DEFAULT_SCHEMA_ID:-}}}"
     if [[ -z "${name}" ]]; then
       echo "Job name is required" >&2
       exit 1
+    fi
+    schema_id=""
+    if [[ -n "${schema_ref}" ]]; then
+      schema_id="$(resolve_schema_id "${schema_ref}")"
     fi
     payload="$(json_dump create_job "${name}" "${description}" "${schema_id}")"
     request -X POST -H "${AUTH_HEADER}" -H "Content-Type: application/json" -d "${payload}" \
       "${INSIGHTOCR_EXTERNAL_BASE_URL}/jobs"
     ;;
   upload)
-    job_id="${2:-}"
+    job_ref="${2:-${INSIGHTOCR_DEFAULT_JOB_NAME:-}}"
     file_path="${3:-}"
-    if [[ -z "${job_id}" || -z "${file_path}" ]]; then
-      echo "Usage: upload JOB_ID /absolute/path/to/file" >&2
+    if [[ -z "${job_ref}" || -z "${file_path}" ]]; then
+      echo "Usage: upload JOB_NAME_OR_ID /absolute/path/to/file" >&2
       exit 1
     fi
+    job_id="$(resolve_job_id "${job_ref}")"
     request -X POST -H "${AUTH_HEADER}" -F "file=@${file_path}" \
       "${INSIGHTOCR_EXTERNAL_BASE_URL}/jobs/${job_id}/documents"
     ;;
   process)
     document_id="${2:-}"
-    schema_id="${3:-${INSIGHTOCR_DEFAULT_SCHEMA_ID:-}}"
+    schema_ref="${3:-${INSIGHTOCR_DEFAULT_SCHEMA_NAME:-${INSIGHTOCR_DEFAULT_SCHEMA_ID:-}}}"
     if [[ -z "${document_id}" ]]; then
-      echo "Usage: process DOCUMENT_ID [SCHEMA_ID]" >&2
+      echo "Usage: process DOCUMENT_ID [SCHEMA_NAME_OR_ID]" >&2
       exit 1
+    fi
+    schema_id=""
+    if [[ -n "${schema_ref}" ]]; then
+      schema_id="$(resolve_schema_id "${schema_ref}")"
     fi
     payload="$(json_dump process "${schema_id}")"
     request -X POST -H "${AUTH_HEADER}" -H "Content-Type: application/json" -d "${payload}" \
@@ -340,14 +435,16 @@ case "${command}" in
       "${INSIGHTOCR_EXTERNAL_BASE_URL}/documents/${document_id}/decision"
     ;;
   send)
-    job_id="${2:-}"
-    integration_name="${3:-${INSIGHTOCR_DEFAULT_INTEGRATION_NAME:-}}"
+    job_ref="${2:-${INSIGHTOCR_DEFAULT_JOB_NAME:-}}"
+    integration_ref="${3:-${INSIGHTOCR_DEFAULT_INTEGRATION_NAME:-}}"
     include_unconfirmed="${4:-false}"
-    if [[ -z "${job_id}" || -z "${integration_name}" ]]; then
-      echo "Usage: send JOB_ID \"Integration Name\" [true|false]" >&2
+    if [[ -z "${job_ref}" || -z "${integration_ref}" ]]; then
+      echo "Usage: send JOB_NAME_OR_ID INTEGRATION_NAME_OR_ID [true|false]" >&2
       exit 1
     fi
-    payload="$(json_dump send "${integration_name}" "${include_unconfirmed}")"
+    job_id="$(resolve_job_id "${job_ref}")"
+    integration_id="$(resolve_integration_id "${integration_ref}")"
+    payload="$(json_dump send "${integration_id}" "${include_unconfirmed}")"
     request -X POST -H "${AUTH_HEADER}" -H "Content-Type: application/json" -d "${payload}" \
       "${INSIGHTOCR_EXTERNAL_BASE_URL}/jobs/${job_id}/send-integration"
     ;;

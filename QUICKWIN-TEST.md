@@ -36,6 +36,7 @@ Date: 2026-03-30
      - `Softnix-InsightDOC/scripts/insightocr.sh`
    - Confirmed `SKILL.md` contains the standard frontmatter and InsightDOC workflow instructions.
    - Confirmed `.env` contains editable placeholders for token, API URLs, defaults, and `CURL_INSECURE`.
+   - Confirmed the helper script resolves `job_name`, `schema_name`, and `integration_name` to UUIDs automatically, with exact-match-first and partial-match fallback behavior.
 
 6. End-to-end agent workflow
    - Used a personal access token against the `Comply TOR` job flow.

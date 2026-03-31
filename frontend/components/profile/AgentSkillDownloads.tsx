@@ -60,7 +60,7 @@ export function AgentSkillDownloads({ apiBaseUrl, getAuthHeader }: AgentSkillDow
   const previewFiles = useMemo<PreviewFile[]>(() => {
     const skillMd = `---
 name: Softnix-InsightDOC
-description: Use when an AI agent needs to operate InsightDOC through the external workflow API for job management, document upload, OCR processing, review, confirmation, rejection, and integration dispatch.
+description: Use when an AI agent needs to operate InsightDOC through the external workflow API for job management, document upload, OCR processing, review, confirmation, rejection, and integration dispatch. The helper script accepts either UUIDs or human-readable names for jobs, schemas, and integrations.
 ---
 
 # Softnix-InsightDOC
@@ -72,6 +72,12 @@ description: Use when an AI agent needs to operate InsightDOC through the extern
 - Authentication: Authorization: Bearer $INSIGHTOCR_API_TOKEN
 - Environment variables are stored in .env
 - Optional helper commands are available in scripts/insightocr.sh
+
+## Name Resolution
+
+- You may pass either a UUID or a human-readable name to the helper script for jobs, schemas, and integrations.
+- The script resolves exact matches first, then unique partial matches.
+- If a name is ambiguous, the script fails fast and asks for a more specific name or UUID.
 
 ## Standard Workflow
 
@@ -91,6 +97,7 @@ description: Use when an AI agent needs to operate InsightDOC through the extern
 INSIGHTOCR_API_BASE_URL=${resolvedApiBaseUrl}
 INSIGHTOCR_EXTERNAL_BASE_URL=${externalBaseUrl}
 INSIGHTOCR_DEFAULT_JOB_NAME=
+INSIGHTOCR_DEFAULT_SCHEMA_NAME=
 INSIGHTOCR_DEFAULT_SCHEMA_ID=
 INSIGHTOCR_DEFAULT_INTEGRATION_NAME=
 CURL_INSECURE=${["localhost", "127.0.0.1"].some((host) => externalBaseUrl.includes(host)) ? "true" : "false"}
@@ -110,6 +117,8 @@ Setup:
 1. Edit .env
 2. Set INSIGHTOCR_API_TOKEN from the Profile page
 3. Run helper commands from the package root
+
+The helper commands accept either UUIDs or human-readable names for jobs, schemas, and integrations.
 `
 
     const script = `#!/usr/bin/env bash
@@ -138,7 +147,7 @@ esac
         id: "env",
         label: ".env",
         path: `${PACKAGE_NAME}/.env`,
-        description: "Editable runtime values including token, API URLs, and optional defaults.",
+        description: "Editable runtime values including token, API URLs, and optional defaults for names or IDs.",
         content: envFile,
       },
       {
@@ -254,7 +263,7 @@ esac
                 {previewFiles.map((file) => {
                   const isSelected = file.id === selectedFile.id
                   return (
-                    <button
+                  <button
                       key={file.id}
                       type="button"
                       onClick={() => setSelectedFileId(file.id)}
