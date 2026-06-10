@@ -64,6 +64,8 @@ services:
       - internal # isolate; outbound via gateway proxy
     security_opt:
       - no-new-privileges:true
+    group_add:
+      - "988" # Host docker group for /var/run/docker.sock sandbox access
     cap_drop:
       - ALL
     cap_add:
