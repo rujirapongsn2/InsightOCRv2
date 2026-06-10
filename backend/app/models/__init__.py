@@ -9,4 +9,9 @@ from .activity_log import ActivityLog
 from .integration import Integration
 from .integration_result import IntegrationResult
 from .chat import ChatConversation, ChatMessage
+from .agent_conversation import AgentConversation
+from .agent_message import AgentMessage
+from .agent_memory import AgentMemory
+from .agent_skill import AgentSkill
+from .agent_pending_action import AgentPendingAction
 from .api_access_token import APIAccessToken

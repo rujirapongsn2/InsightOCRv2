@@ -1,30 +1,174 @@
 @import "tailwindcss";
 
+/* ─── Softnix Design System Tokens ──────────────────────────────────────── */
+
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
-  --font-sans: "Inter", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-  --font-poppins: var(--font-sans); /* alias to local font to avoid external download */
+  /* Brand */
+  --softnix-blue:        #2786C2;
+  --softnix-blue-deep:   #1A5A8A;
+  --layer2-orange:       #F3903F;
+  --layer3-lime:         #A9CB2E;
+  --info-blue-light:     #5EADD6;
+
+  /* Surface */
+  --canvas-white:        #ffffff;
+  --off-white:           #F8F9FA;
+  --hairline-gray:       #E2E8F0;
+
+  /* Text */
+  --ink-navy:            #0D1B2A;
+  --charcoal:            #2D3F55;
+  --slate-gray:          #778DA9;
+  --mute-gray:           #9BA8B4;
+  --stone-gray:          #CBD5E1;
+
+  /* Semantic */
+  --error-red:           #E53935;
+  --error-deep:          #B91C1C;
+
+  /* Elevation (booking panel) */
+  --shadow-panel:        rgba(0,0,0,0.02) 0 0 0 1px,
+                         rgba(0,0,0,0.04) 0 2px 6px 0,
+                         rgba(0,0,0,0.10) 0 4px 8px 0;
+
+  /* Legacy aliases (keep existing code working) */
+  --background:          var(--canvas-white);
+  --foreground:          var(--ink-navy);
+
+  --font-sans: "Inter", Circular, -apple-system, system-ui, Roboto,
+               "Helvetica Neue", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+               "Liberation Mono", "Courier New", monospace;
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-sans);
-  --font-mono: var(--font-mono);
-  --font-poppins: var(--font-poppins);
+  --color-background:       var(--background);
+  --color-foreground:       var(--foreground);
+
+  /* Expose Softnix tokens to Tailwind utilities */
+  --color-softnix-blue:     var(--softnix-blue);
+  --color-softnix-deep:     var(--softnix-blue-deep);
+  --color-layer2:           var(--layer2-orange);
+  --color-layer3:           var(--layer3-lime);
+  --color-ink-navy:         var(--ink-navy);
+  --color-charcoal:         var(--charcoal);
+  --color-slate-gray:       var(--slate-gray);
+  --color-mute-gray:        var(--mute-gray);
+  --color-stone-gray:       var(--stone-gray);
+  --color-hairline:         var(--hairline-gray);
+  --color-off-white:        var(--off-white);
+  --color-error-red:        var(--error-red);
+  --color-error-deep:       var(--error-deep);
+  --color-canvas:           var(--canvas-white);
+
+  --font-sans:              var(--font-sans);
+  --font-mono:              var(--font-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
+/* ─── Base ───────────────────────────────────────────────────────────────── */
 
 body {
-  background: var(--background);
-  color: var(--foreground);
+  background: var(--canvas-white);
+  color: var(--ink-navy);
   font-family: var(--font-sans);
+  /* Softnix system uses 500 as default body weight */
+  font-weight: 500;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Override browser default 400-weight paragraphs/spans */
+p, span, li, td, th, label, a {
+  font-weight: inherit;
+}
+
+/* ─── Agent Markdown Rendering ─────────────────────────────────────────── */
+
+.agent-markdown h1 { font-size: 1.5rem; font-weight: 700; margin: 1rem 0 0.5rem; color: var(--ink-navy); }
+.agent-markdown h2 { font-size: 1.25rem; font-weight: 700; margin: 0.875rem 0 0.5rem; color: var(--ink-navy); }
+.agent-markdown h3 { font-size: 1.125rem; font-weight: 600; margin: 0.75rem 0 0.375rem; color: var(--ink-navy); }
+.agent-markdown h4 { font-size: 1rem; font-weight: 600; margin: 0.625rem 0 0.375rem; color: var(--ink-navy); }
+.agent-markdown h5, .agent-markdown h6 { font-size: 0.875rem; font-weight: 600; margin: 0.5rem 0 0.25rem; color: var(--ink-navy); }
+
+.agent-markdown p { margin: 0.375rem 0; }
+.agent-markdown p:first-child { margin-top: 0; }
+.agent-markdown p:last-child { margin-bottom: 0; }
+
+.agent-markdown ul, .agent-markdown ol { margin: 0.375rem 0; padding-left: 1.5rem; }
+.agent-markdown li { margin: 0.125rem 0; }
+.agent-markdown ul { list-style-type: disc; }
+.agent-markdown ol { list-style-type: decimal; }
+.agent-markdown ul ul { list-style-type: circle; }
+.agent-markdown ul ul ul { list-style-type: square; }
+
+.agent-markdown a { color: var(--softnix-blue); text-decoration: underline; }
+.agent-markdown a:hover { color: var(--softnix-blue-deep); }
+
+.agent-markdown blockquote {
+  border-left: 3px solid var(--softnix-blue);
+  padding: 0.25rem 0.75rem;
+  margin: 0.5rem 0;
+  color: var(--charcoal);
+  background: #EBF4FB;
+  border-radius: 0 4px 4px 0;
+}
+
+.agent-markdown table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0.5rem 0;
+  font-size: 0.8125rem;
+}
+.agent-markdown th {
+  background: var(--off-white);
+  font-weight: 600;
+  padding: 0.375rem 0.75rem;
+  text-align: left;
+  border: 1px solid var(--hairline-gray);
+}
+.agent-markdown td {
+  padding: 0.375rem 0.75rem;
+  border: 1px solid var(--hairline-gray);
+}
+.agent-markdown tr:nth-child(even) td { background: #FAFBFC; }
+
+.agent-markdown hr {
+  border: none;
+  border-top: 2px solid var(--hairline-gray);
+  margin: 0.75rem 0;
+}
+
+.agent-markdown code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.8125rem;
+  background: #E8EDF2;
+  padding: 0.125rem 0.375rem;
+  border-radius: 3px;
+  color: var(--ink-navy);
+}
+
+.agent-markdown pre {
+  background: #0D1B2A;
+  color: #A9CB2E;
+  padding: 0.75rem;
+  border-radius: 8px;
+  overflow-x: auto;
+  margin: 0.5rem 0;
+  font-size: 0.75rem;
+  line-height: 1.5;
+}
+.agent-markdown pre code {
+  background: none;
+  padding: 0;
+  border-radius: 0;
+  color: inherit;
+  font-size: inherit;
+}
+
+.agent-markdown strong { font-weight: 700; }
+.agent-markdown em { font-style: italic; }
+
+.agent-markdown input[type="checkbox"] {
+  margin-right: 0.375rem;
+  accent-color: var(--softnix-blue);
 }

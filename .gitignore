@@ -24,6 +24,8 @@ test_api.py
 __pycache__/
 *.pyc
 .DS_Store
+.claude/
+.pytest_cache/
 *.log
 connection_test_result.txt
 debug_*.py
@@ -31,6 +33,7 @@ test_*.py
 !test/test_softnix_genai.py
 !test/test_stream.py
 !test/test_structured_data.py
+!backend/test/**/*.py
 temp_*.py
 fix_*.py
 update_*.py

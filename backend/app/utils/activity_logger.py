@@ -101,5 +101,9 @@ class Actions:
     CHAT_SEND_MESSAGE = "chat_send_message"
     CHAT_DELETE_CONVERSATION = "chat_delete_conversation"
 
+    # Agent actions
+    AGENT_TOOL_APPROVED = "agent_tool_approved"
+    AGENT_TOOL_REJECTED = "agent_tool_rejected"
+
     # Other actions
     EXPORT_DATA = "export_data"

@@ -1,13 +1,12 @@
 "use client"
 
 import { useState } from "react"
-// import Image from "next/image" -> Removing unused Image import
 import { Logo } from "@/components/logo"
 import { useAuth } from "@/components/auth-provider"
 import { getApiBaseUrl } from "@/lib/api"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { AlertCircle } from "lucide-react"
+import { AlertCircle, ShieldCheck, Cpu, Zap } from "lucide-react"
 
 export default function LoginPage() {
     const { login } = useAuth()
@@ -29,7 +28,7 @@ export default function LoginPage() {
             const res = await fetch(`${getApiBaseUrl()}/login/access-token`, {
                 method: "POST",
                 headers: { "Content-Type": "application/x-www-form-urlencoded" },
-                body: formData
+                body: formData,
             })
 
             if (res.ok) {
@@ -39,100 +38,139 @@ export default function LoginPage() {
                 const errData = await res.json()
                 setError(errData.detail || "Login failed")
             }
-        } catch (err) {
-            setError("An error occurred")
+        } catch {
+            setError("An error occurred. Please try again.")
         } finally {
             setLoading(false)
         }
     }
 
+    const features = [
+        { icon: ShieldCheck, label: "Private AI Environment",   color: "bg-[#EBF4FB] text-[#2786C2]" },
+        { icon: Zap,         label: "Enterprise-Grade Security", color: "bg-[#FFF4EC] text-[#F3903F]" },
+        { icon: Cpu,         label: "Agent-Ready Data Platform", color: "bg-[#F4FAE8] text-[#7DAF1A]" },
+    ]
+
     return (
-        <div className="relative min-h-screen bg-gradient-to-br from-slate-50 via-sky-50/60 to-white text-slate-900 overflow-hidden">
-            <div className="absolute inset-0 pointer-events-none">
-                <div className="absolute -left-32 -top-32 h-80 w-80 rounded-full bg-sky-200/30 blur-3xl" />
-                <div className="absolute bottom-0 right-0 h-96 w-96 rounded-full bg-amber-100/40 blur-3xl" />
+        <div className="min-h-screen bg-[#F8F9FA] flex">
+
+            {/* ── Left panel — Brand hero ──────────────────────────── */}
+            <div className="hidden lg:flex lg:w-1/2 xl:w-3/5 flex-col justify-between p-12 bg-white border-r border-[#E2E8F0]">
+                {/* Top wordmark */}
+                <Logo className="text-4xl" />
+
+                {/* Center copy */}
+                <div className="space-y-8 max-w-lg">
+                    {/* Tier badge */}
+                    <div className="inline-flex items-center gap-2 rounded-full border border-[#E2E8F0] bg-[#F8F9FA] px-4 py-1.5">
+                        <span className="h-2 w-2 rounded-full bg-[#A9CB2E]" />
+                        <span className="text-sm font-medium text-[#778DA9]">
+                            Intelligence AI Application by Softnix
+                        </span>
+                    </div>
+
+                    <h1 className="text-4xl font-bold leading-tight text-[#0D1B2A]">
+                        Your Secure Workspace for{" "}
+                        <span className="text-[#2786C2]">Intelligent Documents</span>
+                    </h1>
+
+                    <p className="text-base text-[#778DA9] leading-relaxed">
+                        Transform raw documents into trusted, structured data with an
+                        AI-powered extraction pipeline built for enterprise teams.
+                    </p>
+
+                    {/* Feature pills */}
+                    <div className="flex flex-wrap gap-3">
+                        {features.map(({ icon: Icon, label, color }) => (
+                            <div
+                                key={label}
+                                className="flex items-center gap-2 rounded-full border border-[#E2E8F0] bg-white px-4 py-2"
+                            >
+                                <span className={`flex h-6 w-6 items-center justify-center rounded-full ${color}`}>
+                                    <Icon className="h-3.5 w-3.5" />
+                                </span>
+                                <span className="text-sm font-medium text-[#0D1B2A]">{label}</span>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+
+                {/* Bottom brand stripe */}
+                <div className="h-1 w-24 rounded-full"
+                    style={{ background: "linear-gradient(135deg, #F3903F 0%, #FDC70C 50%, #A9CB2E 100%)" }}
+                />
             </div>
-            <div className="relative z-10 flex items-center justify-center px-4 py-12">
-                <div className="w-full max-w-6xl grid grid-cols-1 lg:grid-cols-2 gap-10 lg:gap-12 items-center">
-                    <div className="space-y-6">
-                        <div className="inline-flex items-center gap-3 rounded-full bg-white/80 px-4 py-2 shadow-sm ring-1 ring-slate-200/60 backdrop-blur">
-                            <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
-                            <span className="text-sm font-medium text-slate-700">Intelligence AI Application by Softnix</span>
-                        </div>
-                        <h1 className="text-4xl font-bold leading-tight text-slate-900">
-                            Your Secure Workspace for Intelligent Documents
-                        </h1>
-                        <p className="text-lg text-slate-600 leading-relaxed">
-                            Access your AI-powered document workspace to transform information into trusted, actionable data.
-                        </p>
-                        <div className="flex flex-wrap items-center gap-3 text-sm text-slate-600">
-                            <div className="flex items-center gap-2 px-3 py-2 rounded-full bg-white/80 shadow-sm ring-1 ring-slate-200/60 backdrop-blur">
-                                <span className="h-2 w-2 rounded-full bg-sky-500" />
-                                Private AI Environment
-                            </div>
-                            <div className="flex items-center gap-2 px-3 py-2 rounded-full bg-white/80 shadow-sm ring-1 ring-slate-200/60 backdrop-blur">
-                                <span className="h-2 w-2 rounded-full bg-amber-500" />
-                                Enterprise-Grade Security
-                            </div>
-                            <div className="flex items-center gap-2 px-3 py-2 rounded-full bg-white/80 shadow-sm ring-1 ring-slate-200/60 backdrop-blur">
-                                <span className="h-2 w-2 rounded-full bg-emerald-500" />
-                                Agent-Ready Data Platform
-                            </div>
-                        </div>
+
+            {/* ── Right panel — Login form ─────────────────────────── */}
+            <div className="flex-1 flex items-center justify-center p-8">
+                <div className="w-full max-w-sm space-y-8">
+
+                    {/* Mobile-only logo */}
+                    <div className="lg:hidden">
+                        <Logo className="text-3xl" />
                     </div>
 
-                    <div className="bg-white/95 backdrop-blur-xl rounded-2xl shadow-xl ring-1 ring-slate-200/70 p-8 md:p-10 space-y-8 max-w-md w-full mx-auto">
-                        <div className="text-center space-y-3">
-                            <div className="flex justify-center">
-                                <Logo className="text-5xl" />
+                    <div className="space-y-1">
+                        <h2 className="text-2xl font-bold text-[#0D1B2A]">Welcome back</h2>
+                        <p className="text-sm text-[#778DA9]">Sign in to your workspace</p>
+                    </div>
+
+                    <form className="space-y-5" onSubmit={handleSubmit}>
+                        <div className="space-y-4">
+                            <div className="space-y-1.5">
+                                <label htmlFor="email" className="block text-sm font-semibold text-[#0D1B2A]">
+                                    Email address
+                                </label>
+                                <Input
+                                    id="email"
+                                    type="email"
+                                    required
+                                    placeholder="you@company.com"
+                                    value={email}
+                                    onChange={(e) => setEmail(e.target.value)}
+                                    error={!!error}
+                                />
                             </div>
-                            <div>
-                                <p className="text-lg font-semibold text-slate-800">Welcome back</p>
-                                <p className="text-sm text-slate-600">Sign in to continue</p>
+
+                            <div className="space-y-1.5">
+                                <div className="flex items-center justify-between">
+                                    <label htmlFor="password" className="text-sm font-semibold text-[#0D1B2A]">
+                                        Password
+                                    </label>
+                                    <a href="#" className="text-sm text-[#2786C2] hover:text-[#1A5A8A] transition-colors">
+                                        Forgot password?
+                                    </a>
+                                </div>
+                                <Input
+                                    id="password"
+                                    type="password"
+                                    required
+                                    placeholder="••••••••"
+                                    value={password}
+                                    onChange={(e) => setPassword(e.target.value)}
+                                    error={!!error}
+                                />
                             </div>
                         </div>
 
-                        <form className="space-y-5" onSubmit={handleSubmit}>
-                            <div className="space-y-4">
-                                <div className="space-y-1.5">
-                                    <label htmlFor="email" className="block text-sm font-medium text-slate-700">Email address</label>
-                                    <Input
-                                        id="email"
-                                        type="email"
-                                        required
-                                        value={email}
-                                        onChange={(e) => setEmail(e.target.value)}
-                                        className="mt-0"
-                                    />
-                                </div>
-                                <div className="space-y-1.5">
-                                    <div className="flex items-center justify-between text-sm font-medium text-slate-700">
-                                        <label htmlFor="password">Password</label>
-                                        <a href="#" className="text-sky-700 hover:text-sky-800">Forgot?</a>
-                                    </div>
-                                    <Input
-                                        id="password"
-                                        type="password"
-                                        required
-                                        value={password}
-                                        onChange={(e) => setPassword(e.target.value)}
-                                        className="mt-0"
-                                    />
-                                </div>
+                        {error && (
+                            <div className="flex items-center gap-2 rounded-lg border border-[#FECACA] bg-[#FEF2F2] px-4 py-3 text-sm text-[#E53935]">
+                                <AlertCircle className="h-4 w-4 shrink-0" />
+                                {error}
                             </div>
+                        )}
 
-                            {error && (
-                                <div className="flex items-center text-sm text-red-600 bg-red-50 p-3 rounded-md ring-1 ring-red-100">
-                                    <AlertCircle className="h-4 w-4 mr-2" />
-                                    {error}
-                                </div>
-                            )}
+                        <Button type="submit" size="lg" className="w-full" disabled={loading}>
+                            {loading ? "Signing in…" : "Sign in"}
+                        </Button>
+                    </form>
 
-                            <Button type="submit" className="w-full h-11 text-base font-semibold" disabled={loading}>
-                                {loading ? "Signing in..." : "Sign in"}
-                            </Button>
-                        </form>
-                    </div>
+                    <p className="text-center text-xs text-[#9BA8B4]">
+                        By signing in you agree to the Softnix{" "}
+                        <a href="#" className="text-[#5EADD6] hover:underline">Terms of Service</a>
+                        {" "}and{" "}
+                        <a href="#" className="text-[#5EADD6] hover:underline">Privacy Policy</a>.
+                    </p>
                 </div>
             </div>
         </div>

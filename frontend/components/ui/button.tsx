@@ -13,18 +13,35 @@ const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
             <button
                 ref={ref}
                 className={cn(
-                    "inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50",
+                    // Base — Softnix Cereal 500-weight, no all-caps
+                    "inline-flex items-center justify-center whitespace-nowrap rounded-lg font-medium transition-all",
+                    "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0D1B2A] focus-visible:ring-offset-2",
+                    "disabled:pointer-events-none disabled:opacity-50",
+                    "active:scale-[0.92]",
                     {
-                        "bg-slate-900 text-slate-50 hover:bg-slate-900/90": variant === "default",
-                        "bg-red-500 text-slate-50 hover:bg-red-500/90": variant === "destructive",
-                        "border border-slate-200 bg-white hover:bg-slate-100 hover:text-slate-900": variant === "outline",
-                        "bg-slate-100 text-slate-900 hover:bg-slate-100/80": variant === "secondary",
-                        "hover:bg-slate-100 hover:text-slate-900": variant === "ghost",
-                        "text-slate-900 underline-offset-4 hover:underline": variant === "link",
-                        "h-10 px-4 py-2": size === "default",
-                        "h-9 rounded-md px-3": size === "sm",
-                        "h-11 rounded-md px-8": size === "lg",
-                        "h-10 w-10": size === "icon",
+                        // Primary CTA — Softnix Blue
+                        "bg-[#2786C2] text-white hover:bg-[#1A5A8A]": variant === "default",
+
+                        // Destructive — Error Red
+                        "bg-[#E53935] text-white hover:bg-[#B91C1C]": variant === "destructive",
+
+                        // Outline / Secondary — white bg, Hairline Gray border
+                        "border border-[#E2E8F0] bg-white text-[#0D1B2A] hover:bg-[#F8F9FA] hover:border-[#CBD5E1]": variant === "outline",
+
+                        // Secondary pill — Off White bg
+                        "bg-[#F8F9FA] text-[#0D1B2A] hover:bg-[#E2E8F0]": variant === "secondary",
+
+                        // Ghost — no border
+                        "text-[#0D1B2A] hover:bg-[#F8F9FA]": variant === "ghost",
+
+                        // Link
+                        "text-[#2786C2] underline-offset-4 hover:underline": variant === "link",
+
+                        // Sizes
+                        "h-10 px-6 py-2 text-sm":   size === "default",
+                        "h-9 px-4 text-sm":          size === "sm",
+                        "h-11 px-8 text-base":       size === "lg",
+                        "h-10 w-10 rounded-full p-0": size === "icon",
                     },
                     className
                 )}

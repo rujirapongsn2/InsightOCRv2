@@ -6,8 +6,10 @@ interface LogoProps {
 
 export function Logo({ className }: LogoProps) {
     return (
-        <div className={cn("font-sans font-bold text-3xl text-slate-900 tracking-tight", className)}>
-            Insight<span className="text-[#F3903F]">DOC</span>
+        <div className={cn("font-bold tracking-tight select-none text-2xl", className)}>
+            <span className="text-[#0D1B2A]">Insight</span>
+            {/* Layer 2 Orange — GenAI/document product tier color */}
+            <span style={{ color: "#F3903F" }}>DOC</span>
         </div>
     )
 }

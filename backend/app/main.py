@@ -16,6 +16,11 @@ from app.models.activity_log import ActivityLog
 from app.models.integration import Integration
 from app.models.integration_result import IntegrationResult
 from app.models.api_access_token import APIAccessToken
+from app.models.agent_conversation import AgentConversation
+from app.models.agent_message import AgentMessage
+from app.models.agent_memory import AgentMemory
+from app.models.agent_skill import AgentSkill
+from app.models.agent_pending_action import AgentPendingAction
 from app.initial_data import init_db
 from app.initial_templates import init_system_templates
 from app.initial_ai_settings import init_ai_settings
@@ -58,6 +63,18 @@ with engine.connect() as conn:
     conn.execute(text("ALTER TABLE IF EXISTS integration_results ADD COLUMN IF NOT EXISTS integration_type varchar(20) NULL"))
     conn.execute(text("ALTER TABLE IF EXISTS integration_results ADD COLUMN IF NOT EXISTS integration_name varchar(255) NULL"))
 
+    # Agent skills: agentskills.io spec fields
+    conn.execute(text("ALTER TABLE IF EXISTS agent_skills ADD COLUMN IF NOT EXISTS scope varchar(20) DEFAULT 'user'"))
+    conn.execute(text("ALTER TABLE IF EXISTS agent_skills ADD COLUMN IF NOT EXISTS license varchar(100)"))
+    conn.execute(text("ALTER TABLE IF EXISTS agent_skills ADD COLUMN IF NOT EXISTS compatibility varchar(500)"))
+    conn.execute(text("ALTER TABLE IF EXISTS agent_skills ADD COLUMN IF NOT EXISTS metadata jsonb"))
+    conn.execute(text("ALTER TABLE IF EXISTS agent_skills ADD COLUMN IF NOT EXISTS allowed_tools text"))
+    conn.execute(text("ALTER TABLE IF EXISTS agent_skills ADD COLUMN IF NOT EXISTS source varchar(20) DEFAULT 'db'"))
+    conn.execute(text("ALTER TABLE IF EXISTS agent_skills ADD COLUMN IF NOT EXISTS file_path varchar(500)"))
+    conn.execute(text("ALTER TABLE IF EXISTS agent_skills ADD COLUMN IF NOT EXISTS version varchar(20)"))
+    conn.execute(text("ALTER TABLE IF EXISTS agent_skills ADD COLUMN IF NOT EXISTS user_id uuid NULL"))  # make nullable for system skills
+    conn.execute(text("ALTER TABLE IF EXISTS agent_skills ALTER COLUMN name TYPE varchar(64)"))
+
     # Migrate existing data: if api_endpoint exists but ocr_endpoint doesn't, copy it
     conn.execute(text("""
         UPDATE settings
@@ -93,9 +110,18 @@ def ensure_ai_settings():
     finally:
         db.close()
 
+def ensure_sandbox_ready():
+    """Pre-pull the Docker sandbox image at startup so it's ready when agent needs it."""
+    try:
+        from app.services.code_sandbox import ensure_sandbox_image
+        ensure_sandbox_image()
+    except Exception:
+        pass  # Sandbox is optional — agent handles missing image gracefully
+
 ensure_seed_user()
 ensure_system_templates()
 ensure_ai_settings()
+ensure_sandbox_ready()
 
 app = FastAPI(
     title=settings.PROJECT_NAME,

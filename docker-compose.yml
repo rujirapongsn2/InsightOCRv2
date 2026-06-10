@@ -48,10 +48,12 @@ services:
       - "8000"
     volumes:
       - documents_uploads:/app/uploads
+      - /var/run/docker.sock:/var/run/docker.sock  # Sandbox: spawn isolated Python containers
     env_file:
       - ./backend/.env
     environment:
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
+      - SANDBOX_IMAGE=python:3.12-slim
       - HTTP_PROXY=http://gateway:8888
       - HTTPS_PROXY=http://gateway:8888
       - NO_PROXY=localhost,127.0.0.1,backend,db,redis,minio,frontend,nginx,gateway

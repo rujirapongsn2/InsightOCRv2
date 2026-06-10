@@ -3,7 +3,7 @@
 import { useEffect, useState, useRef, useMemo } from "react"
 import { useParams, useRouter } from "next/navigation"
 import Link from "next/link"
-import { ArrowLeft, Upload, FileText, Loader2, Eye, X, Trash2, AlertTriangle, MessageSquare } from "lucide-react"
+import { ArrowLeft, Upload, FileText, Loader2, Eye, X, Trash2, AlertTriangle, Bot, ChevronDown } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Modal } from "@/components/ui/modal"
 import { Textarea } from "@/components/ui/textarea"
@@ -12,7 +12,7 @@ import dynamic from "next/dynamic"
 import { getApiBaseUrl } from "@/lib/api"
 import { useAuth } from "@/components/auth-provider"
 import LlmResultRenderer from "@/components/LlmResultRenderer"
-import ChatPanel from "@/components/chat/ChatPanel"
+import AgentPanel from "@/components/agent/AgentPanel"
 import { generateExportHtml, generateExportText } from "@/lib/exportReportHtml"
 
 const PDFViewer = dynamic(
@@ -124,7 +124,8 @@ export default function JobDetailPage() {
     const [deleteConfirmDoc, setDeleteConfirmDoc] = useState<Document | null>(null)
     const [deleting, setDeleting] = useState(false)
     // Delete confirmation (job)
-    const [chatOpen, setChatOpen] = useState(false)
+    const [activeTab, setActiveTab] = useState<"documents" | "agent">("documents")
+    const [showJobDetails, setShowJobDetails] = useState(false)
     const [showDeleteJobConfirm, setShowDeleteJobConfirm] = useState(false)
     const [deletingJob, setDeletingJob] = useState(false)
     // Image viewer state
@@ -925,8 +926,6 @@ export default function JobDetailPage() {
         reviewed: documents.filter(d => d.status === 'reviewed').length
     }
     const allDocsReviewed = documents.length > 0 && documents.every(d => d.status === "reviewed")
-    const hasProcessedDocs = documents.some(d => d.status === "extraction_completed" || d.status === "reviewed")
-    const hasLlmIntegration = integrations.some(i => i.type === "llm")
 
     return (
         <div className="space-y-6">
@@ -961,8 +960,166 @@ export default function JobDetailPage() {
                 </div>
             </div>
 
-            <div className="grid gap-6 md:grid-cols-3">
-                <div className="md:col-span-2 space-y-6">
+            {/* Job Summary Bar */}
+            <div className="rounded-lg border bg-white p-4 shadow-sm">
+                <div className="flex items-center gap-4 flex-wrap">
+                    <div className="flex items-center gap-2 text-sm">
+                        <span className="text-slate-500">Docs:</span>
+                        <span className="font-medium text-slate-700">{documents.length}</span>
+                    </div>
+                    {docCounts.uploaded > 0 && (
+                        <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200">
+                            <span className="w-1.5 h-1.5 rounded-full bg-amber-500" /> {docCounts.uploaded} Uploaded
+                        </span>
+                    )}
+                    {docCounts.processing > 0 && (
+                        <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200">
+                            <span className="w-1.5 h-1.5 rounded-full bg-blue-500" /> {docCounts.processing} Processing
+                        </span>
+                    )}
+                    {docCounts.extraction_completed > 0 && (
+                        <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
+                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" /> {docCounts.extraction_completed} Extracted
+                        </span>
+                    )}
+                    {docCounts.reviewed > 0 && (
+                        <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-purple-50 text-purple-700 border border-purple-200">
+                            <span className="w-1.5 h-1.5 rounded-full bg-purple-500" /> {docCounts.reviewed} Reviewed
+                        </span>
+                    )}
+
+                    <div className="ml-auto flex items-center gap-2">
+                        {allDocsReviewed && (
+                            <Button size="sm" onClick={() => setShowIntegrationModal(true)}>
+                                Next: Send to Integration
+                            </Button>
+                        )}
+                        {resultHistory.length > 0 && (
+                            <Button variant="ghost" size="sm"
+                                onClick={() => { setShowJobDetails(!showJobDetails); if (!showJobDetails) loadResultHistory() }}
+                                className="text-slate-500">
+                                <FileText className="h-3.5 w-3.5 mr-1.5" />
+                                History ({resultHistory.length})
+                            </Button>
+                        )}
+                        <Button variant="ghost" size="sm"
+                            onClick={() => setShowJobDetails(!showJobDetails)}
+                            className="text-slate-500">
+                            <ChevronDown className={`h-3.5 w-3.5 mr-1 transition-transform ${showJobDetails ? "rotate-180" : ""}`} />
+                            {showJobDetails ? "Hide Details" : "Details"}
+                        </Button>
+                    </div>
+                </div>
+
+                {/* Collapsible Details Panel */}
+                {showJobDetails && (
+                    <div className="mt-4 pt-4 border-t grid grid-cols-1 md:grid-cols-2 gap-6">
+                        <div>
+                            <h4 className="text-sm font-semibold text-slate-700 mb-2">Job Info</h4>
+                            <dl className="space-y-1.5 text-sm">
+                                <div className="flex justify-between py-1 border-b border-dashed border-slate-100">
+                                    <dt className="text-slate-500">Created</dt>
+                                    <dd className="font-medium text-slate-900">{createdDateTime}</dd>
+                                </div>
+                                {job.user_name && (
+                                    <div className="flex justify-between py-1 border-b border-dashed border-slate-100">
+                                        <dt className="text-slate-500">Uploaded By</dt>
+                                        <dd className="font-medium text-slate-900">{job.user_name}</dd>
+                                    </div>
+                                )}
+                                <div className="flex justify-between py-1 border-b border-dashed border-slate-100">
+                                    <dt className="text-slate-500">Status</dt>
+                                    <dd className="font-medium text-slate-900 capitalize">{job.status}</dd>
+                                </div>
+                                <div className="flex justify-between py-1 border-b border-dashed border-slate-100">
+                                    <dt className="text-slate-500">Documents</dt>
+                                    <dd className="font-medium text-slate-900">{documents.length}</dd>
+                                </div>
+                                {job.description && (
+                                    <div className="flex justify-between py-1 border-b border-dashed border-slate-100">
+                                        <dt className="text-slate-500">Description</dt>
+                                        <dd className="font-medium text-slate-900 truncate max-w-[200px]">{job.description}</dd>
+                                    </div>
+                                )}
+                            </dl>
+                        </div>
+                        <div>
+                            <h4 className="text-sm font-semibold text-slate-700 mb-2">Integration History</h4>
+                            {resultHistory.length === 0 ? (
+                                <p className="text-xs text-slate-400">No integration results yet.</p>
+                            ) : (
+                                <div className="space-y-1.5 max-h-48 overflow-y-auto">
+                                    {resultHistory.map((r) => {
+                                        const isLlm = r.integration_type === "llm"
+                                        const typeBadge = r.integration_type === "llm" ? "LLM" : r.integration_type === "api" ? "API" : r.integration_type === "workflow" ? "Workflow" : r.integration_type || "—"
+                                        const typeBgColor = r.integration_type === "llm" ? "bg-[#ebf8ff] text-[#2b6cb0]" : r.integration_type === "api" ? "bg-[#fffaf0] text-[#c05621]" : "bg-[#f0fff4] text-[#276749]"
+                                        const rowContent = (
+                                            <>
+                                                <div className="flex items-center gap-2 min-w-0 flex-1">
+                                                    <span className={`inline-block w-2 h-2 rounded-full flex-shrink-0 ${r.status === "success" ? "bg-[#276749]" : "bg-[#c53030]"}`} />
+                                                    <span className="text-[#2d3748] truncate text-xs">
+                                                        {new Date(r.created_at).toLocaleString("th-TH", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" })}
+                                                    </span>
+                                                </div>
+                                                <div className="flex items-center gap-1.5 flex-shrink-0">
+                                                    <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded ${typeBgColor}`}>{typeBadge}</span>
+                                                    <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full ${r.status === "success" ? "bg-[#f0fff4] text-[#276749]" : "bg-[#fff5f5] text-[#c53030]"}`}>
+                                                        {r.status === "success" ? "PASS" : "FAILED"}
+                                                    </span>
+                                                </div>
+                                            </>
+                                        )
+                                        return isLlm ? (
+                                            <button key={r.id} onClick={() => handleViewHistoryResult(r.id)}
+                                                className="w-full text-left px-3 py-2 rounded-lg border border-[#e2e8f0] hover:bg-[#ebf8ff] hover:border-[#2b6cb0]/30 transition-colors text-xs flex items-center justify-between gap-2 cursor-pointer"
+                                                title={r.integration_name || "ดูผลลัพธ์"}>
+                                                {rowContent}
+                                                <Eye className="h-3 w-3 text-[#2b6cb0] flex-shrink-0" />
+                                            </button>
+                                        ) : (
+                                            <div key={r.id}
+                                                className="w-full text-left px-3 py-2 rounded-lg border border-[#e2e8f0] text-xs flex items-center justify-between gap-2"
+                                                title={r.integration_name || ""}>
+                                                {rowContent}
+                                            </div>
+                                        )
+                                    })}
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                )}
+            </div>
+
+            {/* Tabs */}
+            <div className="flex border-b border-slate-200">
+                <button
+                    onClick={() => setActiveTab("documents")}
+                    className={`px-5 py-3 text-sm font-medium border-b-2 transition-colors flex items-center gap-2 ${
+                        activeTab === "documents"
+                            ? "border-blue-600 text-blue-600"
+                            : "border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300"
+                    }`}
+                >
+                    <FileText className="h-4 w-4" />
+                    Document List
+                </button>
+                <button
+                    onClick={() => setActiveTab("agent")}
+                    className={`px-5 py-3 text-sm font-medium border-b-2 transition-colors flex items-center gap-2 ${
+                        activeTab === "agent"
+                            ? "border-blue-600 text-blue-600"
+                            : "border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300"
+                    }`}
+                >
+                    <Bot className="h-4 w-4" />
+                    AI Agent
+                </button>
+            </div>
+
+            {/* Tab Content */}
+            {activeTab === "documents" && (
+                <div className="space-y-6">
                     <div className="rounded-lg border bg-white p-6 shadow-sm">
                         <div className="flex items-center justify-between mb-4">
                             <h3 className="text-lg font-semibold">Documents</h3>
@@ -1096,157 +1253,14 @@ export default function JobDetailPage() {
                                 })}
                             </div>
                         )}
-                    </div>
                 </div>
 
-                <div className="space-y-6">
-                    <div className="rounded-lg border bg-white p-6 shadow-sm">
-                        <h3 className="text-lg font-semibold mb-4">Job Info</h3>
-                        <div className="space-y-2 text-sm">
-                            <div className="flex justify-between py-2 border-b">
-                                <span className="text-slate-500">Status</span>
-                                <span className="font-medium capitalize">{job.status}</span>
-                            </div>
-                            {job.user_name && (
-                                <div className="flex justify-between py-2 border-b">
-                                    <span className="text-slate-500">Uploaded By</span>
-                                    <span className="font-medium">{job.user_name}</span>
-                                </div>
-                            )}
-                            <div className="flex justify-between py-2 border-b">
-                                <span className="text-slate-500">Created</span>
-                                <span className="font-medium">{createdDateTime}</span>
-                            </div>
-                            <div className="flex justify-between py-2 border-b">
-                                <span className="text-slate-500">Documents</span>
-                                <span className="font-medium">{documents.length}</span>
-                            </div>
-                        </div>
-
-                        {/* Document Status Breakdown */}
-                        {documents.length > 0 && (
-                            <div className="mt-6 pt-4 border-t">
-                                <h4 className="text-sm font-semibold text-slate-700 mb-3">Status Breakdown</h4>
-                                <div className="space-y-2 text-sm">
-                                    {docCounts.uploaded > 0 && (
-                                        <div className="flex items-center justify-between py-1.5">
-                                            <div className="flex items-center gap-2">
-                                                <div className="w-2 h-2 rounded-full bg-amber-500"></div>
-                                                <span className="text-slate-600">Uploaded</span>
-                                            </div>
-                                            <span className="font-medium text-slate-900">{docCounts.uploaded}</span>
-                                        </div>
-                                    )}
-                                    {docCounts.processing > 0 && (
-                                        <div className="flex items-center justify-between py-1.5">
-                                            <div className="flex items-center gap-2">
-                                                <div className="w-2 h-2 rounded-full bg-blue-500"></div>
-                                                <span className="text-slate-600">Processing</span>
-                                            </div>
-                                            <span className="font-medium text-slate-900">{docCounts.processing}</span>
-                                        </div>
-                                    )}
-                                    {docCounts.extraction_completed > 0 && (
-                                        <div className="flex items-center justify-between py-1.5">
-                                            <div className="flex items-center gap-2">
-                                                <div className="w-2 h-2 rounded-full bg-emerald-500"></div>
-                                                <span className="text-slate-600">Extraction Completed</span>
-                                            </div>
-                                            <span className="font-medium text-slate-900">{docCounts.extraction_completed}</span>
-                                        </div>
-                                    )}
-                                    {docCounts.reviewed > 0 && (
-                                        <div className="flex items-center justify-between py-1.5">
-                                            <div className="flex items-center gap-2">
-                                                <div className="w-2 h-2 rounded-full bg-purple-500"></div>
-                                                <span className="text-slate-600">Reviewed</span>
-                                            </div>
-                                            <span className="font-medium text-slate-900">{docCounts.reviewed}</span>
-                                        </div>
-                                    )}
-                                </div>
-                            </div>
-                        )}
-                        {allDocsReviewed && (
-                            <div className="mt-6 pt-4 border-t">
-                                <Button className="w-full" onClick={() => setShowIntegrationModal(true)}>
-                                    Next: Send to Integration
-                                </Button>
-                                <p className="text-xs text-slate-500 mt-2">All documents are reviewed. Choose an integration channel to continue.</p>
-                            </div>
-                        )}
-
-                        {/* ChatDOC */}
-                        {hasProcessedDocs && hasLlmIntegration && (
-                            <div className="mt-4 pt-4 border-t">
-                                <Button
-                                    variant="outline"
-                                    className="w-full"
-                                    onClick={() => setChatOpen(true)}
-                                >
-                                    <MessageSquare className="h-4 w-4 mr-2" />
-                                    ChatDOC
-                                </Button>
-                                <p className="text-xs text-slate-500 mt-2">Ask questions or get summaries from your documents.</p>
-                            </div>
-                        )}
-
-                        {/* Integration History */}
-                        {resultHistory.length > 0 && (
-                            <div className="mt-4 pt-4 border-t">
-                                <h4 className="text-sm font-semibold text-[#1a365d] mb-2 flex items-center gap-1.5">
-                                    <FileText className="h-3.5 w-3.5" />
-                                    ประวัติการเชื่อมต่อ ({resultHistory.length})
-                                </h4>
-                                <div className="space-y-1.5 max-h-60 overflow-y-auto">
-                                    {resultHistory.map((r) => {
-                                        const isLlm = r.integration_type === "llm"
-                                        const typeBadge = r.integration_type === "llm" ? "LLM" : r.integration_type === "api" ? "API" : r.integration_type === "workflow" ? "Workflow" : r.integration_type || "—"
-                                        const typeBgColor = r.integration_type === "llm" ? "bg-[#ebf8ff] text-[#2b6cb0]" : r.integration_type === "api" ? "bg-[#fffaf0] text-[#c05621]" : "bg-[#f0fff4] text-[#276749]"
-
-                                        const rowContent = (
-                                            <>
-                                                <div className="flex items-center gap-2 min-w-0 flex-1">
-                                                    <span className={`inline-block w-2 h-2 rounded-full flex-shrink-0 ${r.status === "success" ? "bg-[#276749]" : "bg-[#c53030]"}`} />
-                                                    <span className="text-[#2d3748] truncate">
-                                                        {new Date(r.created_at).toLocaleString("th-TH", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" })}
-                                                    </span>
-                                                </div>
-                                                <div className="flex items-center gap-1.5 flex-shrink-0">
-                                                    <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded ${typeBgColor}`}>{typeBadge}</span>
-                                                    <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full ${r.status === "success" ? "bg-[#f0fff4] text-[#276749]" : "bg-[#fff5f5] text-[#c53030]"}`}>
-                                                        {r.status === "success" ? "PASS" : "FAILED"}
-                                                    </span>
-                                                </div>
-                                            </>
-                                        )
-
-                                        return isLlm ? (
-                                            <button
-                                                key={r.id}
-                                                onClick={() => handleViewHistoryResult(r.id)}
-                                                className="w-full text-left px-3 py-2 rounded-lg border border-[#e2e8f0] hover:bg-[#ebf8ff] hover:border-[#2b6cb0]/30 transition-colors text-xs flex items-center justify-between gap-2 cursor-pointer"
-                                                title={r.integration_name || "ดูผลลัพธ์"}
-                                            >
-                                                {rowContent}
-                                                <Eye className="h-3 w-3 text-[#2b6cb0] flex-shrink-0" />
-                                            </button>
-                                        ) : (
-                                            <div
-                                                key={r.id}
-                                                className="w-full text-left px-3 py-2 rounded-lg border border-[#e2e8f0] text-xs flex items-center justify-between gap-2"
-                                                title={r.integration_name || ""}
-                                            >
-                                                {rowContent}
-                                            </div>
-                                        )
-                                    })}
-                                </div>
-                            </div>
-                        )}
-                    </div>
                 </div>
-            </div>
+            )}
+
+            {activeTab === "agent" && (
+                <AgentPanel jobId={jobId} mode="inline" />
+            )}
 
             {/* Review Modal - Full Screen */}
             {reviewDoc && (
@@ -1680,13 +1694,6 @@ export default function JobDetailPage() {
                 </div>
             )}
 
-            {/* ChatDOC Panel */}
-            {chatOpen && (
-                <ChatPanel
-                    jobId={jobId}
-                    onClose={() => setChatOpen(false)}
-                />
-            )}
         </div>
     )
 }

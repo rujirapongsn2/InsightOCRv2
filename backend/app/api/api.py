@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 from app.api.v1.endpoints import (
     activity_logs,
+    agent,
     ai_settings,
     api_tokens,
     auth,
@@ -30,4 +31,5 @@ api_router.include_router(dashboard.router, prefix="/dashboard", tags=["dashboar
 api_router.include_router(activity_logs.router, prefix="/activity-logs", tags=["activity-logs"])
 api_router.include_router(integrations.router, prefix="/integrations", tags=["integrations"])
 api_router.include_router(chat.router, prefix="/chat", tags=["chat"])
+api_router.include_router(agent.router, prefix="/agent", tags=["agent"])
 api_router.include_router(external.router, prefix="/external", tags=["external"])

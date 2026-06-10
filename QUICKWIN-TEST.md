@@ -97,3 +97,53 @@ Date: 2026-06-10
    - Retested `POST /api/v1/documents/{document_id}/process` through `localhost:3000`; it returned `200` with a Celery `task_id`.
    - Confirmed the background task progressed through OCR and structured extraction.
    - Confirmed `GET /api/v1/documents/{document_id}/task-status` returns `status=extraction_completed`, `page_count=1`, no processing error, and extracted data.
+
+---
+
+## Agentic Document Processing Phase 1 Tests
+
+Date: 2026-05-05
+
+1. Mock ERP/CRM service
+   - Added `backend/test/mock_external_api.py` with mock ERP product, CRM customer, quotation, and workflow webhook endpoints.
+   - Added `test/test_mock_external_api.py`.
+   - Ran `python test/test_mock_external_api.py`.
+   - Confirmed 5 tests passed.
+
+2. Agent tool unit tests
+   - Added `test/test_agent_tools.py`.
+   - Covered Phase 1 document tools: `list_documents`, `get_document_detail`, `search_documents`, `compare_documents`, `update_document_field`, `approve_document`, `reject_document`, and `bulk_approve`.
+   - Covered Phase 1 integration tools: `list_integrations`, `call_api_integration`, and `send_to_workflow`.
+   - Ran `python test/test_agent_tools.py`.
+   - Confirmed 13 tests passed.
+
+3. Explicitly skipped
+   - E2E quotation workflow test was skipped by request.
+
+## Agentic Document Processing Phase 2 Memory Tests
+
+Date: 2026-05-05
+
+1. Memory tools
+   - Added `backend/app/agent/tools/memory_tools.py`.
+   - Implemented `save_memory`, `recall_memory`, `list_memories`, and `forget_memory`.
+   - Confirmed memory tools are registered under the `memory` category.
+   - Confirmed `forget_memory` remains confirmation-gated through existing confirmation rules.
+
+2. Memory context and UI
+   - Updated agent loop registration so memory tools are available to the LLM.
+   - Updated system prompt rules to treat memories as hints only and never as source of truth.
+   - Added read-only Memory inspector to `AgentPanel`.
+   - Added `GET /api/v1/agent/memories` for user/job scoped read-only memory listing.
+
+3. Verification
+   - Ran `python test/test_memory_tools.py`.
+   - Confirmed 6 memory tests passed, including current user/job scoping and tenant isolation.
+   - Ran `python test/test_agent_tools.py`.
+   - Confirmed 13 agent tool tests still passed.
+   - Ran `python test/test_mock_external_api.py`.
+   - Confirmed 5 mock API tests still passed.
+   - Ran `docker compose build backend frontend`.
+   - Confirmed frontend production build and TypeScript checks passed.
+   - Restarted `backend` and `frontend`.
+   - Confirmed both services are healthy.

@@ -1,0 +1,864 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>InsightDOC — System Diagram</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    background: #0f172a;
+    color: #e2e8f0;
+    min-height: 100vh;
+    padding: 32px 24px 64px;
+  }
+
+  h1 {
+    text-align: center;
+    font-size: 24px;
+    font-weight: 700;
+    color: #f8fafc;
+    letter-spacing: 0.5px;
+    margin-bottom: 6px;
+  }
+  .subtitle {
+    text-align: center;
+    color: #94a3b8;
+    font-size: 13px;
+    margin-bottom: 36px;
+  }
+
+  /* ── Tab Nav ── */
+  .tabs {
+    display: flex;
+    justify-content: center;
+    gap: 8px;
+    margin-bottom: 32px;
+  }
+  .tab {
+    padding: 8px 22px;
+    border-radius: 9999px;
+    border: 1.5px solid #334155;
+    background: transparent;
+    color: #94a3b8;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all .2s;
+  }
+  .tab.active {
+    background: #3b82f6;
+    border-color: #3b82f6;
+    color: #fff;
+  }
+  .tab:hover:not(.active) {
+    border-color: #64748b;
+    color: #cbd5e1;
+  }
+
+  .view { display: none; }
+  .view.active { display: block; }
+
+  /* ── Section label ── */
+  .section-label {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    color: #64748b;
+    margin-bottom: 12px;
+    padding-left: 4px;
+  }
+
+  /* ── ARCH DIAGRAM ── */
+  .arch-grid {
+    display: grid;
+    gap: 20px;
+    max-width: 1100px;
+    margin: 0 auto;
+  }
+
+  .layer {
+    border-radius: 16px;
+    padding: 18px 20px;
+    position: relative;
+  }
+  .layer-label {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 1.2px;
+    text-transform: uppercase;
+    margin-bottom: 14px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .layer-infra  { background: #1e293b; border: 1.5px solid #334155; }
+  .layer-app    { background: #1e2d3d; border: 1.5px solid #1d4ed8; }
+  .layer-data   { background: #0d2d1f; border: 1.5px solid #059669; }
+  .layer-ext    { background: #2d1f08; border: 1.5px solid #d97706; }
+
+  .layer-infra .layer-label  { color: #94a3b8; }
+  .layer-app   .layer-label  { color: #60a5fa; }
+  .layer-data  .layer-label  { color: #34d399; }
+  .layer-ext   .layer-label  { color: #fbbf24; }
+
+  .nodes {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: flex-start;
+  }
+
+  .node {
+    border-radius: 12px;
+    padding: 12px 16px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 5px;
+    min-width: 110px;
+    text-align: center;
+    transition: transform .15s, box-shadow .15s;
+    cursor: default;
+  }
+  .node:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 24px rgba(0,0,0,.4);
+  }
+  .node-icon { font-size: 24px; line-height: 1; }
+  .node-name { font-size: 12px; font-weight: 700; color: #f1f5f9; }
+  .node-sub  { font-size: 10px; color: #94a3b8; line-height: 1.4; margin-top: 2px; }
+  .node-badge {
+    font-size: 9px;
+    font-weight: 700;
+    padding: 2px 7px;
+    border-radius: 9999px;
+    margin-top: 4px;
+    letter-spacing: .4px;
+  }
+
+  /* Node colors */
+  .n-gray   { background: #1e293b; border: 1.5px solid #475569; }
+  .n-blue   { background: #172554; border: 1.5px solid #3b82f6; }
+  .n-indigo { background: #1e1b4b; border: 1.5px solid #6366f1; }
+  .n-green  { background: #052e16; border: 1.5px solid #22c55e; }
+  .n-amber  { background: #2d1f08; border: 1.5px solid #f59e0b; }
+  .n-rose   { background: #2d0a0a; border: 1.5px solid #f43f5e; }
+  .n-purple { background: #2e1065; border: 1.5px solid #a855f7; }
+  .n-teal   { background: #042f2e; border: 1.5px solid #14b8a6; }
+  .n-cyan   { background: #0c1a2e; border: 1.5px solid #06b6d4; }
+
+  .b-green  { background: #14532d; color: #86efac; }
+  .b-blue   { background: #1e3a8a; color: #93c5fd; }
+  .b-amber  { background: #78350f; color: #fcd34d; }
+  .b-rose   { background: #881337; color: #fda4af; }
+  .b-purple { background: #4c1d95; color: #c4b5fd; }
+
+  /* sub-group inside app layer */
+  .sub-group {
+    flex: 1;
+    min-width: 280px;
+  }
+  .sub-group-label {
+    font-size: 10px;
+    font-weight: 700;
+    color: #475569;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    margin-bottom: 8px;
+    border-left: 3px solid #334155;
+    padding-left: 8px;
+  }
+  .sub-nodes {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  /* arrows legend */
+  .arrow-legend {
+    max-width: 1100px;
+    margin: 16px auto 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 16px;
+    padding: 12px 16px;
+    background: #1e293b;
+    border-radius: 10px;
+    border: 1px solid #334155;
+  }
+  .arrow-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 11px;
+    color: #94a3b8;
+  }
+  .arrow-line {
+    width: 32px;
+    height: 2px;
+    border-radius: 2px;
+  }
+
+  /* ── FLOW DIAGRAM ── */
+  .flow-wrap {
+    max-width: 1100px;
+    margin: 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+  }
+
+  .flow-step {
+    display: flex;
+    align-items: stretch;
+    gap: 0;
+    position: relative;
+  }
+
+  .step-num {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    width: 56px;
+    flex-shrink: 0;
+  }
+  .step-circle {
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 15px;
+    font-weight: 800;
+    flex-shrink: 0;
+    z-index: 1;
+  }
+  .step-line {
+    flex: 1;
+    width: 2px;
+    background: #334155;
+    margin: 0 auto;
+  }
+  .step-last .step-line { display: none; }
+
+  .step-body {
+    flex: 1;
+    padding: 0 0 28px 16px;
+  }
+  .step-card {
+    border-radius: 14px;
+    padding: 16px 20px;
+    border: 1.5px solid;
+  }
+  .step-title {
+    font-size: 15px;
+    font-weight: 700;
+    margin-bottom: 8px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .step-desc {
+    font-size: 12px;
+    color: #94a3b8;
+    line-height: 1.6;
+  }
+  .step-items {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 10px;
+  }
+  .step-tag {
+    font-size: 11px;
+    padding: 3px 10px;
+    border-radius: 9999px;
+    font-weight: 600;
+  }
+  .step-detail {
+    margin-top: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .step-detail-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    font-size: 11.5px;
+    color: #cbd5e1;
+  }
+  .step-detail-row::before {
+    content: '→';
+    color: #475569;
+    flex-shrink: 0;
+    margin-top: 1px;
+  }
+
+  /* Step color themes */
+  .s1 { background: #172554; border-color: #3b82f6; }
+  .s1 .step-title { color: #93c5fd; }
+  .s1c { background: #1e3a8a; color: #fff; }
+
+  .s2 { background: #2d1f08; border-color: #f59e0b; }
+  .s2 .step-title { color: #fcd34d; }
+  .s2c { background: #92400e; color: #fff; }
+
+  .s3 { background: #1e1b4b; border-color: #6366f1; }
+  .s3 .step-title { color: #a5b4fc; }
+  .s3c { background: #3730a3; color: #fff; }
+
+  .s4 { background: #0d2d1f; border-color: #22c55e; }
+  .s4 .step-title { color: #86efac; }
+  .s4c { background: #15803d; color: #fff; }
+
+  .s5 { background: #2d0a1e; border-color: #ec4899; }
+  .s5 .step-title { color: #f9a8d4; }
+  .s5c { background: #9d174d; color: #fff; }
+
+  .s6 { background: #042f2e; border-color: #14b8a6; }
+  .s6 .step-title { color: #5eead4; }
+  .s6c { background: #0f766e; color: #fff; }
+
+  .s7 { background: #2e1065; border-color: #a855f7; }
+  .s7 .step-title { color: #d8b4fe; }
+  .s7c { background: #7e22ce; color: #fff; }
+
+  .tag-blue   { background: #1e3a8a; color: #93c5fd; }
+  .tag-amber  { background: #78350f; color: #fcd34d; }
+  .tag-indigo { background: #312e81; color: #a5b4fc; }
+  .tag-green  { background: #14532d; color: #86efac; }
+  .tag-pink   { background: #831843; color: #f9a8d4; }
+  .tag-teal   { background: #134e4a; color: #5eead4; }
+  .tag-purple { background: #4c1d95; color: #d8b4fe; }
+  .tag-rose   { background: #881337; color: #fda4af; }
+  .tag-gray   { background: #1e293b; color: #94a3b8; }
+
+  /* Integration detail cards */
+  .integ-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 12px;
+    max-width: 1100px;
+    margin: 0 auto;
+    margin-top: 8px;
+  }
+  .integ-card {
+    border-radius: 12px;
+    padding: 14px 16px;
+    border: 1.5px solid;
+  }
+  .integ-title {
+    font-size: 13px;
+    font-weight: 700;
+    margin-bottom: 6px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .integ-body {
+    font-size: 11px;
+    color: #94a3b8;
+    line-height: 1.6;
+  }
+
+  .divider {
+    border: none;
+    border-top: 1px solid #1e293b;
+    margin: 28px 0;
+  }
+</style>
+</head>
+<body>
+
+<h1>🗂️ InsightDOC — System Diagram</h1>
+<p class="subtitle">Softnix InsightOCR v2 · High-Level Architecture &amp; Document Processing Flow</p>
+
+<div class="tabs">
+  <button class="tab active" onclick="show('arch', this)">🏗️ System Architecture</button>
+  <button class="tab" onclick="show('flow', this)">📋 Document Flow</button>
+  <button class="tab" onclick="show('integ', this)">🔗 Integrations</button>
+</div>
+
+<!-- ════════════════ VIEW 1: ARCHITECTURE ════════════════ -->
+<div class="view active" id="v-arch">
+
+  <!-- USER / ACTOR ROW -->
+  <div style="max-width:1100px;margin:0 auto 16px;">
+    <div class="section-label">👥 Actors</div>
+    <div class="nodes">
+      <div class="node n-purple" style="min-width:140px">
+        <div class="node-icon">👤</div>
+        <div class="node-name">Web User</div>
+        <div class="node-sub">ใช้ผ่าน Browser<br>HTTPS</div>
+      </div>
+      <div class="node n-purple" style="min-width:140px">
+        <div class="node-icon">🔌</div>
+        <div class="node-name">External System</div>
+        <div class="node-sub">API Client<br>Bearer Token</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="arch-grid">
+
+    <!-- INFRA LAYER -->
+    <div class="layer layer-infra">
+      <div class="layer-label">🏗️ Infrastructure Layer</div>
+      <div class="nodes">
+        <div class="node n-gray" style="min-width:160px">
+          <div class="node-icon">🔀</div>
+          <div class="node-name">Nginx</div>
+          <div class="node-sub">Reverse Proxy · SSL<br>port 80 / 443</div>
+          <span class="node-badge b-blue">Entry Point</span>
+        </div>
+        <div class="node n-gray" style="min-width:160px">
+          <div class="node-icon">🛡️</div>
+          <div class="node-name">Gateway</div>
+          <div class="node-sub">tinyproxy<br>Egress Control</div>
+          <span class="node-badge b-rose">Outbound Only</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- APP LAYER -->
+    <div class="layer layer-app">
+      <div class="layer-label">⚙️ Application Layer</div>
+      <div style="display:flex;flex-wrap:wrap;gap:16px;">
+
+        <!-- Frontend -->
+        <div class="sub-group" style="min-width:180px;max-width:200px;">
+          <div class="sub-group-label">Frontend</div>
+          <div class="sub-nodes">
+            <div class="node n-blue" style="min-width:160px">
+              <div class="node-icon">🖥️</div>
+              <div class="node-name">Next.js / React</div>
+              <div class="node-sub">Dashboard · Jobs<br>Documents · Chat</div>
+              <span class="node-badge b-blue">port 3000</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Backend -->
+        <div class="sub-group" style="flex:2;min-width:320px;">
+          <div class="sub-group-label">Backend (FastAPI · port 8000)</div>
+          <div class="sub-nodes">
+            <div class="node n-blue"><div class="node-icon">🔑</div><div class="node-name">Auth</div><div class="node-sub">JWT · API Token</div></div>
+            <div class="node n-blue"><div class="node-icon">📁</div><div class="node-name">Jobs</div><div class="node-sub">CRUD · Status</div></div>
+            <div class="node n-blue"><div class="node-icon">📄</div><div class="node-name">Documents</div><div class="node-sub">Upload · Process<br>Review · Export</div></div>
+            <div class="node n-blue"><div class="node-icon">📐</div><div class="node-name">Schemas</div><div class="node-sub">JSON Schema<br>Templates</div></div>
+            <div class="node n-indigo"><div class="node-icon">🔗</div><div class="node-name">Integrations</div><div class="node-sub">LLM · API<br>Workflow</div></div>
+            <div class="node n-indigo"><div class="node-icon">💬</div><div class="node-name">ChatDOC</div><div class="node-sub">Conversations<br>SSE Streaming</div></div>
+            <div class="node n-cyan"><div class="node-icon">🌐</div><div class="node-name">External API</div><div class="node-sub">Token Auth<br>3rd-party</div></div>
+            <div class="node n-gray"><div class="node-icon">📊</div><div class="node-name">Dashboard</div><div class="node-sub">Stats · Logs</div></div>
+            <div class="node n-gray"><div class="node-icon">⚙️</div><div class="node-name">Settings</div><div class="node-sub">OCR · AI<br>Endpoints</div></div>
+          </div>
+        </div>
+
+        <!-- Celery -->
+        <div class="sub-group" style="min-width:160px;max-width:200px;">
+          <div class="sub-group-label">Background Worker</div>
+          <div class="sub-nodes">
+            <div class="node n-amber" style="min-width:160px">
+              <div class="node-icon">⚡</div>
+              <div class="node-name">Celery Worker</div>
+              <div class="node-sub">OCR Task<br>Structure Extract<br>concurrency=4</div>
+              <span class="node-badge b-amber">Async</span>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- DATA LAYER -->
+    <div class="layer layer-data">
+      <div class="layer-label">💾 Data Layer</div>
+      <div class="nodes">
+        <div class="node n-green" style="min-width:160px">
+          <div class="node-icon">🐘</div>
+          <div class="node-name">PostgreSQL</div>
+          <div class="node-sub">Users · Jobs<br>Documents · Chats<br>Integrations</div>
+          <span class="node-badge b-green">Primary DB</span>
+        </div>
+        <div class="node n-rose" style="min-width:160px">
+          <div class="node-icon">🔴</div>
+          <div class="node-name">Redis</div>
+          <div class="node-sub">Task Queue<br>Celery Broker</div>
+          <span class="node-badge b-rose">Queue</span>
+        </div>
+        <div class="node n-teal" style="min-width:160px">
+          <div class="node-icon">🗄️</div>
+          <div class="node-name">MinIO</div>
+          <div class="node-sub">Object Storage<br>PDF · Images</div>
+          <span class="node-badge" style="background:#134e4a;color:#5eead4">S3-Compatible</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- EXTERNAL SERVICES -->
+    <div class="layer layer-ext">
+      <div class="layer-label">☁️ External AI Services (via Gateway)</div>
+      <div class="nodes">
+        <div class="node n-amber" style="min-width:190px">
+          <div class="node-icon">🔍</div>
+          <div class="node-name">OCR Engine</div>
+          <div class="node-sub">/ai-process-file<br>ประมวลผลรูปภาพ/PDF<br>→ ข้อความ</div>
+          <span class="node-badge b-amber">External API</span>
+        </div>
+        <div class="node n-amber" style="min-width:190px">
+          <div class="node-icon">🧠</div>
+          <div class="node-name">Structure Extraction</div>
+          <div class="node-sub">/structured-output<br>OCR text + Schema<br>→ JSON Data</div>
+          <span class="node-badge b-amber">LLM-powered</span>
+        </div>
+        <div class="node n-amber" style="min-width:190px">
+          <div class="node-icon">💡</div>
+          <div class="node-name">Schema Suggestion</div>
+          <div class="node-sub">/suggest-schema<br>วิเคราะห์เอกสาร<br>→ JSON Schema</div>
+          <span class="node-badge b-amber">AI Assistant</span>
+        </div>
+        <div class="node n-amber" style="min-width:190px">
+          <div class="node-icon">🤖</div>
+          <div class="node-name">LLM Integration</div>
+          <div class="node-sub">OpenAI-compatible<br>GPT / Claude / Gemini<br>Ollama / etc.</div>
+          <span class="node-badge b-purple">Multi-Provider</span>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- LEGEND -->
+  <div class="arrow-legend" style="margin-top:20px;">
+    <div style="font-size:11px;font-weight:700;color:#64748b;letter-spacing:1px;text-transform:uppercase;width:100%">Connection Flow</div>
+    <div class="arrow-item"><div class="arrow-line" style="background:#3b82f6"></div> User → Nginx → Backend/Frontend (HTTPS)</div>
+    <div class="arrow-item"><div class="arrow-line" style="background:#22c55e"></div> Backend ↔ PostgreSQL · MinIO (R/W)</div>
+    <div class="arrow-item"><div class="arrow-line" style="background:#ef4444"></div> Backend → Redis → Celery Worker (Queue)</div>
+    <div class="arrow-item"><div class="arrow-line" style="background:#f59e0b;border-top:2px dashed #f59e0b;height:0"></div> Backend / Worker → Gateway → External AI (Egress)</div>
+    <div class="arrow-item"><div class="arrow-line" style="background:#a855f7"></div> Backend → Frontend (SSE Streaming)</div>
+  </div>
+</div>
+
+
+<!-- ════════════════ VIEW 2: DOCUMENT FLOW ════════════════ -->
+<div class="view" id="v-flow">
+  <div class="flow-wrap">
+
+    <!-- Step 1 -->
+    <div class="flow-step">
+      <div class="step-num">
+        <div class="step-circle s1c">1</div>
+        <div class="step-line"></div>
+      </div>
+      <div class="step-body">
+        <div class="step-card s1">
+          <div class="step-title">📤 Upload Document</div>
+          <div class="step-detail">
+            <div class="step-detail-row">ผู้ใช้สร้าง <strong>Job</strong> แล้วอัปโหลดไฟล์ PDF หรือรูปภาพ</div>
+            <div class="step-detail-row">ไฟล์ถูกบันทึกลง <strong>MinIO</strong> (Object Storage)</div>
+            <div class="step-detail-row">สร้าง Document record ใน DB — status: <code style="background:#1e3a8a;padding:1px 5px;border-radius:4px;font-size:10px">uploaded</code></div>
+          </div>
+          <div class="step-items">
+            <span class="step-tag tag-blue">Frontend Upload</span>
+            <span class="step-tag tag-blue">POST /documents/upload</span>
+            <span class="step-tag tag-teal">MinIO Storage</span>
+            <span class="step-tag tag-green">PostgreSQL</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Step 2 -->
+    <div class="flow-step">
+      <div class="step-num">
+        <div class="step-circle s2c">2</div>
+        <div class="step-line"></div>
+      </div>
+      <div class="step-body">
+        <div class="step-card s2">
+          <div class="step-title">🔍 OCR Processing</div>
+          <div class="step-detail">
+            <div class="step-detail-row">Backend enqueue Celery Task → status: <code style="background:#92400e;padding:1px 5px;border-radius:4px;font-size:10px">ocr_processing</code></div>
+            <div class="step-detail-row">Worker ดาวน์โหลดไฟล์จาก MinIO ส่งไปยัง OCR Engine <strong>ทีละหน้า</strong></div>
+            <div class="step-detail-row">บันทึก <strong>ocr_text</strong>, <strong>ocr_pages</strong>, <strong>page_count</strong> → status: <code style="background:#92400e;padding:1px 5px;border-radius:4px;font-size:10px">ocr_completed</code></div>
+          </div>
+          <div class="step-items">
+            <span class="step-tag tag-amber">Celery Worker</span>
+            <span class="step-tag tag-amber">Redis Queue</span>
+            <span class="step-tag tag-amber">External OCR API</span>
+            <span class="step-tag tag-gray">Per-page Processing</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Step 3 -->
+    <div class="flow-step">
+      <div class="step-num">
+        <div class="step-circle s3c">3</div>
+        <div class="step-line"></div>
+      </div>
+      <div class="step-body">
+        <div class="step-card s3">
+          <div class="step-title">🧠 Structure Extraction (AI)</div>
+          <div class="step-detail">
+            <div class="step-detail-row">นำ OCR text + JSON Schema ที่กำหนดไว้ส่งให้ LLM</div>
+            <div class="step-detail-row">LLM แปลงข้อความ → <strong>Structured JSON</strong> ตาม Schema</div>
+            <div class="step-detail-row">Parse/Clean response (รองรับ markdown code block, wrapper fields)</div>
+            <div class="step-detail-row">บันทึก <strong>extracted_data</strong> → status: <code style="background:#3730a3;padding:1px 5px;border-radius:4px;font-size:10px">extraction_completed</code></div>
+          </div>
+          <div class="step-items">
+            <span class="step-tag tag-indigo">LLM API</span>
+            <span class="step-tag tag-indigo">JSON Schema</span>
+            <span class="step-tag tag-indigo">Structure Extract Endpoint</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Step 4 -->
+    <div class="flow-step">
+      <div class="step-num">
+        <div class="step-circle s4c">4</div>
+        <div class="step-line"></div>
+      </div>
+      <div class="step-body">
+        <div class="step-card s4">
+          <div class="step-title">✅ Human Review</div>
+          <div class="step-detail">
+            <div class="step-detail-row">ผู้ใช้ตรวจสอบ extracted_data บน UI เปรียบเทียบกับเอกสารต้นฉบับ</div>
+            <div class="step-detail-row">แก้ไขข้อมูลได้โดยตรง → บันทึกเป็น <strong>reviewed_data</strong></div>
+            <div class="step-detail-row"><strong>Approve</strong> → status: <code style="background:#14532d;padding:1px 5px;border-radius:4px;font-size:10px">reviewed</code></div>
+            <div class="step-detail-row"><strong>Reject</strong> → ส่งกลับไป Reprocess ใหม่ได้</div>
+          </div>
+          <div class="step-items">
+            <span class="step-tag tag-green">Manual Review UI</span>
+            <span class="step-tag tag-green">POST /decision</span>
+            <span class="step-tag tag-rose">Re-process if Rejected</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Step 5 -->
+    <div class="flow-step">
+      <div class="step-num">
+        <div class="step-circle s5c">5</div>
+        <div class="step-line"></div>
+      </div>
+      <div class="step-body">
+        <div class="step-card s5">
+          <div class="step-title">💬 ChatDOC — AI Q&amp;A</div>
+          <div class="step-detail">
+            <div class="step-detail-row">ผู้ใช้เปิด Chat panel ภายใน Job เดียวกัน</div>
+            <div class="step-detail-row">Backend รวม context จากทุก Document (OCR text + reviewed_data)</div>
+            <div class="step-detail-row">ส่งพร้อม prompt ไปยัง LLM Integration ที่เลือก → <strong>Stream SSE</strong> กลับ</div>
+            <div class="step-detail-row">บันทึก conversation history (ChatConversation / ChatMessage)</div>
+          </div>
+          <div class="step-items">
+            <span class="step-tag tag-pink">SSE Streaming</span>
+            <span class="step-tag tag-pink">Multi-doc Context</span>
+            <span class="step-tag tag-pink">Conversation History</span>
+            <span class="step-tag tag-pink">Thai / English</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Step 6 -->
+    <div class="flow-step">
+      <div class="step-num">
+        <div class="step-circle s6c">6</div>
+        <div class="step-line"></div>
+      </div>
+      <div class="step-body">
+        <div class="step-card s6">
+          <div class="step-title">🔗 Integration &amp; Output</div>
+          <div class="step-detail">
+            <div class="step-detail-row"><strong>LLM Integration</strong> — ส่ง document context ให้ LLM วิเคราะห์เพิ่มเติม (streaming)</div>
+            <div class="step-detail-row"><strong>API Integration</strong> — Push ข้อมูลออกไปยัง Webhook / External API</div>
+            <div class="step-detail-row"><strong>Workflow Integration</strong> — Trigger automation pipeline</div>
+          </div>
+          <div class="step-items">
+            <span class="step-tag tag-teal">LLM · API · Workflow</span>
+            <span class="step-tag tag-teal">Streaming SSE</span>
+            <span class="step-tag tag-teal">Result Stored</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Step 7 -->
+    <div class="flow-step step-last">
+      <div class="step-num">
+        <div class="step-circle s7c">7</div>
+        <div class="step-line"></div>
+      </div>
+      <div class="step-body">
+        <div class="step-card s7">
+          <div class="step-title">🌐 External API Access</div>
+          <div class="step-detail">
+            <div class="step-detail-row">ระบบภายนอก เรียก InsightDOC ผ่าน <strong>API Token</strong> โดยตรง</div>
+            <div class="step-detail-row">สร้าง Job · Upload Document · Trigger Process · ดึงผลลัพธ์</div>
+            <div class="step-detail-row">รองรับ Integration กับ RPA / ERP / ระบบ Enterprise อื่นๆ</div>
+          </div>
+          <div class="step-items">
+            <span class="step-tag tag-purple">API Token Auth</span>
+            <span class="step-tag tag-purple">POST /external/jobs</span>
+            <span class="step-tag tag-purple">GET /external/documents</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+
+<!-- ════════════════ VIEW 3: INTEGRATIONS ════════════════ -->
+<div class="view" id="v-integ">
+
+  <div style="max-width:1100px;margin:0 auto;">
+    <div class="section-label" style="margin-bottom:16px">🔗 Integration Types</div>
+    <div class="integ-grid">
+
+      <div class="integ-card" style="background:#172554;border-color:#3b82f6">
+        <div class="integ-title" style="color:#93c5fd">🤖 LLM Integration</div>
+        <div class="integ-body">
+          เชื่อมต่อ LLM Provider แบบ OpenAI-compatible<br><br>
+          <strong style="color:#cbd5e1">Providers:</strong> GPT-4o · Claude · Gemini · Ollama · DeepSeek · ฯลฯ<br><br>
+          <strong style="color:#cbd5e1">ใช้สำหรับ:</strong><br>
+          · วิเคราะห์เอกสาร (Send LLM)<br>
+          · ChatDOC (Q&amp;A)<br>
+          · Streaming response (SSE)<br>
+          · Reasoning model support
+        </div>
+      </div>
+
+      <div class="integ-card" style="background:#2d0a1e;border-color:#ec4899">
+        <div class="integ-title" style="color:#f9a8d4">🔌 API Integration</div>
+        <div class="integ-body">
+          ส่งข้อมูลออกไปยัง External API Endpoint<br><br>
+          <strong style="color:#cbd5e1">Use case:</strong><br>
+          · Push reviewed data ไป ERP / CRM<br>
+          · Webhook notification<br>
+          · บันทึก Integration Result ลง DB<br>
+          · รองรับ custom headers &amp; auth
+        </div>
+      </div>
+
+      <div class="integ-card" style="background:#042f2e;border-color:#14b8a6">
+        <div class="integ-title" style="color:#5eead4">⚡ Workflow Integration</div>
+        <div class="integ-body">
+          Trigger automation pipeline ภายนอก<br><br>
+          <strong style="color:#cbd5e1">Use case:</strong><br>
+          · เชื่อม n8n / Zapier / Make<br>
+          · RPA pipeline trigger<br>
+          · Event-driven processing<br>
+          · Multi-step automation
+        </div>
+      </div>
+
+    </div>
+
+    <hr class="divider">
+
+    <div class="section-label" style="margin-bottom:16px">☁️ External AI Endpoints (Settings)</div>
+    <div class="integ-grid">
+
+      <div class="integ-card" style="background:#2d1f08;border-color:#f59e0b">
+        <div class="integ-title" style="color:#fcd34d">🔍 OCR Engine</div>
+        <div class="integ-body">
+          <code style="background:#92400e;padding:2px 6px;border-radius:4px;font-size:10px">/ai-process-file</code><br><br>
+          รับไฟล์ PDF/Image ทีละหน้า<br>
+          คืนค่า OCR text + confidence score<br>
+          เรียกผ่าน Celery Worker (async)
+        </div>
+      </div>
+
+      <div class="integ-card" style="background:#2d1f08;border-color:#f59e0b">
+        <div class="integ-title" style="color:#fcd34d">🧠 Structure Extraction</div>
+        <div class="integ-body">
+          <code style="background:#92400e;padding:2px 6px;border-radius:4px;font-size:10px">/structured-output</code><br><br>
+          รับ OCR text + JSON Schema<br>
+          คืนค่า structured JSON data<br>
+          LLM-powered extraction
+        </div>
+      </div>
+
+      <div class="integ-card" style="background:#2d1f08;border-color:#f59e0b">
+        <div class="integ-title" style="color:#fcd34d">💡 Schema Suggestion</div>
+        <div class="integ-body">
+          <code style="background:#92400e;padding:2px 6px;border-radius:4px;font-size:10px">/suggest-schema</code><br><br>
+          รับตัวอย่างเอกสาร<br>
+          AI แนะนำ JSON Schema อัตโนมัติ<br>
+          ช่วยสร้าง Schema ได้เร็วขึ้น
+        </div>
+      </div>
+
+    </div>
+
+    <hr class="divider">
+
+    <div class="section-label" style="margin-bottom:16px">📊 Data Flow Summary</div>
+    <div style="background:#1e293b;border-radius:14px;padding:20px 24px;border:1.5px solid #334155;">
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;">
+        <div>
+          <div style="font-size:11px;font-weight:700;color:#64748b;letter-spacing:1px;text-transform:uppercase;margin-bottom:8px">Document Status Flow</div>
+          <div style="display:flex;flex-direction:column;gap:5px;font-size:12px;">
+            <span>📥 <code style="background:#1e3a8a;padding:1px 6px;border-radius:4px">uploaded</code></span>
+            <span style="color:#334155;margin-left:8px">↓ Celery Task</span>
+            <span>⚙️ <code style="background:#92400e;padding:1px 6px;border-radius:4px">ocr_processing</code></span>
+            <span style="color:#334155;margin-left:8px">↓ OCR API</span>
+            <span>✅ <code style="background:#92400e;padding:1px 6px;border-radius:4px">ocr_completed</code></span>
+            <span style="color:#334155;margin-left:8px">↓ LLM Extract</span>
+            <span>🧠 <code style="background:#3730a3;padding:1px 6px;border-radius:4px">extraction_completed</code></span>
+            <span style="color:#334155;margin-left:8px">↓ Human Review</span>
+            <span>✅ <code style="background:#14532d;padding:1px 6px;border-radius:4px">reviewed</code></span>
+          </div>
+        </div>
+        <div>
+          <div style="font-size:11px;font-weight:700;color:#64748b;letter-spacing:1px;text-transform:uppercase;margin-bottom:8px">Security Design</div>
+          <div style="font-size:12px;color:#94a3b8;line-height:1.8;">
+            🛡️ Nginx SSL termination<br>
+            🔒 Internal network isolation<br>
+            🛡️ Gateway = egress-only proxy<br>
+            🔑 JWT + API Token auth<br>
+            🚫 MinIO ไม่ expose ออกนอก<br>
+            🚫 DB/Redis ไม่ expose ออกนอก
+          </div>
+        </div>
+        <div>
+          <div style="font-size:11px;font-weight:700;color:#64748b;letter-spacing:1px;text-transform:uppercase;margin-bottom:8px">Memory Limits</div>
+          <div style="font-size:12px;color:#94a3b8;line-height:1.8;">
+            🔀 Nginx: 256 MB<br>
+            🐍 Backend: 1 GB<br>
+            ⚡ Celery Worker: 2 GB<br>
+            🖥️ Frontend: 512 MB<br>
+            🐘 PostgreSQL: 1 GB<br>
+            🔴 Redis: 256 MB<br>
+            🗄️ MinIO: 1 GB
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+function show(id, btn) {
+  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.getElementById('v-' + id).classList.add('active');
+  btn.classList.add('active');
+}
+</script>
+</body>
+</html>

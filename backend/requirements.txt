@@ -22,3 +22,7 @@ Pillow
 email-validator
 boto3
 httpx
+docker
+pytest
+pytest-asyncio
+pyyaml
