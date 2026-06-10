@@ -51,3 +51,49 @@ Date: 2026-03-30
 - `scripts/services.sh rebuild all` now restarts `nginx` and waits for health checks, preventing stale upstream IPs from causing `502 Bad Gateway` after container recreation.
 - Local HTTPS still uses a self-signed certificate, so local `curl` verification used `-k`.
 - Long-running integration calls initially hit the default `nginx` `proxy_read_timeout` of 60 seconds and surfaced as `504 Gateway Timeout` even though the backend job completed successfully. Added longer `nginx` timeouts for integration send routes and re-verified the full `Comply TOR` flow successfully.
+
+---
+
+Date: 2026-06-10
+
+## Manual Verification - AI-Assisted Schema Suggestion
+
+1. Static checks
+   - Ran `python3 -m py_compile backend/app/initial_ai_settings.py backend/app/services/ai_suggestion_service.py backend/app/api/v1/endpoints/schemas.py`.
+
+2. Rebuild and runtime
+   - Ran `docker compose up -d --build --no-deps backend celery_worker`.
+   - Confirmed backend startup log includes `Synced default AI setting: Softnix GenAI`.
+
+3. AI settings sync
+   - Confirmed runtime `AI_PROVIDER_URL` and default `ai_settings` URL both point to `https://genai.softnix.ai/external/api/completion-messages`.
+   - Confirmed the runtime env key and DB default provider key hashes match, without printing the secret.
+
+4. AI provider check
+   - Ran `AISuggestionService.test_ai_connection()` inside the backend container.
+   - After rotating `AI_PROVIDER_KEY`, confirmed the runtime env key and DB default provider key hashes match.
+   - Confirmed `POST /api/v1/ai-settings/suggest-fields` through `localhost:3000` returns `200` with suggested fields `invoice_number`, `date`, and `total`.
+   - Confirmed JSON Schema responses from the AI provider are normalized to snake_case names and mapped to app field types such as `date` and `currency`.
+
+---
+
+Date: 2026-06-10
+
+## Manual Verification - Document Processing Queue
+
+1. Redis/Celery auth
+   - Found Celery and backend were using `redis://redis:6379/0` while Redis requires authentication.
+   - Updated Docker Compose so backend and celery worker receive a password-authenticated `REDIS_URL` from `REDIS_PASSWORD`.
+   - Recreated backend and celery worker.
+   - Confirmed backend sees a Redis URL with `redis_has_password=True` without printing the password.
+   - Confirmed celery worker logs show `Connected to redis://:**@redis:6379/0` and `ready`.
+
+2. Process endpoint
+   - Retested `POST /api/v1/documents/{document_id}/process` through `localhost:3000`.
+   - Confirmed it returns `200` with a Celery `task_id`, so the previous `Failed to start processing` queue error is fixed.
+
+3. OCR provider auth
+   - After updating Settings `api_token`, confirmed `GET https://111.223.37.41:9001/me` returns `200` with active OCR/AI processing scopes.
+   - Retested `POST /api/v1/documents/{document_id}/process` through `localhost:3000`; it returned `200` with a Celery `task_id`.
+   - Confirmed the background task progressed through OCR and structured extraction.
+   - Confirmed `GET /api/v1/documents/{document_id}/task-status` returns `status=extraction_completed`, `page_count=1`, no processing error, and extracted data.

@@ -7,6 +7,7 @@ and updates the request scope with the correct client information.
 
 import logging
 from typing import Callable
+from urllib.parse import urlsplit
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
@@ -80,5 +81,14 @@ class ProxyHeaderMiddleware(BaseHTTPMiddleware):
 
         # Process the request
         response = await call_next(request)
+
+        location = response.headers.get("location")
+        if location:
+            parsed = urlsplit(location)
+            if parsed.hostname in {"backend", "localhost", "127.0.0.1"} and parsed.path.startswith("/api/"):
+                relative_location = parsed.path
+                if parsed.query:
+                    relative_location = f"{relative_location}?{parsed.query}"
+                response.headers["location"] = relative_location
 
         return response

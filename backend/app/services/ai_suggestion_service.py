@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 from typing import List, Dict, Any, Optional
 import httpx
 from sqlalchemy.orm import Session
@@ -162,10 +163,10 @@ class AISuggestionService:
                         for field_name, field_schema in properties.items():
                             # Map JSON Schema types to our types
                             json_type = field_schema.get("type", "string")
-                            field_type = self._map_json_schema_type(json_type)
+                            field_type = self._map_json_schema_type(json_type, field_schema.get("format"), field_schema)
 
                             suggested_fields.append(SuggestedField(
-                                name=field_name,
+                                name=self._to_snake_case(field_name),
                                 type=field_type,
                                 description=field_schema.get("description", ""),
                                 required=field_name in required_fields,
@@ -200,9 +201,9 @@ class AISuggestionService:
                 except json.JSONDecodeError as e:
                     logger.warning(f"Could not parse AI response as JSON: {e}")
 
-            # Fallback: If no structured data found, return empty list
-            # In production, you might want to have better parsing logic
-            # based on your specific AI provider's response format
+            if not suggested_fields:
+                suggested_fields.extend(self._parse_labeled_answer(answer))
+
             if not suggested_fields:
                 logger.warning("No structured fields found in AI response")
 
@@ -211,25 +212,90 @@ class AISuggestionService:
 
         return suggested_fields
 
-    def _map_json_schema_type(self, json_type: str) -> str:
-        """
-        Map JSON Schema types to our field types
+    def _parse_labeled_answer(self, answer: str) -> List[SuggestedField]:
+        fields: List[SuggestedField] = []
+        seen: set[str] = set()
 
-        Args:
-            json_type: JSON Schema type (string, number, integer, boolean)
+        for raw_line in answer.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            line = re.sub(r"^[-*\d.\)\s]+", "", line).strip()
+            line = line.replace("**", "").replace("__", "").strip()
+            if ":" in line:
+                label, value = line.split(":", 1)
+            else:
+                invoice_match = re.fullmatch(r"(?i)(invoice)\s*#\s*(.+)", line)
+                if not invoice_match:
+                    continue
+                label = "Invoice Number"
+                value = invoice_match.group(2)
+            label = label.strip(" -–—	")
+            value = value.strip()
+            if not label or len(label) > 80:
+                continue
 
-        Returns:
-            Our field type (text, number, date, currency, boolean)
-        """
-        type_mapping = {
-            "string": "text",
-            "number": "number",
-            "integer": "number",
-            "boolean": "boolean",
-            "date": "date",
-            "date-time": "date"
-        }
-        return type_mapping.get(json_type, "text")
+            field_name = self._to_snake_case(label)
+            if not field_name or field_name in seen:
+                continue
+            seen.add(field_name)
+
+            fields.append(SuggestedField(
+                name=field_name,
+                type=self._infer_field_type(label, value),
+                description=f"Extract the {label} from the document.",
+                required=False,
+                confidence=0.7,
+                example_value=value or None,
+            ))
+
+        return fields
+
+    def _to_snake_case(self, value: str) -> str:
+        value = re.sub(r"(.)([A-Z][a-z]+)", r"\1_\2", value)
+        value = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", value)
+        value = re.sub(r"[^A-Za-z0-9]+", "_", value).strip("_").lower()
+        return re.sub(r"_+", "_", value)
+
+    def _infer_field_type(self, label: str, value: str) -> str:
+        text = f"{label} {value}".lower()
+        if any(word in text for word in ["date", "วันที่"]):
+            return "date"
+        if any(symbol in value for symbol in ["$", "฿", "€", "£"]):
+            return "currency"
+        if any(word in text for word in ["amount", "total", "price", "cost", "ยอด", "ราคา"]):
+            return "currency"
+        normalized = value.replace(",", "").strip()
+        if normalized and re.fullmatch(r"[-+]?\d+(\.\d+)?", normalized):
+            return "number"
+        if normalized.lower() in {"true", "false", "yes", "no"}:
+            return "boolean"
+        return "text"
+
+    def _map_json_schema_type(
+        self,
+        json_type: str,
+        json_format: Optional[str] = None,
+        field_schema: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """Map JSON Schema types to field types used by the app."""
+        if isinstance(json_type, list):
+            json_type = next((item for item in json_type if item != "null"), "string")
+
+        if json_format in {"date", "date-time"}:
+            return "date"
+        if json_type in {"number", "integer"}:
+            return "number"
+        if json_type == "boolean":
+            return "boolean"
+        if json_type == "array":
+            return "array"
+
+        schema_text = json.dumps(field_schema or {}, ensure_ascii=False).lower()
+        if any(token in schema_text for token in ["currency", "amount", "total", "price", "ยอด", "ราคา"]):
+            return "currency"
+
+        return "text"
 
     async def test_ai_connection(self, provider_name: Optional[str] = None) -> Dict[str, Any]:
         """

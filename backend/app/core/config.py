@@ -34,6 +34,8 @@ class Settings(BaseSettings):
     AWS_BUCKET_NAME: Optional[str] = None
     # AI
     OPENAI_API_KEY: str = "" # Set via env var
+    AI_PROVIDER_URL: Optional[str] = None
+    AI_PROVIDER_KEY: Optional[str] = None
     OCR_ENDPOINT: Optional[str] = None
     TEST_ENDPOINT: Optional[str] = None
 
@@ -48,5 +50,6 @@ class Settings(BaseSettings):
     class Config:
         case_sensitive = True
         env_file = ".env"
+        extra = "ignore"
 
 settings = Settings()

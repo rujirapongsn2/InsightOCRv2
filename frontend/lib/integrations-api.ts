@@ -5,7 +5,8 @@
 
 import { getApiBaseUrl, handleAuthError } from "./api"
 
-const API_BASE = getApiBaseUrl()
+const apiUrl = (path: string): string => `${getApiBaseUrl()}${path}`
+
 
 export interface IntegrationConfig {
   method?: "POST" | "PUT"
@@ -57,7 +58,7 @@ export async function getIntegrations(
   token: string,
   status?: "active" | "paused"
 ): Promise<{ integrations: Integration[]; total: number }> {
-  const url = new URL(`${API_BASE}/integrations`)
+  const url = new URL(apiUrl("/integrations"), window.location.origin)
   if (status) {
     url.searchParams.set("status", status)
   }
@@ -81,7 +82,7 @@ export async function getIntegrations(
  * Get all active integrations for the current user
  */
 export async function getActiveIntegrations(token: string): Promise<Integration[]> {
-  const response = await fetch(`${API_BASE}/integrations/active`, {
+  const response = await fetch(apiUrl("/integrations/active"), {
     headers: {
       Authorization: `Bearer ${token}`,
       "Content-Type": "application/json",
@@ -100,7 +101,7 @@ export async function getActiveIntegrations(token: string): Promise<Integration[
  * Get a specific integration by ID
  */
 export async function getIntegration(token: string, id: string): Promise<Integration> {
-  const response = await fetch(`${API_BASE}/integrations/${id}`, {
+  const response = await fetch(apiUrl(`/integrations/${id}`), {
     headers: {
       Authorization: `Bearer ${token}`,
       "Content-Type": "application/json",
@@ -122,7 +123,7 @@ export async function createIntegration(
   token: string,
   data: IntegrationCreate
 ): Promise<Integration> {
-  const response = await fetch(`${API_BASE}/integrations`, {
+  const response = await fetch(apiUrl("/integrations"), {
     method: "POST",
     headers: {
       Authorization: `Bearer ${token}`,
@@ -148,7 +149,7 @@ export async function updateIntegration(
   id: string,
   data: IntegrationUpdate
 ): Promise<Integration> {
-  const response = await fetch(`${API_BASE}/integrations/${id}`, {
+  const response = await fetch(apiUrl(`/integrations/${id}`), {
     method: "PUT",
     headers: {
       Authorization: `Bearer ${token}`,
@@ -170,7 +171,7 @@ export async function updateIntegration(
  * Delete an integration
  */
 export async function deleteIntegration(token: string, id: string): Promise<void> {
-  const response = await fetch(`${API_BASE}/integrations/${id}`, {
+  const response = await fetch(apiUrl(`/integrations/${id}`), {
     method: "DELETE",
     headers: {
       Authorization: `Bearer ${token}`,

@@ -1,3 +1,6 @@
+import logging
+import os
+import tempfile
 from typing import List, Any
 from urllib.parse import urlparse, urlencode
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status
@@ -13,10 +16,13 @@ from app.models.setting import Setting
 from app.schemas.schema import DocumentSchema as DocumentSchemaSchema
 from app.schemas.schema import DocumentSchemaCreate, DocumentSchemaUpdate
 from app.models.user import User
+from app.services.ai_suggestion_service import AISuggestionService
+from app.services.ocr import process_ocr
 from app.services.schema_suggestion_service import SchemaSuggestionService
 from app.utils.activity_logger import log_activity, Actions
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 def _normalize_role(role: str | None) -> str:
     if not role:
@@ -124,6 +130,7 @@ async def suggest_schema_from_file(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Uploaded file is empty")
 
     service = SchemaSuggestionService(db)
+    legacy_error: Exception | None = None
     try:
         result = service.suggest_from_file(
             file_bytes=file_bytes,
@@ -131,15 +138,126 @@ async def suggest_schema_from_file(
             content_type=file.content_type,
             document_type=document_type,
         )
+        if result.get("suggested_fields"):
+            return result
+        legacy_error = ValueError("Schema suggestion API returned no fields")
     except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+        legacy_error = exc
+    except Exception as exc:
+        legacy_error = exc
+
+    logger.warning("Legacy schema suggestion failed; falling back to OCR + AI provider: %s", legacy_error)
+
+    suffix = os.path.splitext(file.filename)[1]
+    tmp_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
+            tmp_file.write(file_bytes)
+            tmp_path = tmp_file.name
+
+        ocr_result = process_ocr(tmp_path, db, filename=file.filename, mime_type=file.content_type)
+        ocr_content = _extract_ocr_content(ocr_result)
+        if not ocr_content:
+            raise ValueError("No text could be extracted from the document")
+
+        ai_service = AISuggestionService(db)
+        suggestion = await ai_service.suggest_fields_from_ocr(
+            ocr_content=ocr_content,
+            document_type=document_type,
+        )
+
+        suggested_fields = [
+            {
+                "name": field.name,
+                "type": field.type,
+                "description": field.description,
+                "required": False,
+                "confidence": field.confidence,
+                "example_value": field.example_value,
+            }
+            for field in suggestion.suggested_fields
+        ]
+
+        if not suggested_fields:
+            raise ValueError("AI provider returned no field suggestions")
+
+        return {
+            "schema": _fields_to_schema(suggested_fields),
+            "suggested_fields": suggested_fields,
+            "raw_result": {
+                "source": "ocr_ai_provider",
+                "provider_used": suggestion.provider_used,
+                "confidence_score": suggestion.confidence_score,
+                "document_preview": suggestion.document_preview,
+                "legacy_error": str(legacy_error) if legacy_error else None,
+            },
+        }
+    except ValueError as exc:
+        detail = str(exc)
+        if legacy_error:
+            detail = f"{detail} (legacy schema suggestion also failed: {legacy_error})"
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail)
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Schema suggestion request failed: {str(exc)}",
         )
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                logger.warning("Failed to remove temporary schema suggestion file: %s", tmp_path)
 
-    return result
+
+def _extract_ocr_content(ocr_result: dict[str, Any]) -> str:
+    if ocr_result.get("status") != "success":
+        return ""
+
+    chunks: list[str] = []
+    pages = ocr_result.get("results", {}).get("pages", [])
+    for page in pages:
+        ai_processing = page.get("ai_processing") or {}
+        if ai_processing.get("success") and ai_processing.get("content"):
+            chunks.append(str(ai_processing["content"]))
+        elif page.get("ocr_text"):
+            chunks.append(str(page["ocr_text"]))
+
+    return "\n\n".join(chunk.strip() for chunk in chunks if chunk and chunk.strip())
+
+
+def _fields_to_schema(fields: list[dict[str, Any]]) -> dict[str, Any]:
+    properties: dict[str, Any] = {}
+    required: list[str] = []
+
+    for field in fields:
+        name = field["name"]
+        properties[name] = {
+            "type": _field_type_to_json_schema(field.get("type")),
+            "description": field.get("description", ""),
+        }
+        if field.get("example_value") is not None:
+            properties[name]["example"] = field["example_value"]
+        if field.get("required"):
+            required.append(name)
+
+    schema: dict[str, Any] = {
+        "type": "object",
+        "properties": properties,
+    }
+    if required:
+        schema["required"] = required
+    return schema
+
+
+def _field_type_to_json_schema(field_type: str | None) -> str:
+    if field_type in {"number", "currency"}:
+        return "number"
+    if field_type == "boolean":
+        return "boolean"
+    if field_type == "array":
+        return "array"
+    return "string"
 
 class ImportSchemaRequest(BaseModel):
     json_schema: str  # Raw JSON text from user

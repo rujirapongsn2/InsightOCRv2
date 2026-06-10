@@ -126,7 +126,7 @@ export default function ActivityLogsPage() {
             })
             if (actionFilter) params.set("action", actionFilter)
 
-            const res = await fetch(`${apiBase}/activity-logs?${params}`, {
+            const res = await fetch(`${apiBase}/activity-logs/?${params}`, {
                 headers: token ? { Authorization: `Bearer ${token}` } : undefined,
             })
             if (res.ok) {

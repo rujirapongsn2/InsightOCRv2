@@ -8,7 +8,7 @@ def init_db(db: Session) -> None:
     # Create tables if they don't exist
     Base.metadata.create_all(bind=engine)
     
-    user = db.query(User).filter(User.email == "admin@example.com").first()
+    user = db.query(User).filter(User.is_superuser.is_(True)).first()
     if not user:
         user = User(
             email="admin@example.com",
