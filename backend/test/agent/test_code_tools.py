@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from app.agent.context import AgentContext
-from app.agent.tools.code_tools import _execute_python_handler
+from app.agent.tools.code_tools import _execute_python_handler, _run_report_code_handler, _normalize_report_path
 
 pytestmark = pytest.mark.asyncio
 
@@ -85,3 +85,68 @@ class TestExecutePython:
             mock_exec.return_value = {"error": "Sandbox unavailable: docker package not installed"}
             result = await _execute_python_handler({"code": "pass"}, ctx)
         assert "error" in result
+
+
+class TestRunReportCode:
+    async def test_normalize_report_path(self):
+        assert _normalize_report_path("report") == "outputs/report.html"
+        assert _normalize_report_path("jobs/job-1/outputs/a.html") == "outputs/a.html"
+        assert _normalize_report_path("outputs/a") == "outputs/a.html"
+        assert _normalize_report_path("../a.html") == ""
+        assert _normalize_report_path("tmp/a.html") == ""
+
+    async def test_syntax_error_rejected_before_sandbox(self):
+        ctx = _make_context()
+        result = await _run_report_code_handler(
+            {"code": "if True print('bad')", "inputs": {}, "output_path": "outputs/report.html"},
+            ctx,
+        )
+        assert result["error"] == "Syntax check failed"
+
+    async def test_inputs_must_be_dict(self):
+        ctx = _make_context()
+        result = await _run_report_code_handler(
+            {"code": "result = {}", "inputs": [], "output_path": "outputs/report.html"},
+            ctx,
+        )
+        assert "inputs must be a dict" in result["error"]
+
+    async def test_execution_error_returned(self):
+        ctx = _make_context()
+        with patch("app.agent.tools.code_tools.execute_python") as mock_exec:
+            mock_exec.return_value = {"error": {"type": "NameError", "message": "name docs is not defined"}, "stdout": "trace"}
+            result = await _run_report_code_handler(
+                {"code": "result = docs", "inputs": {"documents": []}, "output_path": "outputs/report.html"},
+                ctx,
+            )
+        assert result["error"] == "Report code execution failed"
+        assert result["execution_error"]["type"] == "NameError"
+
+    async def test_invalid_result_rejected(self):
+        ctx = _make_context()
+        with patch("app.agent.tools.code_tools.execute_python") as mock_exec:
+            mock_exec.return_value = {"result": {"ok": True, "html": "not html"}, "error": None}
+            result = await _run_report_code_handler(
+                {"code": "result = {'ok': True, 'html': 'not html'}", "inputs": {}, "output_path": "outputs/report.html"},
+                ctx,
+            )
+        assert result["error"] == "Report result validation failed"
+
+    async def test_success_writes_html(self):
+        ctx = _make_context()
+        html = "<!doctype html><html><body>ok</body></html>"
+        with patch("app.agent.tools.code_tools.execute_python") as mock_exec, \
+             patch("app.agent.tools.code_tools.get_storage_service") as mock_storage:
+            mock_exec.return_value = {
+                "result": {"ok": True, "html": html, "summary": {"status": "ok"}, "rules": [{"id": "R1"}]},
+                "error": None,
+            }
+            result = await _run_report_code_handler(
+                {"code": "result = {'ok': True, 'html': '<html></html>'}", "inputs": {}, "output_path": "jobs/abc/outputs/report.html"},
+                ctx,
+            )
+        assert result["ok"] is True
+        assert result["path"] == "outputs/report.html"
+        assert result["rule_count"] == 1
+        mock_storage.return_value.upload_file.assert_called_once()
+        assert mock_storage.return_value.upload_file.call_args.kwargs["content_type"] == "text/html; charset=utf-8"

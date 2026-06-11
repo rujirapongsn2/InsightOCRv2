@@ -573,7 +573,7 @@ export default function IntegrationsPage() {
                     <div className="space-y-4">
                         {formState.type === "llm" && (
                             <div className="space-y-4 p-4 bg-slate-50 rounded-lg border">
-                                <div className="text-sm font-semibold text-slate-700">OpenAI Responses API Settings</div>
+                                <div className="text-sm font-semibold text-slate-700">LLM API Settings</div>
                                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                                     <div className="space-y-2">
                                         <label className="text-sm font-medium">API Key *</label>
@@ -594,37 +594,20 @@ export default function IntegrationsPage() {
                                             onChange={(e) => setFormState({ ...formState, baseUrl: e.target.value })}
                                             disabled={isUser}
                                         />
-                                        <p className="text-xs text-slate-500">Leave empty for OpenAI. Use custom URL for Azure, Groq, local LLMs, etc.</p>
+                                        <p className="text-xs text-slate-500">Leave empty for OpenAI. Use provider base URL such as https://openrouter.ai/api/v1. Do not include /responses or /chat/completions; InsightDOC will normalize it if present.</p>
                                     </div>
                                 </div>
                                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                                     <div className="space-y-2">
                                         <label className="text-sm font-medium">Model *</label>
-                                        <select
-                                            className="flex h-10 w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm"
+                                        <Input
+                                            placeholder="gpt-4o-mini, openai/gpt-4o-mini, anthropic/claude-..."
                                             value={formState.model}
                                             onChange={(e) => setFormState({ ...formState, model: e.target.value })}
                                             disabled={isUser}
-                                            title="Select LLM Model"
                                             required
-                                        >
-                                            <option value="">Select a model...</option>
-                                            <optgroup label="GPT-4o">
-                                                <option value="gpt-4o">gpt-4o</option>
-                                                <option value="gpt-4o-mini">gpt-4o-mini</option>
-                                            </optgroup>
-                                            <optgroup label="GPT-4">
-                                                <option value="gpt-4-turbo">gpt-4-turbo</option>
-                                                <option value="gpt-4">gpt-4</option>
-                                            </optgroup>
-                                            <optgroup label="GPT-3.5">
-                                                <option value="gpt-3.5-turbo">gpt-3.5-turbo</option>
-                                                <option value="gpt-3.5-turbo-0125">gpt-3.5-turbo-0125</option>
-                                            </optgroup>
-                                            <optgroup label="GPT-5 (Preview)">
-                                                <option value="gpt-5-mini">gpt-5-mini</option>
-                                            </optgroup>
-                                        </select>
+                                        />
+                                        <p className="text-xs text-slate-500">Use the exact model id from your provider.</p>
                                     </div>
                                     <div className="space-y-2">
                                         <label className="text-sm font-medium">Reasoning Effort</label>
@@ -744,7 +727,7 @@ export default function IntegrationsPage() {
                                 <div className="space-y-3 pt-4 border-t">
                                     <div className="text-sm font-semibold text-slate-700">Test Connection</div>
                                     <p className="text-xs text-slate-500">
-                                        Sends only <span className="font-mono">hello</span> to verify connectivity.
+                                        Sends a minimal prompt and automatically tries Responses API first, then Chat Completions for compatible providers.
                                     </p>
                                     <Button
                                         type="button"
@@ -767,7 +750,8 @@ export default function IntegrationsPage() {
                                                         apiKey: formState.apiKey,
                                                         baseUrl: formState.baseUrl || undefined,
                                                         model: formState.model,
-                                                        reasoningEffort: formState.reasoningEffort
+                                                        reasoningEffort: formState.reasoningEffort,
+                                                        instructions: formState.instructions
                                                     })
                                                 })
                                                 handleAuthError(response)

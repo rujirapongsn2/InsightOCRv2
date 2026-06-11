@@ -24,6 +24,7 @@ from app.models.agent_pending_action import AgentPendingAction
 from app.initial_data import init_db
 from app.initial_templates import init_system_templates
 from app.initial_ai_settings import init_ai_settings
+from app.initial_agent_skills import ensure_system_agent_skills
 from sqlalchemy import text
 
 # Create tables on startup
@@ -110,17 +111,33 @@ def ensure_ai_settings():
     finally:
         db.close()
 
-def ensure_sandbox_ready():
-    """Pre-pull the Docker sandbox image at startup so it's ready when agent needs it."""
+def ensure_agent_skills():
     try:
-        from app.services.code_sandbox import ensure_sandbox_image
-        ensure_sandbox_image()
+        ensure_system_agent_skills()
     except Exception:
-        pass  # Sandbox is optional — agent handles missing image gracefully
+        pass  # Skills are optional; the API should still start if discovery fails.
+
+def ensure_sandbox_ready():
+    """Warm up the Docker sandbox image without blocking API startup."""
+    import threading
+
+    def _warm_sandbox_image():
+        try:
+            from app.services.code_sandbox import ensure_sandbox_image
+            ensure_sandbox_image()
+        except Exception:
+            pass  # Sandbox is optional; agent handles missing image gracefully.
+
+    threading.Thread(
+        target=_warm_sandbox_image,
+        name="sandbox-image-warmup",
+        daemon=True,
+    ).start()
 
 ensure_seed_user()
 ensure_system_templates()
 ensure_ai_settings()
+ensure_agent_skills()
 ensure_sandbox_ready()
 
 app = FastAPI(

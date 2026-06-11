@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, Depends, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Literal
 from uuid import UUID
 from openai import OpenAI
 
@@ -48,6 +48,100 @@ def _supports_reasoning(model: str) -> bool:
         return False
     m = model.lower()
     return m.startswith("o1") or m.startswith("o3") or m.startswith("o4")
+
+
+LLMMode = Literal["responses", "chat"]
+
+
+def _normalize_llm_base_url(base_url: Optional[str]) -> tuple[Optional[str], Optional[LLMMode]]:
+    """Accept either an OpenAI-compatible base URL or a full endpoint URL."""
+    if not base_url or not base_url.strip():
+        return None, None
+
+    normalized = base_url.strip().rstrip("/")
+    lower = normalized.lower()
+
+    if lower.endswith("/chat/completions"):
+        return normalized[: -len("/chat/completions")], "chat"
+    if lower.endswith("/responses"):
+        return normalized[: -len("/responses")], "responses"
+
+    return normalized, None
+
+
+def _build_openai_client(api_key: str, base_url: Optional[str]) -> OpenAI:
+    client_kwargs: Dict[str, Any] = {"api_key": api_key}
+    if base_url:
+        client_kwargs["base_url"] = base_url
+    return OpenAI(**client_kwargs)
+
+
+def _is_not_found_error(error: Exception) -> bool:
+    status_code = getattr(error, "status_code", None)
+    return status_code == 404 or "404" in str(error)
+
+
+def _call_responses_api(
+    client: OpenAI,
+    model: str,
+    input_text: str,
+    instructions: Optional[str] = None,
+    reasoning_effort: str = "low",
+) -> str:
+    create_params: Dict[str, Any] = {
+        "model": model,
+        "input": input_text,
+    }
+    if instructions and instructions.strip():
+        create_params["instructions"] = instructions.strip()
+    if _supports_reasoning(model):
+        create_params["reasoning"] = {"effort": reasoning_effort}
+
+    response = client.responses.create(**create_params)
+    return response.output_text if hasattr(response, "output_text") else str(response)
+
+
+def _call_chat_completions_api(
+    client: OpenAI,
+    model: str,
+    input_text: str,
+    instructions: Optional[str] = None,
+) -> str:
+    messages: List[Dict[str, str]] = []
+    if instructions and instructions.strip():
+        messages.append({"role": "system", "content": instructions.strip()})
+    messages.append({"role": "user", "content": input_text})
+
+    response = client.chat.completions.create(model=model, messages=messages)
+    if not response.choices:
+        return ""
+    return response.choices[0].message.content or ""
+
+
+def _call_llm_text(
+    api_key: str,
+    base_url: Optional[str],
+    model: str,
+    input_text: str,
+    instructions: Optional[str] = None,
+    reasoning_effort: str = "low",
+) -> tuple[str, LLMMode]:
+    normalized_base_url, preferred_mode = _normalize_llm_base_url(base_url)
+    client = _build_openai_client(api_key, normalized_base_url)
+
+    if preferred_mode == "chat":
+        return _call_chat_completions_api(client, model, input_text, instructions), "chat"
+
+    try:
+        return (
+            _call_responses_api(client, model, input_text, instructions, reasoning_effort),
+            "responses",
+        )
+    except Exception as responses_error:
+        if preferred_mode == "responses" or not _is_not_found_error(responses_error):
+            raise
+
+        return _call_chat_completions_api(client, model, input_text, instructions), "chat"
 from sqlalchemy.orm import Session
 import httpx
 import json
@@ -395,32 +489,19 @@ async def test_llm(
     current_user: User = Depends(deps.get_current_user)
 ):
     """
-    Test LLM connectivity by sending a minimal hello request to OpenAI Responses API.
-    This endpoint intentionally ignores userPrompt/outputFormatPrompt/testInput.
+    Test LLM connectivity with Responses API and Chat Completions fallback.
     """
     try:
-        # Initialize OpenAI client with provided credentials
-        client_kwargs = {"api_key": request.apiKey}
-        if request.baseUrl:
-            client_kwargs["base_url"] = request.baseUrl
-        
-        client = OpenAI(**client_kwargs)
+        output_text, mode = _call_llm_text(
+            api_key=request.apiKey,
+            base_url=request.baseUrl,
+            model=request.model,
+            input_text=request.testInput.strip() or "hello",
+            instructions=request.instructions or "Reply briefly to confirm connectivity.",
+            reasoning_effort=request.reasoningEffort,
+        )
 
-        # Build request params — reasoning.effort is only supported by o-series models
-        create_params: Dict[str, Any] = {
-            "model": request.model,
-            "input": "hello",
-        }
-        if _supports_reasoning(request.model):
-            create_params["reasoning"] = {"effort": request.reasoningEffort}
-
-        # Call OpenAI Responses API
-        response = client.responses.create(**create_params)
-
-        # Extract output text
-        output_text = response.output_text if hasattr(response, 'output_text') else str(response)
-
-        return TestLLMResponse(output=output_text)
+        return TestLLMResponse(output=f"Success via {mode}: {output_text}")
     
     except Exception as e:
         raise HTTPException(
@@ -446,13 +527,6 @@ async def send_to_llm(
     user_agent = http_request.headers.get("user-agent")
 
     try:
-        # Initialize OpenAI client with provided credentials
-        client_kwargs = {"api_key": request.apiKey}
-        if request.baseUrl:
-            client_kwargs["base_url"] = request.baseUrl
-
-        client = OpenAI(**client_kwargs)
-
         for doc in request.documents:
             try:
                 # Convert document data to string input
@@ -466,20 +540,14 @@ async def send_to_llm(
                     output_format_prompt=request.outputFormatPrompt,
                 )
 
-                # Build request params — reasoning.effort is only supported by o-series models
-                create_params: Dict[str, Any] = {
-                    "model": request.model,
-                    "instructions": request.instructions,
-                    "input": composed_input,
-                }
-                if _supports_reasoning(request.model):
-                    create_params["reasoning"] = {"effort": request.reasoningEffort}
-
-                # Call OpenAI Responses API
-                response = client.responses.create(**create_params)
-
-                # Extract output text
-                output_text = response.output_text if hasattr(response, 'output_text') else str(response)
+                output_text, _mode = _call_llm_text(
+                    api_key=request.apiKey,
+                    base_url=request.baseUrl,
+                    model=request.model,
+                    input_text=composed_input,
+                    instructions=request.instructions,
+                    reasoning_effort=request.reasoningEffort,
+                )
 
                 results.append(DocumentResult(
                     id=doc.id,
@@ -587,38 +655,67 @@ async def send_to_integration_stream(
     async def _event_generator():
         full_output = ""
         try:
-            client_kwargs: Dict[str, Any] = {"api_key": llm_api_key}
-            if llm_base_url:
-                client_kwargs["base_url"] = llm_base_url
+            normalized_base_url, preferred_mode = _normalize_llm_base_url(llm_base_url)
+            client = _build_openai_client(llm_api_key, normalized_base_url)
 
-            client = OpenAI(**client_kwargs)
+            def chat_stream():
+                messages: List[Dict[str, str]] = []
+                if llm_instructions and llm_instructions.strip():
+                    messages.append({"role": "system", "content": llm_instructions.strip()})
+                messages.append({"role": "user", "content": composed_input})
+                return client.chat.completions.create(
+                    model=llm_model,
+                    messages=messages,
+                    stream=True,
+                )
 
-            create_params: Dict[str, Any] = {
-                "model": llm_model,
-                "instructions": llm_instructions,
-                "input": composed_input,
-                "stream": True,
-            }
-            if _supports_reasoning(llm_model):
-                create_params["reasoning"] = {"effort": llm_reasoning_effort}
-
-            stream = client.responses.create(**create_params)
-
-            for event in stream:
-                # OpenAI Responses API streaming emits various event types
-                if hasattr(event, "type"):
-                    if event.type == "response.output_text.delta":
-                        delta = event.delta if hasattr(event, "delta") else ""
+            if preferred_mode == "chat":
+                stream = chat_stream()
+                for chunk in stream:
+                    if chunk.choices:
+                        delta = chunk.choices[0].delta.content or ""
                         if delta:
                             full_output += delta
-                            yield f"data: {json.dumps({'type': 'delta', 'text': delta}, ensure_ascii=False)}\n\n"
-                    elif event.type == "response.completed":
-                        # Final event — extract full text if available
-                        if hasattr(event, "response") and hasattr(event.response, "output_text"):
-                            full_output = event.response.output_text
-                    elif event.type == "response.output_text.done":
-                        if hasattr(event, "text"):
-                            full_output = event.text
+                            payload = json.dumps({"type": "delta", "text": delta}, ensure_ascii=False)
+                            yield f"data: {payload}\n\n"
+            else:
+                create_params: Dict[str, Any] = {
+                    "model": llm_model,
+                    "instructions": llm_instructions,
+                    "input": composed_input,
+                    "stream": True,
+                }
+                if _supports_reasoning(llm_model):
+                    create_params["reasoning"] = {"effort": llm_reasoning_effort}
+
+                try:
+                    stream = client.responses.create(**create_params)
+                except Exception as responses_error:
+                    if preferred_mode == "responses" or not _is_not_found_error(responses_error):
+                        raise
+                    stream = chat_stream()
+                    for chunk in stream:
+                        if chunk.choices:
+                            delta = chunk.choices[0].delta.content or ""
+                            if delta:
+                                full_output += delta
+                                payload = json.dumps({"type": "delta", "text": delta}, ensure_ascii=False)
+                                yield f"data: {payload}\n\n"
+                else:
+                    for event in stream:
+                        if hasattr(event, "type"):
+                            if event.type == "response.output_text.delta":
+                                delta = event.delta if hasattr(event, "delta") else ""
+                                if delta:
+                                    full_output += delta
+                                    payload = json.dumps({"type": "delta", "text": delta}, ensure_ascii=False)
+                                    yield f"data: {payload}\n\n"
+                            elif event.type == "response.completed":
+                                if hasattr(event, "response") and hasattr(event.response, "output_text"):
+                                    full_output = event.response.output_text
+                            elif event.type == "response.output_text.done":
+                                if hasattr(event, "text"):
+                                    full_output = event.text
 
             # Save result to DB
             saved_result_id = None
@@ -756,12 +853,6 @@ async def send_to_integration(
             llm_output_format = integration.config.get("outputFormatPrompt")
             llm_reasoning_effort = integration.config.get("reasoningEffort", "low")
 
-            client_kwargs = {"api_key": llm_api_key}
-            if llm_base_url:
-                client_kwargs["base_url"] = llm_base_url
-
-            client = OpenAI(**client_kwargs)
-
             # Combine all documents into ONE LLM call so cross-document validation works
             try:
                 doc_tuples = [(doc.filename, doc.data) for doc in request.documents]
@@ -773,17 +864,16 @@ async def send_to_integration(
 
                 print(f"[DEBUG] Sending {len(request.documents)} documents combined to LLM model={llm_model}")
 
-                # Build request params — reasoning.effort only supported by o-series models
-                create_params: Dict[str, Any] = {
-                    "model": llm_model,
-                    "instructions": llm_instructions,
-                    "input": composed_input,
-                }
-                if _supports_reasoning(llm_model):
-                    create_params["reasoning"] = {"effort": llm_reasoning_effort}
+                output_text, mode = _call_llm_text(
+                    api_key=llm_api_key,
+                    base_url=llm_base_url,
+                    model=llm_model,
+                    input_text=composed_input,
+                    instructions=llm_instructions,
+                    reasoning_effort=llm_reasoning_effort,
+                )
 
-                response = client.responses.create(**create_params)
-                output_text = response.output_text if hasattr(response, 'output_text') else str(response)
+                print(f"[DEBUG] LLM call mode: {mode}")
 
                 print(f"[DEBUG] LLM response length: {len(output_text)} chars")
 

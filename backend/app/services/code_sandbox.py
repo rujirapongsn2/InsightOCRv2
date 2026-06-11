@@ -32,7 +32,7 @@ def ensure_sandbox_image() -> bool:
     """
     try:
         import docker
-        client = docker.from_env()
+        client = docker.from_env(timeout=5)
         try:
             client.images.get(SANDBOX_IMAGE)
             logger.info(f"Sandbox image {SANDBOX_IMAGE} already present")
@@ -133,7 +133,7 @@ print("__SANDBOX_OUTPUT__:" + json.dumps(__output__, ensure_ascii=False, default
     try:
         import docker
 
-        client = docker.from_env()
+        client = docker.from_env(timeout=timeout + 10)
 
         # Pull image if missing (lazy fallback)
         try:

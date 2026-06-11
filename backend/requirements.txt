@@ -26,3 +26,5 @@ docker
 pytest
 pytest-asyncio
 pyyaml
+duckduckgo-search
+ddgs

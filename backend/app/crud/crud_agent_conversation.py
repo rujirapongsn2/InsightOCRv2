@@ -20,7 +20,17 @@ class CRUDAgentConversation:
         return db.query(AgentConversation).filter(AgentConversation.job_id == job_id, AgentConversation.user_id == user_id).order_by(AgentConversation.updated_at.desc()).all()
 
     def get_messages(self, db: Session, conversation_id: UUID, limit: int = 50) -> List[AgentMessage]:
-        return db.query(AgentMessage).filter(AgentMessage.conversation_id == conversation_id).order_by(AgentMessage.created_at.asc()).limit(limit).all()
+        # Keep the newest messages in context while preserving chronological order.
+        # The previous ASC + LIMIT query returned the oldest messages, so long
+        # conversations lost recent user intent and tool results.
+        messages = (
+            db.query(AgentMessage)
+            .filter(AgentMessage.conversation_id == conversation_id)
+            .order_by(AgentMessage.created_at.desc())
+            .limit(limit)
+            .all()
+        )
+        return list(reversed(messages))
 
     def delete(self, db: Session, conversation_id: UUID) -> bool:
         conv = self.get(db, conversation_id)

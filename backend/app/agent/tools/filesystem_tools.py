@@ -6,6 +6,9 @@ The agent can only access files within its current job's directory.
 """
 import io
 import logging
+import zipfile
+from datetime import datetime, timezone
+from html import escape
 from pathlib import Path
 
 from app.agent.tools.registry import ToolDef, tool_registry
@@ -48,30 +51,35 @@ def _resolve_path(job_id: str, path: str) -> str:
 
 
 def _safe_read(storage, path: str, max_size: int = MAX_FILE_SIZE_READ) -> dict:
-    """Read file content safely, returning text for known types."""
+    """Read file content safely, returning text only for text formats."""
     if not storage.exists(path):
         return {"error": f"File not found: {path}"}
 
     try:
         with storage.get_local_path(path) as local_path:
-            file_size = Path(local_path).stat().st_size
+            local = Path(local_path)
+            file_size = local.stat().st_size
+            ext = Path(path).suffix.lower()
+
+            if ext in BINARY_EXTENSIONS:
+                return {
+                    "content": None,
+                    "binary": True,
+                    "path": path,
+                    "size": file_size,
+                    "extension": ext,
+                    "note": "Binary file; use download_agent_file from the UI or create a new file with create_docx/write_file. Binary content is not returned to the agent.",
+                }
+
             if file_size > max_size:
                 return {
                     "error": f"File too large ({file_size} bytes, max {max_size})",
                     "size": file_size,
-                    "hint": "Use a smaller file or process in chunks with execute_python",
+                    "hint": "Use a smaller text file or process in chunks with execute_python",
                 }
 
-            try:
-                content = Path(local_path).read_text(encoding="utf-8", errors="replace")
-            except Exception:
-                # Binary file — return metadata only
-                return {
-                    "content": None,
-                    "binary": True,
-                    "size": file_size,
-                    "note": "Binary file — cannot display as text",
-                }
+            content = local.read_text(encoding="utf-8", errors="replace")
+            content = content.replace("\x00", "")
 
         return {"content": content, "size": file_size, "binary": False}
     except Exception as e:
@@ -238,6 +246,112 @@ async def _delete_file_handler(args: dict, context) -> dict:
         return {"error": f"Delete failed: {str(e)}"}
 
 
+def _docx_xml(text: str) -> str:
+    lines = text.splitlines() or [""]
+    paragraphs: list[str] = []
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
+            paragraphs.append("<w:p/>")
+            continue
+
+        style = ""
+        if line.startswith("# "):
+            style = '<w:pStyle w:val="Heading1"/>'
+            line = line[2:].strip()
+        elif line.startswith("## "):
+            style = '<w:pStyle w:val="Heading2"/>'
+            line = line[3:].strip()
+        elif line.startswith(("- ", "* ")):
+            line = f"• {line[2:].strip()}"
+
+        paragraphs.append(
+            "<w:p>"
+            f"<w:pPr>{style}</w:pPr>"
+            "<w:r>"
+            f"<w:t xml:space=\"preserve\">{escape(line)}</w:t>"
+            "</w:r>"
+            "</w:p>"
+        )
+
+    body = "".join(paragraphs)
+    return (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        f"<w:body>{body}"
+        '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>'
+        "</w:body></w:document>"
+    )
+
+
+def _build_docx_bytes(content: str, title: str = "InsightDOC Export") -> bytes:
+    created = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as docx:
+        docx.writestr("[Content_Types].xml", """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+  <Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>
+  <Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>
+</Types>""")
+        docx.writestr("_rels/.rels", """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>
+  <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/>
+</Relationships>""")
+        docx.writestr("word/_rels/document.xml.rels", """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>""")
+        docx.writestr("word/document.xml", _docx_xml(content))
+        docx.writestr("docProps/core.xml", f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <dc:title>{escape(title)}</dc:title>
+  <dc:creator>InsightDOC Agent</dc:creator>
+  <dcterms:created xsi:type="dcterms:W3CDTF">{created}</dcterms:created>
+  <dcterms:modified xsi:type="dcterms:W3CDTF">{created}</dcterms:modified>
+</cp:coreProperties>""")
+        docx.writestr("docProps/app.xml", """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"><Application>InsightDOC</Application></Properties>""")
+    return buffer.getvalue()
+
+
+async def _create_docx_handler(args: dict, context) -> dict:
+    path = (args.get("path") or "").strip()
+    title = (args.get("title") or "InsightDOC Export").strip()
+    content = args.get("content") or ""
+
+    if not path:
+        return {"error": "path is required"}
+    if not path.endswith(".docx"):
+        path = f"{path}.docx"
+    if not path.startswith("outputs/") and "/" not in path:
+        path = f"outputs/{path}"
+    if not str(content).strip():
+        return {"error": "content is required"}
+
+    try:
+        scoped = _resolve_path(str(context.job_id), path)
+    except ValueError as e:
+        return {"error": str(e)}
+
+    data = _build_docx_bytes(str(content), title=title)
+    if len(data) > MAX_FILE_SIZE_WRITE:
+        return {"error": f"Content too large ({len(data)} bytes, max {MAX_FILE_SIZE_WRITE})"}
+
+    try:
+        storage = get_storage_service()
+        storage.upload_file(
+            io.BytesIO(data),
+            scoped,
+            content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+        return {"ok": True, "path": path, "size": len(data), "binary": True, "mime_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"}
+    except Exception as e:
+        return {"error": f"DOCX creation failed: {str(e)}"}
+
+
 # ── Tool Registrations ────────────────────────────────────────────────────────
 
 tool_registry.register(ToolDef(
@@ -295,6 +409,36 @@ tool_registry.register(ToolDef(
         "required": ["path"],
     },
     handler=_write_file_handler,
+))
+
+
+tool_registry.register(ToolDef(
+    name="create_docx",
+    category="filesystem",
+    description=(
+        "Create a .docx file in the current job's outputs from plain text or markdown-like content. "
+        "Use this for Word quotation/report/draft files before telling the user a .docx was created. "
+        "The result includes a downloadable path when successful."
+    ),
+    parameters_schema={
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "Output path relative to job root, e.g. 'outputs/quotation_Q26050014-9.docx'.",
+            },
+            "title": {
+                "type": "string",
+                "description": "Document title metadata.",
+            },
+            "content": {
+                "type": "string",
+                "description": "Plain text content. Lines starting '# ', '## ', '- ', or '* ' are formatted lightly.",
+            },
+        },
+        "required": ["path", "content"],
+    },
+    handler=_create_docx_handler,
 ))
 
 tool_registry.register(ToolDef(

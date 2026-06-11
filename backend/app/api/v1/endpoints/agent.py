@@ -1,9 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import StreamingResponse, FileResponse
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from uuid import UUID
-import tempfile
 import os
+from urllib.parse import quote
 
 from app.api import deps
 from app.agent.loop import AgentLoop
@@ -13,6 +13,8 @@ from app.crud.crud_agent_pending import agent_pending as crud_pending
 from app.crud.crud_agent_skill import agent_skill as crud_skill
 from app.crud.crud_integration import integration as crud_integration
 from app.models.job import Job
+from app.models.ai_settings import AISettings
+from app.core.config import settings
 from app.schemas.agent import (
     AgentConversationCreate,
     AgentConversationResponse,
@@ -50,6 +52,52 @@ def _ensure_llm_integration(db: Session, integration_id: UUID):
     if _enum_value(integration.status) != "active":
         raise HTTPException(status_code=400, detail="Integration is not active")
     return integration
+
+
+def _get_default_agent_ai_settings(db: Session) -> AISettings:
+    setting = db.query(AISettings).filter(
+        AISettings.is_default == True,
+        AISettings.is_active == True,
+    ).first()
+    if not setting:
+        setting = db.query(AISettings).filter(AISettings.is_active == True).first()
+    if not setting:
+        raise HTTPException(status_code=400, detail="No active default AI provider configured")
+    if not setting.api_url or not setting.api_key:
+        raise HTTPException(status_code=400, detail="Default AI provider is missing URL or key")
+    return setting
+
+
+def _build_agent_llm_config(db: Session, conv) -> dict:
+    if conv.integration_id:
+        integration = _ensure_llm_integration(db, conv.integration_id)
+        return {
+            "provider": "openai_compatible",
+            "apiKey": integration.config.get("apiKey"),
+            "baseUrl": integration.config.get("baseUrl"),
+            "model": integration.config.get("model", settings.AGENT_MODEL or "gpt-4o-mini"),
+        }
+
+    if settings.AGENT_PROVIDER_KEY:
+        return {
+            "provider": "openai_compatible",
+            "apiKey": settings.AGENT_PROVIDER_KEY,
+            "baseUrl": settings.AGENT_PROVIDER_URL,
+            "model": settings.AGENT_MODEL or "gpt-4o-mini",
+            "source": "system_agent_provider",
+        }
+
+    # Backward-compatible fallback for environments that only configured the
+    # older schema-suggestion provider. This is less capable than the dedicated
+    # Agent provider because it may not support native tool calling.
+    setting = _get_default_agent_ai_settings(db)
+    return {
+        "provider": "completion_messages",
+        "apiUrl": setting.api_url,
+        "apiKey": setting.api_key,
+        "model": setting.name,
+        "source": "fallback_ai_settings",
+    }
 
 
 @router.post("/conversations", status_code=201)
@@ -144,16 +192,7 @@ async def send_agent_message(
     if not conv or conv.user_id != current_user.id:
         raise HTTPException(status_code=404)
     _ensure_job_access(db, conv.job_id, current_user)
-    if not conv.integration_id:
-        raise HTTPException(status_code=400, detail="No LLM integration linked")
-
-    integration = _ensure_llm_integration(db, conv.integration_id)
-
-    llm_config = {
-        "apiKey": integration.config.get("apiKey"),
-        "baseUrl": integration.config.get("baseUrl"),
-        "model": integration.config.get("model", "gpt-4o"),
-    }
+    llm_config = _build_agent_llm_config(db, conv)
 
     loop = AgentLoop(db=db, conversation_id=conversation_id, user_id=current_user.id, job_id=conv.job_id, llm_config=llm_config, max_iterations=conv.max_iterations)
 
@@ -216,14 +255,33 @@ async def download_agent_file(
 
     try:
         with storage.get_local_path(scoped) as local_path:
-            filename = os.path.basename(path)
-            return FileResponse(
-                local_path,
-                media_type="application/octet-stream",
-                filename=filename,
-            )
+            with open(local_path, "rb") as file_obj:
+                file_content = file_obj.read()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Download failed: {str(e)}")
+
+    filename = os.path.basename(path)
+    encoded_filename = quote(filename)
+    ext = os.path.splitext(filename)[1].lower()
+    media_type = {
+        ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        ".pdf": "application/pdf",
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".zip": "application/zip",
+    }.get(ext, "application/octet-stream")
+
+    return StreamingResponse(
+        iter([file_content]),
+        media_type=media_type,
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}",
+            "Content-Length": str(len(file_content)),
+        },
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

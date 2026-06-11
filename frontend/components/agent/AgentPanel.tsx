@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useEffect, useRef, useCallback } from "react"
-import { X, Plus, Trash2, Bot, ChevronDown, AlertTriangle, Loader2, Brain, Library } from "lucide-react"
+import { X, Plus, Trash2, Bot, ChevronDown, AlertTriangle, Loader2, Brain, Library, Sparkles } from "lucide-react"
 import { getApiBaseUrl } from "@/lib/api"
 import AgentMessage from "./AgentMessage"
 import ToolCallCard from "./ToolCallCard"
@@ -9,12 +9,6 @@ import ConfirmationDialog from "./ConfirmationDialog"
 import ThinkingIndicator from "./ThinkingIndicator"
 import SkillLibrary from "./SkillLibrary"
 import ChatInput from "@/components/chat/ChatInput"
-
-interface Integration {
-    id: string
-    name: string
-    type: string
-}
 
 interface Conversation {
     id: string
@@ -72,6 +66,14 @@ interface AgentMemory {
     updated_at: string | null
 }
 
+interface AgentSkill {
+    id: string
+    name: string
+    scope: string
+    description: string
+    trigger_hint?: string | null
+}
+
 interface AgentPanelProps {
     jobId: string
     onClose?: () => void
@@ -89,8 +91,6 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
     const [thinkingIteration, setThinkingIteration] = useState<number | null>(null)
     const [streamText, setStreamText] = useState("")
     const [pendingAction, setPendingAction] = useState<PendingAction | null>(null)
-    const [llmIntegrations, setLlmIntegrations] = useState<Integration[]>([])
-    const [selectedIntegrationId, setSelectedIntegrationId] = useState("")
     const [loading, setLoading] = useState(true)
     const [error, setError] = useState<string | null>(null)
     const [showConvList, setShowConvList] = useState(false)
@@ -99,6 +99,7 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
     const [memoryScope, setMemoryScope] = useState<"user" | "job">("user")
     const [memories, setMemories] = useState<AgentMemory[]>([])
     const [loadingMemories, setLoadingMemories] = useState(false)
+    const [skills, setSkills] = useState<AgentSkill[]>([])
     const messagesEndRef = useRef<HTMLDivElement>(null)
     const apiBase = getApiBaseUrl()
 
@@ -109,21 +110,6 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
     }, [])
 
     useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: "smooth" }) }, [messages, streamText, events])
-
-    useEffect(() => {
-        const load = async () => {
-            try {
-                const token = typeof window !== "undefined" ? localStorage.getItem("token") : null
-                if (!token) return
-                const { getActiveIntegrations } = await import("@/lib/integrations-api")
-                const all: Integration[] = await getActiveIntegrations(token)
-                const llms = all.filter((i: Integration) => i.type === "llm")
-                setLlmIntegrations(llms)
-                if (llms.length > 0) setSelectedIntegrationId(llms[0].id)
-            } catch { }
-        }
-        load()
-    }, [])
 
     useEffect(() => {
         const load = async () => {
@@ -165,12 +151,25 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
         } catch { } finally { setLoadingMemories(false) }
     }, [apiBase, headers, jobId, memoryScope])
 
+
+    const loadSkills = useCallback(async () => {
+        try {
+            const res = await fetch(`${apiBase}/agent/skills`, { headers: headers() })
+            if (res.ok) {
+                const data = await res.json()
+                setSkills(data.skills || [])
+            }
+        } catch { }
+    }, [apiBase, headers])
+
+    useEffect(() => { loadSkills() }, [loadSkills])
+
     const createConversation = async () => {
-        if (!selectedIntegrationId) return
+        setError(null)
         try {
             const res = await fetch(`${apiBase}/agent/conversations`, {
                 method: "POST", headers: headers(),
-                body: JSON.stringify({ job_id: jobId, integration_id: selectedIntegrationId }),
+                body: JSON.stringify({ job_id: jobId }),
             })
             if (res.ok) {
                 const conv: Conversation = await res.json()
@@ -180,13 +179,40 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
                 setEvents([])
                 setShowConvList(false)
                 setError(null)
+            } else {
+                const data = await res.json().catch(() => null)
+                setError(data?.detail || `Failed to create conversation (${res.status})`)
             }
         } catch { setError("Failed to create conversation") }
     }
 
+
+    const slashCommand = inputValue.trimStart().startsWith("/")
+    const slashQuery = slashCommand ? inputValue.trimStart().slice(1).trim().toLowerCase() : ""
+    const filteredSkills = slashCommand
+        ? skills.filter(skill => {
+            if (!slashQuery) return true
+            return skill.name.toLowerCase().includes(slashQuery)
+                || (skill.description || "").toLowerCase().includes(slashQuery)
+        }).slice(0, 8)
+        : []
+
+    const resolveOutgoingMessage = (raw: string) => {
+        const trimmed = raw.trim()
+        const match = trimmed.match(/^\/([a-z0-9-]+)(?:\s+([\s\S]*))?$/i)
+        if (!match) return trimmed
+        const skillName = match[1].toLowerCase()
+        const rest = (match[2] || "").trim()
+        return `ใช้ skill ${skillName}${rest ? ` ${rest}` : ""}`
+    }
+
+    const selectSkill = (skill: AgentSkill) => {
+        setInputValue(`ใช้ skill ${skill.name} `)
+    }
+
     const sendMessage = async () => {
         if (!inputValue.trim() || !activeConversation || streaming) return
-        const userMsg = inputValue.trim()
+        const userMsg = resolveOutgoingMessage(inputValue)
         setInputValue("")
         setStreaming(true)
         setStreamText("")
@@ -201,7 +227,12 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
             const res = await fetch(`${apiBase}/agent/conversations/${activeConversation}/messages`, {
                 method: "POST", headers: headers(), body: JSON.stringify({ content: userMsg }),
             })
-            if (!res.ok) { setError(`Server error: ${res.status}`); setStreaming(false); return }
+            if (!res.ok) {
+                const data = await res.json().catch(() => null)
+                setError(data?.detail || `Server error: ${res.status}`)
+                setStreaming(false)
+                return
+            }
 
             const reader = res.body!.getReader()
             const decoder = new TextDecoder()
@@ -283,6 +314,56 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
         if (evt.type === "tool_result" && evt.id) toolResultsMap[evt.id] = evt.result
     }
 
+    const persistedToolResultsMap: Record<string, any> = {}
+    for (const msg of messages) {
+        if (msg.role === "tool" && msg.tool_call_id) {
+            persistedToolResultsMap[msg.tool_call_id] = msg.tool_result
+        }
+    }
+
+    const parseToolArguments = (value: any) => {
+        if (typeof value !== "string") return value || {}
+        try {
+            const parsed = JSON.parse(value || "{}")
+            return parsed && typeof parsed === "object" ? parsed : {}
+        } catch {
+            return {}
+        }
+    }
+
+    const renderPersistedMessage = (msg: Message) => {
+        if (msg.role === "tool") return null
+        if (msg.role === "assistant" && Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) {
+            return msg.tool_calls.map((toolCall: any, index: number) => {
+                const call = {
+                    id: toolCall.id || `${msg.id}-${index}`,
+                    name: toolCall.function?.name || toolCall.name,
+                    arguments: parseToolArguments(toolCall.function?.arguments || toolCall.arguments),
+                }
+                return (
+                    <ToolCallCard
+                        key={`${msg.id}-${call.id}`}
+                        call={call}
+                        result={persistedToolResultsMap[call.id]}
+                        conversationId={activeConversation || undefined}
+                    />
+                )
+            })
+        }
+        return (
+            <AgentMessage
+                key={msg.id}
+                role={msg.role}
+                content={msg.content}
+                toolCalls={msg.tool_calls}
+                toolResult={msg.tool_result}
+                toolName={msg.tool_name}
+                iteration={msg.iteration}
+                conversationId={activeConversation || undefined}
+            />
+        )
+    }
+
     return (
         <div className={
             isInline
@@ -315,14 +396,9 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
             {/* Conversation list dropdown */}
             {showConvList && (
                 <div className="border-b bg-off-white p-3 space-y-2 max-h-56 overflow-y-auto">
-                    <button onClick={createConversation} disabled={!selectedIntegrationId} className="w-full flex items-center gap-2 text-sm text-softnix-blue hover:text-softnix-deep font-medium disabled:opacity-40">
+                    <button onClick={createConversation} className="w-full flex items-center gap-2 text-sm text-softnix-blue hover:text-softnix-deep font-medium">
                         <Plus className="h-4 w-4" /> New conversation
                     </button>
-                    {llmIntegrations.length > 0 && (
-                        <select value={selectedIntegrationId} onChange={e => setSelectedIntegrationId(e.target.value)} className="w-full text-xs border rounded px-2 py-1">
-                            {llmIntegrations.map(i => <option key={i.id} value={i.id}>{i.name}</option>)}
-                        </select>
-                    )}
                     {conversations.map(conv => (
                         <div key={conv.id} className={`flex items-center gap-2 p-2 rounded cursor-pointer text-sm ${activeConversation === conv.id ? "bg-[#EBF4FB] border border-[#AED6F1]" : "hover:bg-off-white"}`} onClick={() => { setActiveConversation(conv.id); setShowConvList(false) }}>
                             <span className="flex-1 truncate">{conv.title || "New conversation"}</span>
@@ -379,14 +455,12 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
                         <Bot className="h-10 w-10 mx-auto mb-3 text-mute-gray" />
                         <p className="text-sm font-medium">Agent DOC</p>
                         <p className="text-xs mt-1">Create a conversation to start</p>
-                        <button onClick={createConversation} disabled={!selectedIntegrationId} className="mt-4 px-4 py-2 bg-softnix-blue text-white text-sm rounded-lg disabled:opacity-40 hover:bg-softnix-deep">
+                        <button onClick={createConversation} className="mt-4 px-4 py-2 bg-softnix-blue text-white text-sm rounded-lg hover:bg-softnix-deep">
                             <Plus className="h-4 w-4 inline mr-1" />New Conversation
                         </button>
                     </div>
                 )}
-                {messages.map(msg => (
-                    <AgentMessage key={msg.id} role={msg.role} content={msg.content} toolCalls={msg.tool_calls} toolResult={msg.tool_result} toolName={msg.tool_name} iteration={msg.iteration} />
-                ))}
+                {messages.map(msg => renderPersistedMessage(msg))}
                 {events.filter(e => e.type === "tool_call").map(evt => (
                     <ToolCallCard key={evt.id} call={evt} result={toolResultsMap[evt.id!]} conversationId={activeConversation || undefined} />
                 ))}
@@ -394,7 +468,7 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
                     <ThinkingIndicator iteration={thinkingIteration} />
                 )}
                 {streaming && streamText && (
-                    <AgentMessage role="assistant" content={streamText} isStreaming />
+                    <AgentMessage role="assistant" content={streamText} isStreaming conversationId={activeConversation || undefined} />
                 )}
                 {error && (
                     <div className="mx-3 flex items-start gap-2 p-3 rounded-lg bg-red-50 border border-red-200">
@@ -414,8 +488,40 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
             {pendingAction && <ConfirmationDialog action={pendingAction} onConfirm={() => confirmAction(true)} onReject={() => confirmAction(false)} />}
 
             {/* Input */}
+            {activeConversation && slashCommand && (
+                <div className="border-t border-hairline bg-white px-3 pt-3">
+                    <div className="rounded-lg border border-softnix-blue/20 bg-[#F7FBFE] shadow-sm overflow-hidden">
+                        <div className="flex items-center gap-2 px-3 py-2 text-xs font-medium text-softnix-deep border-b border-softnix-blue/10">
+                            <Sparkles className="h-3.5 w-3.5" /> เลือก Skill
+                        </div>
+                        {filteredSkills.length > 0 ? filteredSkills.map(skill => (
+                            <button
+                                key={skill.id}
+                                type="button"
+                                onClick={() => selectSkill(skill)}
+                                className="w-full px-3 py-2 text-left hover:bg-white border-b border-softnix-blue/10 last:border-b-0"
+                            >
+                                <div className="flex items-center justify-between gap-2">
+                                    <code className="text-xs font-semibold text-softnix-deep truncate">/{skill.name}</code>
+                                    <span className="text-[10px] uppercase tracking-wide text-slate-gray">{skill.scope}</span>
+                                </div>
+                                <p className="mt-0.5 line-clamp-1 text-[11px] text-slate-gray">{skill.description}</p>
+                            </button>
+                        )) : (
+                            <div className="px-3 py-2 text-xs text-slate-gray">ไม่พบ skill ที่ตรงกับคำค้น</div>
+                        )}
+                    </div>
+                </div>
+            )}
             {activeConversation && (
-                <ChatInput value={inputValue} onChange={setInputValue} onSend={sendMessage} disabled={!activeConversation} streaming={streaming} />
+                <ChatInput
+                    value={inputValue}
+                    onChange={setInputValue}
+                    onSend={sendMessage}
+                    disabled={!activeConversation}
+                    streaming={streaming}
+                    tips={<p className="text-[11px] text-slate-gray">Tips: พิมพ์ <code className="rounded bg-slate-100 px-1 font-mono">/</code> เพื่อเลือก Skill ที่ต้องการใช้งาน</p>}
+                />
             )}
         </div>
     )

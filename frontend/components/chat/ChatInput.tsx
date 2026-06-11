@@ -1,6 +1,6 @@
 "use client"
 
-import { useRef, useEffect, KeyboardEvent } from "react"
+import { useRef, useEffect, KeyboardEvent, ReactNode } from "react"
 import { Send, Loader2 } from "lucide-react"
 
 interface ChatInputProps {
@@ -9,9 +9,10 @@ interface ChatInputProps {
     onSend: () => void
     disabled?: boolean
     streaming?: boolean
+    tips?: ReactNode
 }
 
-export default function ChatInput({ value, onChange, onSend, disabled, streaming }: ChatInputProps) {
+export default function ChatInput({ value, onChange, onSend, disabled, streaming, tips }: ChatInputProps) {
     const textareaRef = useRef<HTMLTextAreaElement>(null)
 
     useEffect(() => {
@@ -56,8 +57,13 @@ export default function ChatInput({ value, onChange, onSend, disabled, streaming
                     )}
                 </button>
             </div>
-            {value.length > 9000 && (
-                <p className="text-[10px] text-amber-600 mt-1 text-right">{value.length}/10,000</p>
+            {(tips || value.length > 9000) && (
+                <div className="mt-1 flex items-center justify-between gap-2">
+                    <div className="min-w-0 flex-1">{tips}</div>
+                    {value.length > 9000 && (
+                        <p className="text-[10px] text-amber-600 text-right">{value.length}/10,000</p>
+                    )}
+                </div>
             )}
         </div>
     )

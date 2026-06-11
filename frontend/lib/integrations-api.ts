@@ -58,7 +58,7 @@ export async function getIntegrations(
   token: string,
   status?: "active" | "paused"
 ): Promise<{ integrations: Integration[]; total: number }> {
-  const url = new URL(apiUrl("/integrations"), window.location.origin)
+  const url = new URL(apiUrl("/integrations/"), window.location.origin)
   if (status) {
     url.searchParams.set("status", status)
   }
@@ -123,7 +123,7 @@ export async function createIntegration(
   token: string,
   data: IntegrationCreate
 ): Promise<Integration> {
-  const response = await fetch(apiUrl("/integrations"), {
+  const response = await fetch(apiUrl("/integrations/"), {
     method: "POST",
     headers: {
       Authorization: `Bearer ${token}`,
