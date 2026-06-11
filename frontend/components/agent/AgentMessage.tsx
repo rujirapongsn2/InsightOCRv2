@@ -104,20 +104,13 @@ function looksLikeRawToolPayload(text: string | null): boolean {
     return trimmed.includes('"tool_calls"') || trimmed.includes('"type":"tool_call"') || trimmed.includes('"type": "tool_call"')
 }
 
-function extractRawReportPath(text: string | null): string | null {
-    if (!text) return null
-    const match = text.match(/(?:jobs\/[0-9a-f-]+\/)?outputs\/[A-Za-z0-9][A-Za-z0-9._ -]*\.html/i)
-    return match ? normalizeAgentFilePath(match[0]) : null
-}
-
 export default function AgentMessage({ role, content, isStreaming, conversationId }: AgentMessageProps) {
     const isRawToolPayload = looksLikeRawToolPayload(content)
-    const rawReportPath = useMemo(() => isRawToolPayload ? extractRawReportPath(content) : null, [content, isRawToolPayload])
-    const displayContent = isRawToolPayload && rawReportPath
-        ? `สร้างรายงาน HTML เรียบร้อยครับ\n\nไฟล์: \`${rawReportPath}\`\n\nดาวน์โหลดได้จากปุ่ม Download ใต้คำตอบนี้ครับ`
+    const displayContent = isRawToolPayload
+        ? "ยังไม่ได้สร้างรายงานครับ ระบบได้รับ payload เรียก tool แบบ raw แต่ยังไม่มีผลลัพธ์จากเครื่องมือที่ยืนยันว่าไฟล์ถูกสร้างสำเร็จ กรุณาสั่งใหม่อีกครั้ง"
         : (content || "")
-    const rendered = useMemo(() => renderMarkdown(isRawToolPayload && !rawReportPath ? "" : displayContent), [displayContent, isRawToolPayload, rawReportPath])
-    const downloadableFiles = useMemo(() => rawReportPath ? [rawReportPath] : (isRawToolPayload ? [] : extractDownloadableFiles(content)), [content, isRawToolPayload, rawReportPath])
+    const rendered = useMemo(() => renderMarkdown(displayContent), [displayContent])
+    const downloadableFiles = useMemo(() => isRawToolPayload ? [] : extractDownloadableFiles(content), [content, isRawToolPayload])
     const [downloadError, setDownloadError] = useState<string | null>(null)
     const [downloadingPath, setDownloadingPath] = useState<string | null>(null)
 
@@ -143,7 +136,7 @@ export default function AgentMessage({ role, content, isStreaming, conversationI
         )
     }
 
-    if (role === "tool" || (isRawToolPayload && !rawReportPath)) return null
+    if (role === "tool") return null
 
     return (
         <div className="flex gap-2 px-3">

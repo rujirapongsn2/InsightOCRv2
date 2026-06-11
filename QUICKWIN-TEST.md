@@ -495,3 +495,26 @@ Date: 2026-06-11
    - Confirmed backend and frontend are healthy.
    - Confirmed the affected job page returns HTTP 200 through local nginx on port 3000.
 
+---
+
+Date: 2026-06-11
+
+## Manual Verification - Agent Report False Success Guard
+
+1. Root cause
+   - A later contract-report request returned a raw JSON tool-call payload as assistant content instead of executing run_report_code.
+   - Because the raw payload contained an outputs/*.html path, the UI previously summarized it as a successful report and displayed a Download button even though no tool result had written the file.
+
+2. Fixes
+   - Backend now converts raw tool-call payload final answers without a successful run_report_code result into a clear failure/retry message instead of a file-created response.
+   - Frontend no longer creates a download chip from raw tool-call payload content. It shows a short not-created message when such payloads appear in history.
+
+3. Verification
+   - Queried the affected job conversation and confirmed the missing file case had no run_report_code tool result for outputs/contract_comparison_report_th.html.
+   - Ran PYTHONPYCACHEPREFIX=/tmp/pycache python3 -m py_compile backend/app/agent/loop.py.
+   - Rebuilt backend with docker compose build backend.
+   - Rebuilt frontend with docker compose build frontend and confirmed Next.js production build and TypeScript checks passed.
+   - Restarted backend and frontend with docker compose up -d --no-deps backend frontend.
+   - Confirmed backend and frontend are healthy.
+   - Confirmed the affected job page returns HTTP 200 through local nginx on port 3000.
+

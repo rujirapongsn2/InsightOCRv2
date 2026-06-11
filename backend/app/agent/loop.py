@@ -96,6 +96,19 @@ def _looks_like_raw_tool_payload(text: str | None) -> bool:
     return "tool_calls" in lowered or "run_report_code" in lowered or '"type":"tool_call"' in lowered or '"type": "tool_call"' in lowered
 
 
+def _raw_tool_payload_failure_text(user_message: str) -> str:
+    thai = bool(re.search(r"[\u0e00-\u0e7f]", user_message or ""))
+    if thai:
+        return (
+            "ยังไม่ได้สร้างรายงานครับ ระบบได้รับ payload เรียก tool แบบ raw "
+            "แต่ยังไม่มีผลลัพธ์จาก run_report_code ที่ยืนยันว่าไฟล์ถูกสร้างสำเร็จ กรุณาสั่งใหม่อีกครั้ง"
+        )
+    return (
+        "The report was not created. The model returned a raw tool-call payload, "
+        "but run_report_code did not return a successful file result. Please retry the request."
+    )
+
+
 def _short_report_final_text(result: Any, user_message: str) -> str:
     path = result.get("path") or result.get("download_path") or "outputs/report.html"
     thai = bool(re.search(r"[\u0e00-\u0e7f]", user_message or ""))
@@ -417,7 +430,12 @@ class AgentLoop:
 
             else:
                 final_text = msg.content or ""
-                if latest_report_success and (_looks_like_raw_tool_payload(final_text) or len(final_text) > 800):
+                if _looks_like_raw_tool_payload(final_text):
+                    if latest_report_success:
+                        final_text = _short_report_final_text(latest_report_success, user_message)
+                    else:
+                        final_text = _raw_tool_payload_failure_text(user_message)
+                elif latest_report_success and len(final_text) > 800:
                     final_text = _short_report_final_text(latest_report_success, user_message)
                 if _requires_web_search(user_message) and "web_search" not in current_turn_tools and not nudged_required_search:
                     messages.append({"role": "system", "content": _required_tool_instruction("web_search")})
@@ -623,8 +641,8 @@ When a report tool such as run_report_code succeeds, final answers must be short
             if not action:
                 report_result = _latest_successful_report(tool_results)
                 final_text = answer.strip() or "AI provider returned an empty response."
-                if report_result and _looks_like_raw_tool_payload(final_text):
-                    final_text = _short_report_final_text(report_result, user_message)
+                if _looks_like_raw_tool_payload(final_text):
+                    final_text = _short_report_final_text(report_result, user_message) if report_result else _raw_tool_payload_failure_text(user_message)
                 crud_msg.add(self.db, conversation_id=self.conversation_id, role="assistant",
                              content=final_text, iteration=iteration, model_used=model_name)
                 for chunk in (final_text[i:i+50] for i in range(0, len(final_text), 50)):
@@ -635,7 +653,9 @@ When a report tool such as run_report_code succeeds, final answers must be short
             if action.get("type") == "final":
                 report_result = _latest_successful_report(tool_results)
                 final_text = str(action.get("answer") or "")
-                if report_result and (_looks_like_raw_tool_payload(final_text) or len(final_text) > 1200):
+                if _looks_like_raw_tool_payload(final_text):
+                    final_text = _short_report_final_text(report_result, user_message) if report_result else _raw_tool_payload_failure_text(user_message)
+                elif report_result and len(final_text) > 1200:
                     final_text = _short_report_final_text(report_result, user_message)
                 crud_msg.add(self.db, conversation_id=self.conversation_id, role="assistant",
                              content=final_text, iteration=iteration, model_used=model_name)
@@ -647,7 +667,9 @@ When a report tool such as run_report_code succeeds, final answers must be short
             if action.get("type") != "tool_call":
                 report_result = _latest_successful_report(tool_results)
                 final_text = str(action.get("answer") or answer)
-                if report_result and (_looks_like_raw_tool_payload(final_text) or len(final_text) > 1200):
+                if _looks_like_raw_tool_payload(final_text):
+                    final_text = _short_report_final_text(report_result, user_message) if report_result else _raw_tool_payload_failure_text(user_message)
+                elif report_result and len(final_text) > 1200:
                     final_text = _short_report_final_text(report_result, user_message)
                 crud_msg.add(self.db, conversation_id=self.conversation_id, role="assistant",
                              content=final_text, iteration=iteration, model_used=model_name)
