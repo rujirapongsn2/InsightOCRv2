@@ -7,7 +7,7 @@ from app.api.permissions import ensure_job_access, is_admin_user
 from app.models.job import Job
 from app.models.document import Document
 from app.schemas.job import Job as JobSchema
-from app.schemas.job import JobCreate
+from app.schemas.job import JobCreate, JobUpdate
 from app.services.storage import get_storage_service
 from app.utils.activity_logger import log_activity, Actions
 from app.utils.job_logger import get_job_logger
@@ -99,6 +99,65 @@ def read_job(
         "user_name": job.user.email if job.user else None
     }
     return job_dict
+
+@router.put("/{job_id}", response_model=JobSchema)
+def update_job(
+    *,
+    db: Session = Depends(deps.get_db),
+    job_id: str,
+    job_in: JobUpdate,
+    current_user: User = Depends(deps.get_current_active_user),
+) -> Any:
+    """Update a job. Owner, admin, or superuser can update."""
+    job = db.query(Job).filter(Job.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    is_admin = is_admin_user(current_user)
+    is_owner = job.user_id == current_user.id
+    if not is_admin and not is_owner:
+        raise HTTPException(status_code=403, detail="Not enough permissions")
+
+    update_data = job_in.model_dump(exclude_unset=True)
+    if "name" in update_data:
+        name = update_data["name"].strip() if update_data["name"] else ""
+        if not name:
+            raise HTTPException(status_code=400, detail="Job name cannot be empty")
+        job.name = name
+    if "description" in update_data:
+        job.description = update_data["description"]
+    if "schema_id" in update_data:
+        job.schema_id = update_data["schema_id"]
+    if "status" in update_data and update_data["status"]:
+        job.status = update_data["status"]
+
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+
+    log_activity(
+        db=db,
+        user_id=current_user.id,
+        action=Actions.UPDATE_JOB,
+        resource_type="job",
+        resource_id=job.id,
+        details={"job_name": job.name, "updated_fields": sorted(update_data.keys())}
+    )
+
+    job_logger = get_job_logger(str(job.id))
+    job_logger.info(f"Job updated by user {current_user.email} (ID: {current_user.id}). Fields: {sorted(update_data.keys())}")
+
+    return {
+        "id": job.id,
+        "name": job.name,
+        "description": job.description,
+        "schema_id": job.schema_id,
+        "status": job.status,
+        "created_at": job.created_at,
+        "updated_at": job.updated_at,
+        "user_id": job.user_id,
+        "user_name": job.user.email if job.user else None
+    }
 
 @router.delete("/{job_id}")
 def delete_job(

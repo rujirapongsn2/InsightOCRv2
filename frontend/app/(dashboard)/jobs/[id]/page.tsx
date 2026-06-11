@@ -3,7 +3,7 @@
 import { useEffect, useState, useRef, useMemo } from "react"
 import { useParams, useRouter } from "next/navigation"
 import Link from "next/link"
-import { ArrowLeft, Upload, FileText, Loader2, Eye, X, Trash2, AlertTriangle, Bot, ChevronDown } from "lucide-react"
+import { ArrowLeft, Upload, FileText, Loader2, Eye, X, Trash2, AlertTriangle, Bot, ChevronDown, Pencil, Check } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Modal } from "@/components/ui/modal"
 import { Textarea } from "@/components/ui/textarea"
@@ -136,6 +136,10 @@ export default function JobDetailPage() {
     // Integration result history
     const [resultHistory, setResultHistory] = useState<Array<{ id: string; status: string; model_used: string | null; integration_type: string | null; integration_name: string | null; created_at: string }>>([])
     const [loadingHistory, setLoadingHistory] = useState(false)
+    const [renamingJob, setRenamingJob] = useState(false)
+    const [renameDraft, setRenameDraft] = useState("")
+    const [savingJobName, setSavingJobName] = useState(false)
+    const renameInputRef = useRef<HTMLInputElement>(null)
 
     const apiBase = getApiBaseUrl()
 
@@ -501,6 +505,58 @@ export default function JobDetailPage() {
         }
     }
 
+    const startRenameJob = () => {
+        if (!job) return
+        setRenameDraft(job.name)
+        setRenamingJob(true)
+        window.setTimeout(() => renameInputRef.current?.select(), 0)
+    }
+
+    const cancelRenameJob = () => {
+        setRenamingJob(false)
+        setRenameDraft(job?.name || "")
+    }
+
+    const saveJobName = async () => {
+        if (!job || savingJobName) return
+        const nextName = renameDraft.trim()
+        if (!nextName) {
+            alert("Job name cannot be empty")
+            setRenameDraft(job.name)
+            setRenamingJob(false)
+            return
+        }
+        if (nextName === job.name) {
+            setRenamingJob(false)
+            return
+        }
+
+        try {
+            setSavingJobName(true)
+            const token = typeof window !== "undefined" ? localStorage.getItem("token") : null
+            const response = await fetch(`${apiBase}/jobs/${jobId}`, {
+                method: "PUT",
+                headers: {
+                    "Content-Type": "application/json",
+                    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+                },
+                body: JSON.stringify({ name: nextName }),
+            })
+            if (!response.ok) {
+                const error = await response.json().catch(() => null)
+                throw new Error(error?.detail || "Failed to rename job")
+            }
+            const updatedJob = await response.json()
+            setJob(updatedJob)
+            setRenamingJob(false)
+        } catch (error) {
+            console.error("Rename job error:", error)
+            alert(error instanceof Error ? error.message : "Failed to rename job")
+        } finally {
+            setSavingJobName(false)
+        }
+    }
+
     const handleRejectDocument = async () => {
         if (!reviewDoc) return
         try {
@@ -523,6 +579,7 @@ export default function JobDetailPage() {
     }
 
     const canDeleteJob = user && job && (user.is_superuser || user.role === "admin" || user.id === job.user_id)
+    const canEditJob = canDeleteJob
 
     const getSchemaSourceLabel = (doc: Document) => {
         if (!doc.schema_id) return "auto"
@@ -935,8 +992,47 @@ export default function JobDetailPage() {
                         <ArrowLeft className="h-4 w-4" />
                     </Button>
                 </Link>
-                <div>
-                    <h2 className="text-2xl font-bold tracking-tight">{job.name}</h2>
+                <div className="min-w-0 flex-1">
+                    <div className="flex min-h-10 items-center gap-2">
+                        {renamingJob ? (
+                            <>
+                                <Input
+                                    ref={renameInputRef}
+                                    value={renameDraft}
+                                    onChange={(event) => setRenameDraft(event.target.value)}
+                                    onBlur={saveJobName}
+                                    onKeyDown={(event) => {
+                                        if (event.key === "Enter") {
+                                            event.preventDefault()
+                                            saveJobName()
+                                        }
+                                        if (event.key === "Escape") {
+                                            event.preventDefault()
+                                            cancelRenameJob()
+                                        }
+                                    }}
+                                    disabled={savingJobName}
+                                    className="h-10 max-w-xl text-2xl font-bold tracking-tight"
+                                    aria-label="Job name"
+                                />
+                                <Button type="button" variant="ghost" size="icon" onMouseDown={(event) => event.preventDefault()} onClick={saveJobName} disabled={savingJobName} title="Save job name">
+                                    {savingJobName ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
+                                </Button>
+                                <Button type="button" variant="ghost" size="icon" onMouseDown={(event) => event.preventDefault()} onClick={cancelRenameJob} disabled={savingJobName} title="Cancel rename">
+                                    <X className="h-4 w-4" />
+                                </Button>
+                            </>
+                        ) : (
+                            <>
+                                <h2 className="truncate text-2xl font-bold tracking-tight">{job.name}</h2>
+                                {canEditJob && (
+                                    <Button type="button" variant="ghost" size="icon" onClick={startRenameJob} title="Rename job">
+                                        <Pencil className="h-4 w-4" />
+                                    </Button>
+                                )}
+                            </>
+                        )}
+                    </div>
                     <p className="text-slate-500">{job.description}</p>
                 </div>
                 <div className="ml-auto flex items-center gap-3">
