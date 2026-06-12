@@ -15,6 +15,8 @@ class IntegrationType(str, enum.Enum):
     API = "api"
     WORKFLOW = "workflow"
     LLM = "llm"
+    GDRIVE = "gdrive"
+    ONEDRIVE = "onedrive"
 
 
 class IntegrationStatus(str, enum.Enum):

@@ -258,6 +258,30 @@ async def get_integration_result(
     }
 
 
+@router.post("/{integration_id}/test-drive")
+async def test_drive_integration(
+    integration_id: UUID,
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_user),
+):
+    """Verify a Google Drive / OneDrive credential (issue token, reach the API)."""
+    integration = crud_integration.get(db=db, integration_id=integration_id)
+    if not integration:
+        raise HTTPException(status_code=404, detail="Integration not found")
+    if integration.type not in ("gdrive", "onedrive"):
+        raise HTTPException(status_code=400, detail="Integration นี้ไม่ใช่ Google Drive / OneDrive")
+
+    from app.services.cloud_drive import get_drive_client, CloudDriveError
+    try:
+        client = get_drive_client(integration)
+        result = client.check()
+        return {"ok": True, "detail": result}
+    except CloudDriveError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=f"เชื่อมต่อไม่สำเร็จ: {e}")
+
+
 @router.get("/{integration_id}", response_model=IntegrationResponse)
 async def get_integration(
     integration_id: UUID,

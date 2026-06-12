@@ -16,7 +16,12 @@ class AISettings(Base):
     api_url = Column(String, nullable=False)  # External API endpoint
     api_key = Column(String, nullable=False)  # API Key for authentication
     is_active = Column(Boolean, default=True)  # Enable/disable this setting
-    is_default = Column(Boolean, default=False)  # Default AI provider
+    is_default = Column(Boolean, default=False)  # Default AI provider (OCR/suggestion)
+
+    # Agent-specific fields
+    model = Column(String, default="gpt-4o-mini")
+    is_agent_provider = Column(Boolean, default=False)  # Use as Agent's LLM backend
+    provider_type = Column(String, default="completion_messages")  # "openai_compatible" | "completion_messages"
 
     # Additional settings (JSON-like format in description)
     description = Column(String)  # Optional description

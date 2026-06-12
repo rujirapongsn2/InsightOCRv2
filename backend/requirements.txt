@@ -28,3 +28,4 @@ pytest-asyncio
 pyyaml
 duckduckgo-search
 ddgs
+croniter

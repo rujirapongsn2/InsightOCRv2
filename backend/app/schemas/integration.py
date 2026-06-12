@@ -30,7 +30,7 @@ class IntegrationConfigBase(BaseModel):
 class IntegrationCreate(BaseModel):
     """Schema for creating a new integration."""
     name: str = Field(..., min_length=1, max_length=255)
-    type: str = Field(..., pattern="^(api|workflow|llm)$")
+    type: str = Field(..., pattern="^(api|workflow|llm|gdrive|onedrive)$")
     description: Optional[str] = None
     status: str = Field(default="active", pattern="^(active|paused)$")
     config: Dict[str, Any] = Field(default_factory=dict)
@@ -39,7 +39,7 @@ class IntegrationCreate(BaseModel):
 class IntegrationUpdate(BaseModel):
     """Schema for updating an integration."""
     name: Optional[str] = Field(None, min_length=1, max_length=255)
-    type: Optional[str] = Field(None, pattern="^(api|workflow|llm)$")
+    type: Optional[str] = Field(None, pattern="^(api|workflow|llm|gdrive|onedrive)$")
     description: Optional[str] = None
     status: Optional[str] = Field(None, pattern="^(active|paused)$")
     config: Optional[Dict[str, Any]] = None

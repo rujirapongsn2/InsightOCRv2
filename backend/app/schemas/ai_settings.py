@@ -11,7 +11,10 @@ class AISettingsBase(BaseModel):
     api_url: str = Field(..., description="External API endpoint URL")
     api_key: str = Field(..., description="API key for authentication")
     is_active: bool = Field(default=True, description="Whether this setting is active")
-    is_default: bool = Field(default=False, description="Whether this is the default provider")
+    is_default: bool = Field(default=False, description="Whether this is the default OCR provider")
+    model: Optional[str] = Field(default="gpt-4o-mini", description="LLM model name used by Agent")
+    is_agent_provider: bool = Field(default=False, description="Use this as the Agent's LLM backend")
+    provider_type: str = Field(default="completion_messages", description="openai_compatible | completion_messages")
     description: Optional[str] = Field(None, description="Optional description")
 
 
@@ -28,6 +31,9 @@ class AISettingsUpdate(BaseModel):
     api_key: Optional[str] = None
     is_active: Optional[bool] = None
     is_default: Optional[bool] = None
+    model: Optional[str] = None
+    is_agent_provider: Optional[bool] = None
+    provider_type: Optional[str] = None
     description: Optional[str] = None
 
 
@@ -50,6 +56,9 @@ class AISettingsPublic(BaseModel):
     api_url: str
     is_active: bool
     is_default: bool
+    model: Optional[str]
+    is_agent_provider: bool
+    provider_type: str
     description: Optional[str]
     created_at: datetime
     updated_at: Optional[datetime]

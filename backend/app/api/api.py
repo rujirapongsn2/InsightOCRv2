@@ -15,6 +15,7 @@ from app.api.v1.endpoints import (
     settings,
     templates,
     users,
+    workflows,
 )
 
 api_router = APIRouter()
@@ -33,3 +34,4 @@ api_router.include_router(integrations.router, prefix="/integrations", tags=["in
 api_router.include_router(chat.router, prefix="/chat", tags=["chat"])
 api_router.include_router(agent.router, prefix="/agent", tags=["agent"])
 api_router.include_router(external.router, prefix="/external", tags=["external"])
+api_router.include_router(workflows.router, prefix="/workflows", tags=["workflows"])

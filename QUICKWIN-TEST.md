@@ -518,3 +518,103 @@ Date: 2026-06-11
    - Confirmed backend and frontend are healthy.
    - Confirmed the affected job page returns HTTP 200 through local nginx on port 3000.
 
+
+---
+
+Date: 2026-06-11
+
+## Manual Verification - Workflow Feature (Drag & Drop Automation Builder)
+
+1. Scope
+   - New "Workflow" menu: business users build deterministic document-automation workflows (Zapier-style) with drag & drop nodes.
+   - Node types: Manual/Schedule Trigger, Document Source, LLM/Agent, Condition (true/false branch), Transform/Mapping, Python Code (Docker sandbox), HTTP Request, Write Output (json/text/csv with download).
+   - Backend: workflows/workflow_runs/workflow_node_runs tables, CRUD + run + run-detail + node-catalog + output-download endpoints under /api/v1/workflows, celery task per run (concurrent runs supported by worker pool), celery beat dispatcher (every 30s, croniter) for cron schedules.
+   - Frontend: /workflows list page (create/run/activate/delete), /workflows/[id] builder using @xyflow/react with palette, config panel, schedule (cron) popover, and live Run Activity panel polling node statuses every 1.5s.
+
+2. Verification performed
+   - python3 -m py_compile on all new backend modules (models/schemas/engine/tasks/endpoint/celery_app) passed.
+   - Unit-checked engine pure functions (template resolution {{node.path}}, topological order + cycle detection, condition operators, transform mapping, CSV serialization) with stubbed dependencies - all assertions passed.
+   - cd frontend && npx tsc --noEmit passed; npm run build succeeded and shows /workflows and /workflows/[id] routes.
+
+3. Remaining manual steps after rebuild (docker compose up --build)
+   - New python dep: croniter (backend/requirements.txt). New frontend dep: @xyflow/react.
+   - New service: celery_beat (docker-compose.yml); celery_worker now mounts docker.sock for Python Code sandbox nodes.
+   - Smoke test: create workflow -> drag Document Source + LLM + Write Output -> connect -> Save -> Run -> watch Activity panel -> download output file; then set cron (e.g. */5 * * * *) + enable schedule + Save and confirm a scheduled run appears.
+
+---
+
+Date: 2026-06-11
+
+## Manual Verification - Workflow "Jobs" Node
+
+1. Scope
+   - New "Jobs" node (type job_source, category data) brings processed data from a Job into the workflow.
+   - Config: job picker (job_select dropdown populated from /jobs/), data_source (reviewed | extracted | ocr_text; reviewed falls back to extracted), document status filter, only_completed toggle, max-documents limit.
+   - Output: {job_id, job_name, job_status, count, records: [...], documents: [{id, filename, status, data}]} - `records` is a flat array convenient for downstream LLM/Transform nodes.
+   - New frontend field type job_select rendered as a dropdown; builder loads the job list once via getJobs(). Existing Document Source node also upgraded to use the job picker.
+
+2. Verification performed
+   - python3 -m py_compile app/services/workflow_engine.py passed.
+   - cd frontend && npx tsc --noEmit passed; npm run build succeeded.
+   - Rebuilt backend/frontend/celery_worker images and restarted services; backend + frontend healthy.
+   - GET /api/v1/workflows/node-types returns job_source with the job_select field.
+   - E2E: created a workflow trigger -> job_source(real job "Q1", data_source=reviewed) -> write_output({{j1.records}}), ran it, polled to succeeded. Jobs node loaded 5 documents and emitted records; write_output wrote job_records.json (4472 chars). Confirmed via run node-run logs/output.
+   - https://localhost/workflows returns 200.
+
+---
+
+Date: 2026-06-11
+
+## Manual Verification - Workflow Builder UX (Variable Picker + Single-node Test + Field Hints)
+
+1. Scope (ทำให้ business user ใช้ง่ายขึ้น)
+   - Variable Picker: ปุ่ม "+ แทรกข้อมูลจากโหนดก่อนหน้า" ในช่อง text/textarea และคอลัมน์ value ของ mappings — แสดงเฉพาะโหนดต้นทาง (ancestors) ของโหนดที่เลือก พร้อมฟิลด์ (จาก output_fields ใน catalog + เติมจาก output จริงของการรันล่าสุด) คลิกแล้วแทรก {{nodeId.field}} ที่ caret
+   - Single-node Test: ปุ่ม "ทดสอบโหนดนี้" ในแผง Config — รันโหนดเดียวโดยใช้ข้อมูลจากการรันเต็มครั้งล่าสุดเป็น context แสดงผลผ่านแผง Activity เดิม (run trigger_type=node_test)
+   - Field hints/placeholder: เพิ่ม hint + placeholder ภาษาไทยในทุก node type
+
+2. Backend changes
+   - workflow_engine.py: เพิ่ม output_fields/placeholder/hint ใน NODE_TYPES; เพิ่ม execute_single_node() + _build_context_from_last_run()
+   - workflow_tasks.py: เพิ่ม test_node_task
+   - endpoints/workflows.py: เพิ่ม POST /workflows/{id}/nodes/{node_id}/test
+
+3. Verification performed
+   - python3 -m py_compile ผ่านทุกไฟล์ backend ที่แก้
+   - cd frontend && npx tsc --noEmit ผ่าน; npm run build สำเร็จ
+   - Rebuild backend/frontend/celery_worker + restart; backend+frontend healthy
+   - GET node-types: ยืนยัน job_source.output_fields = [count, records, documents, job_name, job_status], job_id มี hint, llm.prompt มี placeholder
+   - Single-node test (สำเร็จ): POST /workflows/{id}/nodes/tf_1/test บน example workflow ที่เคยรันเต็มแล้ว → ได้ run node_test ที่มี node_runs เดียว (tf_1) succeeded, output ประกอบค่าจาก jobs_1 + llm_1 ที่ cache ไว้ถูกต้อง
+   - Single-node test (เคส error): workflow ใหม่ที่ยังไม่เคยรัน → failed พร้อมข้อความ "กรุณารัน workflow แบบเต็มอย่างน้อย 1 ครั้งก่อน เพื่อให้มีข้อมูลจากโหนดก่อนหน้า"
+   - https://localhost/workflows และ /workflows/{id} ตอบ 200 ผ่าน nginx
+
+---
+
+Date: 2026-06-11
+
+## Manual Verification - Google Drive / OneDrive Workflow Nodes
+
+1. Scope
+   - 4 nodes ใหม่ (หมวด storage): gdrive_upload, gdrive_import, onedrive_upload, onedrive_import
+   - upload = อัปโหลดผลลัพธ์ workflow ขึ้นโฟลเดอร์คลาวด์; import = ดึงทั้งโฟลเดอร์เข้า Job แล้ว OCR/process ตามฟังก์ชัน Jobs
+   - Auth = service account (Google JWT-bearer) / app credentials (OneDrive client-credentials) เก็บใน Integration (type gdrive/onedrive) อ้างด้วย integration_id
+   - ไม่เพิ่ม pip dependency — ใช้ requests + python-jose ที่มีอยู่; egress ผ่าน gateway proxy
+
+2. Backend changes
+   - services/cloud_drive.py (GoogleDriveClient/OneDriveClient: token + list/download/upload)
+   - services/ingestion.py (ingest_file_into_job reuse storage + process_document_task)
+   - services/workflow_engine.py: 4 NODE_TYPES + executors + EXECUTORS
+   - schemas/integration.py + models/integration.py: type รองรับ gdrive/onedrive (Postgres ENUM ต้อง ALTER TYPE ADD VALUE — เพิ่ม migration ใน main.py แบบ AUTOCOMMIT; ค่า label = ชื่อ enum ตัวพิมพ์ใหญ่ GDRIVE/ONEDRIVE ตามที่ SQLAlchemy SQLEnum persist)
+   - api/v1/endpoints/integrations.py: endpoint POST /integrations/{id}/test-drive
+   - Frontend: integration_select field type + หมวด/ไอคอน storage (workflows builder); ฟอร์มสร้าง credential gdrive(วาง service-account JSON)/onedrive(tenant/client/secret/drive) + ปุ่มทดสอบในหน้า Integration
+
+3. Verification performed
+   - python3 -m py_compile ผ่านทุกไฟล์ backend; cd frontend && npx tsc --noEmit ผ่าน; npm run build สำเร็จ
+   - Rebuild backend/frontend/celery_worker + restart; healthy
+   - Gateway egress: requests จาก worker ไป oauth2.googleapis.com / www.googleapis.com / login.microsoftonline.com / graph.microsoft.com เชื่อมต่อได้ (404/200)
+   - node-types: มี 4 โหนดใหม่ หมวด storage พร้อม output_fields + integration_select(provider ตรง)
+   - สร้าง Integration type gdrive และ onedrive ได้ (หลังแก้ Postgres ENUM); ปรากฏใน /integrations/active (สำหรับ dropdown ในโหนด)
+   - test-drive ด้วย credential ปลอม: ทั้ง Google (JWT signing → token endpoint → invalid_grant) และ Microsoft (token endpoint → AADSTS900023) คืน HTTP 400 พร้อมข้อความ error จริง — พิสูจน์ว่า client + proxy + error handling ทำงาน (ไม่ crash 500)
+   - https://localhost/workflows และ /integrations ตอบ 200
+
+4. ขั้น end-to-end ที่เหลือ (ต้องมี credential จริงจากผู้ใช้)
+   - Google: สร้าง service account + แชร์โฟลเดอร์ Drive ให้อีเมล client_email; OneDrive: Azure app + Files.ReadWrite.All + admin consent + drive_id
+   - จากนั้น: gdrive_import(folder→Job) ต้องมี Document ใหม่และ process_document_task ทำงาน; (Transform/Write→) gdrive_upload ต้องเห็นไฟล์บน Drive

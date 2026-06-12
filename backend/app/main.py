@@ -21,6 +21,7 @@ from app.models.agent_message import AgentMessage
 from app.models.agent_memory import AgentMemory
 from app.models.agent_skill import AgentSkill
 from app.models.agent_pending_action import AgentPendingAction
+from app.models.workflow import Workflow, WorkflowRun, WorkflowNodeRun
 from app.initial_data import init_db
 from app.initial_templates import init_system_templates
 from app.initial_ai_settings import init_ai_settings
@@ -76,6 +77,11 @@ with engine.connect() as conn:
     conn.execute(text("ALTER TABLE IF EXISTS agent_skills ADD COLUMN IF NOT EXISTS user_id uuid NULL"))  # make nullable for system skills
     conn.execute(text("ALTER TABLE IF EXISTS agent_skills ALTER COLUMN name TYPE varchar(64)"))
 
+    # AI Settings: agent provider fields
+    conn.execute(text("ALTER TABLE IF EXISTS ai_settings ADD COLUMN IF NOT EXISTS model varchar DEFAULT 'gpt-4o-mini'"))
+    conn.execute(text("ALTER TABLE IF EXISTS ai_settings ADD COLUMN IF NOT EXISTS is_agent_provider boolean DEFAULT false"))
+    conn.execute(text("ALTER TABLE IF EXISTS ai_settings ADD COLUMN IF NOT EXISTS provider_type varchar DEFAULT 'completion_messages'"))
+
     # Migrate existing data: if api_endpoint exists but ocr_endpoint doesn't, copy it
     conn.execute(text("""
         UPDATE settings
@@ -86,6 +92,17 @@ with engine.connect() as conn:
     """))
 
     conn.commit()
+
+# Add new cloud-storage values to the integrationtype enum (Postgres ENUM).
+# ALTER TYPE ... ADD VALUE must run outside a transaction → use AUTOCOMMIT.
+with engine.connect() as conn:
+    autocommit = conn.execution_options(isolation_level="AUTOCOMMIT")
+    # SQLAlchemy SQLEnum persists the member NAME (uppercase), e.g. API/WORKFLOW/LLM
+    for label in ("GDRIVE", "ONEDRIVE"):
+        try:
+            autocommit.execute(text(f"ALTER TYPE integrationtype ADD VALUE IF NOT EXISTS '{label}'"))
+        except Exception as exc:  # pragma: no cover — enum/table may not exist yet
+            print(f"Skip enum migration for {label}: {exc}")
 
 # Seed an initial admin user if none exists
 def ensure_seed_user():

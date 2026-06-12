@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from openai import AsyncOpenAI
 import httpx
 
-from app.agent.context import AgentContext, build_system_prompt
+from app.agent.context import AgentContext, build_system_prompt, tool_content_for_llm
 from app.agent.events import sse_event, SSEEventType
 from app.agent.confirmations import requires_confirmation, describe_action
 from app.agent.tools.registry import tool_registry
@@ -24,6 +24,50 @@ from app.crud.crud_agent_message import agent_message as crud_msg
 from app.crud.crud_agent_pending import agent_pending as crud_pending
 from app.crud.crud_agent_conversation import agent_conversation as crud_conv
 from app.utils.activity_logger import log_activity
+
+
+# LLM call reliability knobs. Low temperature keeps tool arguments and JSON
+# deterministic; retries absorb transient provider failures (429/5xx/timeouts)
+# so a single hiccup doesn't kill a run that already did useful work.
+LLM_TEMPERATURE = 0.2
+LLM_REQUEST_TIMEOUT_S = 120.0
+LLM_MAX_ATTEMPTS = 3
+LLM_RETRY_BASE_DELAY_S = 2.0
+
+
+async def _chat_with_retry(client: AsyncOpenAI, **kwargs):
+    """chat.completions.create with retries and a temperature fallback.
+
+    Some OpenAI-compatible providers reject the temperature parameter; on such
+    an error we drop it and retry immediately instead of burning attempts.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(1, LLM_MAX_ATTEMPTS + 1):
+        try:
+            return await client.chat.completions.create(**kwargs)
+        except Exception as e:
+            last_exc = e
+            if "temperature" in str(e).lower() and "temperature" in kwargs:
+                kwargs.pop("temperature")
+                continue
+            if attempt < LLM_MAX_ATTEMPTS:
+                await asyncio.sleep(LLM_RETRY_BASE_DELAY_S * (2 ** (attempt - 1)))
+    raise last_exc
+
+
+def _max_iterations_fallback_text(user_message: str) -> str:
+    thai = bool(re.search(r"[\u0e00-\u0e7f]", user_message or ""))
+    if thai:
+        return (
+            "ผมใช้จำนวนรอบการทำงานครบกำหนดแล้วแต่ยังทำงานไม่เสร็จสมบูรณ์ครับ "
+            "ผลลัพธ์บางส่วนอาจถูกบันทึกไว้แล้ว — ลองสั่งต่อโดยระบุขอบเขตให้แคบลง "
+            "เช่น เลือกเอกสารหรือขั้นตอนที่ต้องการเป็นพิเศษ"
+        )
+    return (
+        "I reached the maximum number of working iterations before fully completing the task. "
+        "Partial results may already be saved — please retry with a narrower request, "
+        "such as a specific document or step."
+    )
 
 
 def _tool_calls_data(msg) -> list[dict]:
@@ -271,6 +315,8 @@ class AgentLoop:
         client = AsyncOpenAI(
             api_key=api_key,
             base_url=self.llm_config.get("baseUrl") or None,
+            timeout=LLM_REQUEST_TIMEOUT_S,
+            max_retries=0,  # retries are handled by _chat_with_retry with backoff
         )
         model = self.llm_config.get("model", "gpt-4o-mini")
         system_prompt = build_system_prompt(self.context, user_message)
@@ -294,11 +340,13 @@ class AgentLoop:
             yield sse_event(SSEEventType.THINKING, {"iteration": iteration})
 
             try:
-                response = await client.chat.completions.create(
+                response = await _chat_with_retry(
+                    client,
                     model=model,
                     messages=messages,
                     tools=tools_schema,
                     tool_choice="auto",
+                    temperature=LLM_TEMPERATURE,
                     stream=False,
                 )
             except Exception as e:
@@ -383,7 +431,7 @@ class AgentLoop:
                                      tool_result=result, iteration=iteration)
                         messages.append({
                             "role": "tool", "tool_call_id": tc.id,
-                            "content": json.dumps(result, ensure_ascii=False, default=str),
+                            "content": tool_content_for_llm(result),
                         })
                         tool_events_seen += 1
                         current_turn_tools.add(tool_name)
@@ -412,7 +460,7 @@ class AgentLoop:
                                      tool_result=result, iteration=iteration)
                         messages.append({
                             "role": "tool", "tool_call_id": tc.id,
-                            "content": json.dumps(result, ensure_ascii=False, default=str),
+                            "content": tool_content_for_llm(result),
                         })
                         tool_events_seen += 1
                         current_turn_tools.add(tool_name)
@@ -463,6 +511,35 @@ class AgentLoop:
                 yield sse_event(SSEEventType.DONE, {"iterations": iteration})
                 return
 
+        # Out of iterations — force one tool-free wrap-up call so the user gets
+        # a real answer (what was done, what's missing) instead of silence.
+        messages.append({
+            "role": "system",
+            "content": (
+                "You have used the maximum number of tool iterations. Do not call any more tools. "
+                "Summarize for the user, in the user's language: what was accomplished, what remains "
+                "unfinished, and any errors encountered. Never claim a file was created or saved "
+                "unless a tool already returned ok=true."
+            ),
+        })
+        final_text = ""
+        try:
+            response = await _chat_with_retry(
+                client, model=model, messages=messages,
+                temperature=LLM_TEMPERATURE, stream=False,
+            )
+            final_text = (response.choices[0].message.content or "").strip()
+        except Exception:
+            pass
+        if not final_text or _looks_like_raw_tool_payload(final_text):
+            final_text = _max_iterations_fallback_text(user_message)
+        if _claims_file_success(final_text) and not current_turn_file_success and unresolved_tool_errors:
+            final_text = _failure_final_text(unresolved_tool_errors)
+
+        crud_msg.add(self.db, conversation_id=self.conversation_id, role="assistant",
+                     content=final_text, iteration=self.max_iterations, model_used=model)
+        for chunk in (final_text[i:i+50] for i in range(0, len(final_text), 50)):
+            yield sse_event(SSEEventType.DELTA, {"text": chunk})
         yield sse_event(SSEEventType.DONE, {"iterations": self.max_iterations, "stopped": "max_iterations"})
 
     def _is_summary_request(self, user_message: str) -> bool:
@@ -527,24 +604,32 @@ class AgentLoop:
                 "document_type": "agent",
                 "agent_prompt": prompt,
                 "system_prompt": system_prompt,
-                "tool_results": json.dumps(tool_results[-5:], ensure_ascii=False, default=str),
+                "tool_results": tool_content_for_llm(tool_results[-5:]),
             },
             "user": str(self.user_id),
             "citation": False,
             "response_mode": "blocking",
         }
-        async with httpx.AsyncClient(timeout=90.0) as client:
-            response = await client.post(
-                self.llm_config["apiUrl"],
-                json=payload,
-                headers={
-                    "Authorization": f"Bearer {self.llm_config['apiKey']}",
-                    "Content-Type": "application/json",
-                },
-            )
-            response.raise_for_status()
-            data = response.json()
-        return str(data.get("answer") or data.get("text") or data.get("output") or "")
+        last_exc: Exception | None = None
+        for attempt in range(1, LLM_MAX_ATTEMPTS + 1):
+            try:
+                async with httpx.AsyncClient(timeout=90.0) as client:
+                    response = await client.post(
+                        self.llm_config["apiUrl"],
+                        json=payload,
+                        headers={
+                            "Authorization": f"Bearer {self.llm_config['apiKey']}",
+                            "Content-Type": "application/json",
+                        },
+                    )
+                    response.raise_for_status()
+                    data = response.json()
+                return str(data.get("answer") or data.get("text") or data.get("output") or "")
+            except Exception as e:
+                last_exc = e
+                if attempt < LLM_MAX_ATTEMPTS:
+                    await asyncio.sleep(LLM_RETRY_BASE_DELAY_S * (2 ** (attempt - 1)))
+        raise last_exc
 
     async def _emit_context_tool(self, tool_name: str, tool_args: dict, iteration: int) -> AsyncGenerator[str, None]:
         call_id = f"call_{uuid4().hex[:12]}"
@@ -618,7 +703,7 @@ When a report tool such as run_report_code succeeds, final answers must be short
         for iteration in range(1, self.max_iterations + 1):
             yield sse_event(SSEEventType.THINKING, {"iteration": iteration})
             if tool_results:
-                prompt = base_prompt + "\n## Recent Tool Results\n" + json.dumps(tool_results[-5:], ensure_ascii=False, default=str)
+                prompt = base_prompt + "\n## Recent Tool Results\n" + tool_content_for_llm(tool_results[-5:])
             else:
                 prompt = base_prompt
 
@@ -725,7 +810,7 @@ When a report tool such as run_report_code succeeds, final answers must be short
             if _is_report_success(tool_name, result):
                 tool_results.append({"tool": "__report_final_hint", "arguments": {}, "result": {"message": _short_report_final_text(result, user_message)}})
 
-        final_text = "Stopped after reaching the maximum agent iterations."
+        final_text = _max_iterations_fallback_text(user_message)
         crud_msg.add(self.db, conversation_id=self.conversation_id, role="assistant",
                      content=final_text, iteration=self.max_iterations, model_used=model_name)
         yield sse_event(SSEEventType.DELTA, {"text": final_text})

@@ -9,7 +9,7 @@ celery_app = Celery(
     "softnix_ocr",
     broker=settings.REDIS_URL,
     backend=settings.REDIS_URL,
-    include=["app.tasks.document_tasks"]
+    include=["app.tasks.document_tasks", "app.tasks.workflow_tasks"]
 )
 
 celery_app.conf.update(
@@ -23,4 +23,10 @@ celery_app.conf.update(
     task_time_limit=2100,       # 35 minutes hard kill (SIGKILL) — last resort
     worker_prefetch_multiplier=1,  # Process one task at a time per worker
     task_acks_late=True,  # Acknowledge task after completion (more reliable)
+    beat_schedule={
+        "dispatch-scheduled-workflows": {
+            "task": "app.tasks.workflow_tasks.dispatch_scheduled_workflows",
+            "schedule": 30.0,  # seconds — checks cron-due workflows
+        },
+    },
 )

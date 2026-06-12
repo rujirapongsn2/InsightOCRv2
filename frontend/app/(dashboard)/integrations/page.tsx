@@ -14,6 +14,7 @@ import {
     createIntegration,
     updateIntegration,
     deleteIntegration,
+    testDriveIntegration,
     type Integration as APIIntegration,
 } from "@/lib/integrations-api"
 import { LLM_TEMPLATES, TEMPLATE_CATEGORIES, type LLMIntegrationTemplate, type TemplateCategory } from "@/lib/integration-templates"
@@ -25,7 +26,7 @@ const TEMPLATE_ICONS: Record<string, LucideIcon> = {
     TrendingUp, AlertOctagon,
 }
 
-type IntegrationType = "api" | "workflow" | "llm"
+type IntegrationType = "api" | "workflow" | "llm" | "gdrive" | "onedrive"
 
 type IntegrationConfig = {
     method?: "POST" | "PUT"
@@ -44,6 +45,15 @@ type IntegrationConfig = {
     userPrompt?: string
     outputFormatPrompt?: string
     reasoningEffort?: "low" | "medium" | "high"
+    // Google Drive (service account) — parsed fields stored directly
+    client_email?: string
+    private_key?: string
+    token_uri?: string
+    // OneDrive / SharePoint (Azure app)
+    tenant_id?: string
+    client_id?: string
+    client_secret?: string
+    drive_id?: string
 }
 
 interface Integration {
@@ -78,6 +88,13 @@ interface IntegrationFormState {
     userPrompt: string
     outputFormatPrompt: string
     reasoningEffort: "low" | "medium" | "high"
+    // Google Drive: raw service-account JSON pasted by the user
+    serviceAccountJson: string
+    // OneDrive / SharePoint
+    tenant_id: string
+    client_id: string
+    client_secret: string
+    drive_id: string
 }
 
 const defaultFormState: IntegrationFormState = {
@@ -99,6 +116,11 @@ const defaultFormState: IntegrationFormState = {
     userPrompt: "",
     outputFormatPrompt: "",
     reasoningEffort: "low",
+    serviceAccountJson: "",
+    tenant_id: "",
+    client_id: "",
+    client_secret: "",
+    drive_id: "",
 }
 
 const seedIntegrations: Integration[] = [
@@ -152,6 +174,38 @@ const seedIntegrations: Integration[] = [
         }
     },
 ]
+
+function DriveTestButton({ id }: { id: string }) {
+    const [loading, setLoading] = useState(false)
+    const [result, setResult] = useState<string | null>(null)
+    const run = async () => {
+        const token = typeof window !== "undefined" ? localStorage.getItem("token") : null
+        if (!token) return
+        setLoading(true)
+        setResult(null)
+        try {
+            const res = await testDriveIntegration(token, id)
+            setResult("✓ เชื่อมต่อสำเร็จ: " + JSON.stringify(res.detail))
+        } catch (e) {
+            setResult("✗ " + (e instanceof Error ? e.message : "ล้มเหลว"))
+        } finally {
+            setLoading(false)
+        }
+    }
+    return (
+        <div className="space-y-2 pt-3 border-t">
+            <Button type="button" variant="outline" onClick={run} disabled={loading}>
+                {loading ? "กำลังทดสอบ…" : "ทดสอบการเชื่อมต่อ"}
+            </Button>
+            <p className="text-xs text-slate-500">ทดสอบ credential ที่บันทึกไว้ล่าสุด (กด Save ก่อนถ้าเพิ่งแก้ไข)</p>
+            {result && (
+                <div className={`p-3 rounded-md text-sm font-mono whitespace-pre-wrap break-all ${result.startsWith("✓") ? "bg-green-50 text-green-800 border border-green-200" : "bg-red-50 text-red-800 border border-red-200"}`}>
+                    {result}
+                </div>
+            )}
+        </div>
+    )
+}
 
 export default function IntegrationsPage() {
     const { user } = useAuth()
@@ -318,6 +372,18 @@ export default function IntegrationsPage() {
             userPrompt: integration.config.userPrompt || "",
             outputFormatPrompt: integration.config.outputFormatPrompt || "",
             reasoningEffort: integration.config.reasoningEffort || "low",
+            // gdrive: reconstruct a JSON view from stored fields (private key is preserved)
+            serviceAccountJson: integration.config.client_email
+                ? JSON.stringify({
+                    client_email: integration.config.client_email,
+                    private_key: integration.config.private_key,
+                    token_uri: integration.config.token_uri || "https://oauth2.googleapis.com/token",
+                }, null, 2)
+                : "",
+            tenant_id: integration.config.tenant_id || "",
+            client_id: integration.config.client_id || "",
+            client_secret: integration.config.client_secret || "",
+            drive_id: integration.config.drive_id || "",
         })
         setEditingId(integration.id)
         setShowForm(true)
@@ -374,21 +440,51 @@ export default function IntegrationsPage() {
         // Set loading state
         setLoading(true)
 
-        const configData = {
-            method: formState.method,
-            endpoint: formState.endpoint,
-            authHeader: formState.authHeader,
-            headersJson: formState.headersJson,
-            payloadTemplate: formState.payloadTemplate,
-            webhookUrl: formState.webhookUrl,
-            parameters: formState.parameters,
-            model: formState.model,
-            apiKey: formState.apiKey,
-            baseUrl: formState.baseUrl,
-            instructions: formState.instructions,
-            userPrompt: formState.userPrompt,
-            outputFormatPrompt: formState.outputFormatPrompt,
-            reasoningEffort: formState.reasoningEffort,
+        let configData: Record<string, any>
+        if (formState.type === "gdrive") {
+            // Parse the pasted service-account JSON into the fields the backend expects
+            let sa: any
+            try {
+                sa = JSON.parse(formState.serviceAccountJson)
+            } catch {
+                setLoading(false)
+                alert("Service Account JSON ไม่ถูกต้อง — กรุณาวางไฟล์ JSON ทั้งไฟล์")
+                return
+            }
+            if (!sa.client_email || !sa.private_key) {
+                setLoading(false)
+                alert("Service Account JSON ต้องมี client_email และ private_key")
+                return
+            }
+            configData = {
+                client_email: sa.client_email,
+                private_key: sa.private_key,
+                token_uri: sa.token_uri || "https://oauth2.googleapis.com/token",
+            }
+        } else if (formState.type === "onedrive") {
+            configData = {
+                tenant_id: formState.tenant_id,
+                client_id: formState.client_id,
+                client_secret: formState.client_secret,
+                drive_id: formState.drive_id,
+            }
+        } else {
+            configData = {
+                method: formState.method,
+                endpoint: formState.endpoint,
+                authHeader: formState.authHeader,
+                headersJson: formState.headersJson,
+                payloadTemplate: formState.payloadTemplate,
+                webhookUrl: formState.webhookUrl,
+                parameters: formState.parameters,
+                model: formState.model,
+                apiKey: formState.apiKey,
+                baseUrl: formState.baseUrl,
+                instructions: formState.instructions,
+                userPrompt: formState.userPrompt,
+                outputFormatPrompt: formState.outputFormatPrompt,
+                reasoningEffort: formState.reasoningEffort,
+            }
         }
 
         try {
@@ -897,6 +993,59 @@ export default function IntegrationsPage() {
                         </div>
                     </div>
                 )
+            case "gdrive":
+                return (
+                    <div className="space-y-4 p-4 bg-slate-50 rounded-lg border">
+                        <div className="text-sm font-semibold text-slate-700">Google Drive — Service Account</div>
+                        <div className="space-y-2">
+                            <label className="text-sm font-medium">Service Account JSON *</label>
+                            <Textarea
+                                placeholder='{ "type": "service_account", "client_email": "...", "private_key": "-----BEGIN PRIVATE KEY-----\\n..." }'
+                                value={formState.serviceAccountJson}
+                                onChange={(e) => setFormState({ ...formState, serviceAccountJson: e.target.value })}
+                                disabled={isUser}
+                                rows={8}
+                                className="font-mono text-xs"
+                            />
+                            <p className="text-xs text-slate-500">
+                                วางทั้งไฟล์ service-account JSON จาก Google Cloud — และ <span className="font-semibold">แชร์โฟลเดอร์ปลายทางใน Drive ให้อีเมล client_email</span> ของ service account นี้
+                            </p>
+                        </div>
+                        {editingId && <DriveTestButton id={editingId} />}
+                    </div>
+                )
+            case "onedrive":
+                return (
+                    <div className="space-y-4 p-4 bg-slate-50 rounded-lg border">
+                        <div className="text-sm font-semibold text-slate-700">OneDrive / SharePoint — Azure App (client credentials)</div>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div className="space-y-2">
+                                <label className="text-sm font-medium">Tenant ID *</label>
+                                <Input value={formState.tenant_id} disabled={isUser}
+                                    onChange={(e) => setFormState({ ...formState, tenant_id: e.target.value })} />
+                            </div>
+                            <div className="space-y-2">
+                                <label className="text-sm font-medium">Client ID *</label>
+                                <Input value={formState.client_id} disabled={isUser}
+                                    onChange={(e) => setFormState({ ...formState, client_id: e.target.value })} />
+                            </div>
+                            <div className="space-y-2">
+                                <label className="text-sm font-medium">Client Secret *</label>
+                                <Input type="password" value={formState.client_secret} disabled={isUser}
+                                    onChange={(e) => setFormState({ ...formState, client_secret: e.target.value })} />
+                            </div>
+                            <div className="space-y-2">
+                                <label className="text-sm font-medium">Drive ID *</label>
+                                <Input value={formState.drive_id} disabled={isUser}
+                                    onChange={(e) => setFormState({ ...formState, drive_id: e.target.value })} />
+                            </div>
+                        </div>
+                        <p className="text-xs text-slate-500">
+                            Azure app registration ต้องมีสิทธิ์ <span className="font-mono">Files.ReadWrite.All</span> (application) และ admin consent; Drive ID = ไดรฟ์ของ SharePoint library หรือ OneDrive ปลายทาง
+                        </p>
+                        {editingId && <DriveTestButton id={editingId} />}
+                    </div>
+                )
             default:
                 return null
         }
@@ -1262,7 +1411,10 @@ export default function IntegrationsPage() {
                                     )}
                                     <span className="text-lg font-semibold text-slate-900">{integration.name}</span>
                                     <span className="rounded-full bg-slate-100 text-slate-700 px-3 py-1 text-xs capitalize">
-                                        {integration.type === "workflow" ? "Workflow Automation" : integration.type.toUpperCase()}
+                                        {integration.type === "workflow" ? "Workflow Automation"
+                                            : integration.type === "gdrive" ? "Google Drive"
+                                            : integration.type === "onedrive" ? "OneDrive / SharePoint"
+                                            : integration.type.toUpperCase()}
                                     </span>
                                     <span className={`rounded-full px-3 py-1 text-xs ${integration.status === "active" ? "bg-green-100 text-green-800" : "bg-amber-100 text-amber-800"}`}>
                                         {integration.status === "active" ? "Active" : "Paused"}
@@ -1326,6 +1478,8 @@ export default function IntegrationsPage() {
                                 <option value="api">API</option>
                                 <option value="workflow">Workflow Automation</option>
                                 <option value="llm">LLM</option>
+                                <option value="gdrive">Google Drive</option>
+                                <option value="onedrive">OneDrive / SharePoint</option>
                             </select>
                         </div>
                         <div className="space-y-2">

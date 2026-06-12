@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from uuid import UUID
 import os
@@ -87,6 +88,31 @@ def _build_agent_llm_config(db: Session, conv) -> dict:
             "source": "system_agent_provider",
         }
 
+    # Check for an ai_settings entry explicitly marked as the agent provider.
+    # This is the recommended path when AGENT_PROVIDER_KEY is not set via env.
+    agent_setting = db.query(AISettings).filter(
+        AISettings.is_agent_provider == True,
+        AISettings.is_active == True,
+    ).first()
+    if agent_setting and agent_setting.api_url and agent_setting.api_key:
+        provider_type = getattr(agent_setting, "provider_type", None) or "openai_compatible"
+        model = getattr(agent_setting, "model", None) or "gpt-4o-mini"
+        if provider_type == "openai_compatible":
+            return {
+                "provider": "openai_compatible",
+                "apiKey": agent_setting.api_key,
+                "baseUrl": agent_setting.api_url,
+                "model": model,
+                "source": "ai_settings_agent_provider",
+            }
+        return {
+            "provider": "completion_messages",
+            "apiUrl": agent_setting.api_url,
+            "apiKey": agent_setting.api_key,
+            "model": model,
+            "source": "ai_settings_agent_provider",
+        }
+
     # Backward-compatible fallback for environments that only configured the
     # older schema-suggestion provider. This is less capable than the dedicated
     # Agent provider because it may not support native tool calling.
@@ -95,7 +121,7 @@ def _build_agent_llm_config(db: Session, conv) -> dict:
         "provider": "completion_messages",
         "apiUrl": setting.api_url,
         "apiKey": setting.api_key,
-        "model": setting.name,
+        "model": getattr(setting, "model", None) or setting.name,
         "source": "fallback_ai_settings",
     }
 
@@ -501,3 +527,179 @@ async def export_skill(
 
     md_content = export_skill_to_md(skill, include_bundle=False)
     return PlainTextResponse(content=md_content, media_type="text/markdown")
+
+
+# ---------------------------------------------------------------------------
+# Agent success metrics (admin dashboard)
+# ---------------------------------------------------------------------------
+
+def _tool_result_failed(result) -> bool:
+    """Mirror AgentLoop._tool_failed: a dict carrying an error or ok=false."""
+    return isinstance(result, dict) and ("error" in result or result.get("ok") is False)
+
+
+def _classify_runs(messages, max_iter_by_conv: dict, default_max_iter: int):
+    """Group ordered messages into runs (one run per user message) and tally outcomes.
+
+    A run runs from one user message up to (but not including) the next user
+    message in the same conversation. Outcome heuristic:
+      - completed       : ends with a plain assistant text answer, below the cap
+      - max_iterations  : that final answer landed at the conversation's cap
+      - errored         : the run never produced a final assistant answer
+                          (loop returned early on an LLM/stream error, or the
+                          last activity is a tool / tool-call message)
+    """
+    by_conv: dict = {}
+    for m in messages:
+        by_conv.setdefault(m.conversation_id, []).append(m)
+
+    completed = max_hit = errored = 0
+    iteration_totals = 0
+    counted_runs = 0
+
+    for conv_id, msgs in by_conv.items():
+        cap = max_iter_by_conv.get(conv_id) or default_max_iter
+        # Split into runs on each user message.
+        runs: list[list] = []
+        current: list = []
+        for m in msgs:
+            if m.role == "user":
+                if current:
+                    runs.append(current)
+                current = [m]
+            elif current:
+                current.append(m)
+        if current:
+            runs.append(current)
+
+        for run in runs:
+            # A run must start with a user message to be a real run.
+            if not run or run[0].role != "user":
+                continue
+            counted_runs += 1
+            run_max_iter = max((m.iteration or 0) for m in run)
+            iteration_totals += run_max_iter
+
+            last = run[-1]
+            is_final_answer = (
+                last.role == "assistant"
+                and bool((last.content or "").strip())
+                and not last.tool_calls
+            )
+            if not is_final_answer:
+                errored += 1
+            elif run_max_iter >= cap:
+                max_hit += 1
+            else:
+                completed += 1
+
+    avg_iterations = round(iteration_totals / counted_runs, 2) if counted_runs else 0.0
+    return {
+        "total_runs": counted_runs,
+        "completed": completed,
+        "hit_max_iterations": max_hit,
+        "errored": errored,
+        "success_rate": round(completed / counted_runs, 4) if counted_runs else 0.0,
+        "avg_iterations": avg_iterations,
+    }
+
+
+@router.get("/metrics")
+async def agent_metrics(
+    days: int = 30,
+    db: Session = Depends(deps.get_db),
+    current_user=Depends(deps.get_current_user),
+):
+    """Aggregate AI Agent reliability metrics for an admin dashboard.
+
+    Computed from existing data in agent_messages / agent_conversations /
+    agent_pending_actions — no new instrumentation required. Use `days` to
+    bound the window (0 or negative = all time).
+    """
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="The user doesn't have enough privileges")
+
+    from datetime import datetime, timedelta, timezone
+    from app.models.agent_message import AgentMessage
+    from app.models.agent_conversation import AgentConversation
+    from app.models.agent_pending_action import AgentPendingAction
+
+    since = None
+    if days and days > 0:
+        since = datetime.now(timezone.utc) - timedelta(days=days)
+
+    # max_iterations per conversation (for the cap comparison)
+    conv_rows = db.query(AgentConversation.id, AgentConversation.max_iterations).all()
+    max_iter_by_conv = {cid: (mi or 15) for cid, mi in conv_rows}
+
+    # Pull only the columns the run classifier needs, in chronological order.
+    msg_q = db.query(
+        AgentMessage.conversation_id,
+        AgentMessage.role,
+        AgentMessage.content,
+        AgentMessage.tool_calls,
+        AgentMessage.tool_name,
+        AgentMessage.tool_result,
+        AgentMessage.iteration,
+        AgentMessage.created_at,
+    )
+    if since is not None:
+        msg_q = msg_q.filter(AgentMessage.created_at >= since)
+    messages = msg_q.order_by(
+        AgentMessage.conversation_id, AgentMessage.created_at
+    ).all()
+
+    run_stats = _classify_runs(messages, max_iter_by_conv, default_max_iter=15)
+
+    # Tool failure rate per tool name.
+    tool_stats: dict = {}
+    for m in messages:
+        if m.role != "tool" or not m.tool_name:
+            continue
+        entry = tool_stats.setdefault(m.tool_name, {"calls": 0, "failures": 0})
+        entry["calls"] += 1
+        if _tool_result_failed(m.tool_result):
+            entry["failures"] += 1
+
+    tools = [
+        {
+            "tool_name": name,
+            "calls": s["calls"],
+            "failures": s["failures"],
+            "failure_rate": round(s["failures"] / s["calls"], 4) if s["calls"] else 0.0,
+        }
+        for name, s in sorted(
+            tool_stats.items(),
+            key=lambda kv: (kv[1]["failures"] / kv[1]["calls"] if kv[1]["calls"] else 0, kv[1]["calls"]),
+            reverse=True,
+        )
+    ]
+    total_tool_calls = sum(s["calls"] for s in tool_stats.values())
+    total_tool_failures = sum(s["failures"] for s in tool_stats.values())
+
+    # Confirmation outcomes (human-in-the-loop gate).
+    pend_q = db.query(AgentPendingAction.status, func.count(AgentPendingAction.id))
+    if since is not None:
+        pend_q = pend_q.filter(AgentPendingAction.created_at >= since)
+    pend_rows = pend_q.group_by(AgentPendingAction.status).all()
+    pend_counts = {status: count for status, count in pend_rows}
+    confirmed = pend_counts.get("confirmed", 0)
+    rejected = pend_counts.get("rejected", 0)
+    resolved = confirmed + rejected
+
+    return {
+        "window_days": days if (days and days > 0) else None,
+        "runs": run_stats,
+        "tools": {
+            "total_calls": total_tool_calls,
+            "total_failures": total_tool_failures,
+            "overall_failure_rate": round(total_tool_failures / total_tool_calls, 4) if total_tool_calls else 0.0,
+            "per_tool": tools,
+        },
+        "confirmations": {
+            "pending": pend_counts.get("pending", 0),
+            "confirmed": confirmed,
+            "rejected": rejected,
+            "rejection_rate": round(rejected / resolved, 4) if resolved else 0.0,
+        },
+    }

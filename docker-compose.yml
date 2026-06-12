@@ -91,10 +91,12 @@ services:
     command: celery -A app.celery_app worker --loglevel=info --concurrency=4
     volumes:
       - documents_uploads:/app/uploads
+      - /var/run/docker.sock:/var/run/docker.sock  # Sandbox: workflow Python Code nodes
     env_file:
       - ./backend/.env
     environment:
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
+      - SANDBOX_IMAGE=python:3.12-slim
       - HTTP_PROXY=http://gateway:8888
       - HTTPS_PROXY=http://gateway:8888
       - NO_PROXY=localhost,127.0.0.1,backend,db,redis,minio,frontend,nginx,gateway
@@ -106,6 +108,8 @@ services:
       - internal # isolate; outbound via gateway proxy
     security_opt:
       - no-new-privileges:true
+    group_add:
+      - "988" # Host docker group for /var/run/docker.sock sandbox access
     cap_drop:
       - ALL
     read_only: true
@@ -115,6 +119,34 @@ services:
       resources:
         limits:
           memory: 2G
+    restart: unless-stopped
+
+  celery_beat:
+    build: ./backend
+    container_name: softnix_ocr_celery_beat
+    command: celery -A app.celery_app beat --loglevel=info --schedule /tmp/celerybeat-schedule
+    volumes:
+      - documents_uploads:/app/uploads # task imports create log dirs here
+    env_file:
+      - ./backend/.env
+    environment:
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
+    depends_on:
+      - redis
+      - backend
+    networks:
+      - internal
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+    deploy:
+      resources:
+        limits:
+          memory: 256M
     restart: unless-stopped
 
   frontend:

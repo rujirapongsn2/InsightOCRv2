@@ -6,7 +6,7 @@ import { usePathname } from "next/navigation"
 import { useEffect, useMemo, useRef, useState } from "react"
 import {
     LayoutDashboard, FileText, Settings, Users,
-    PanelLeftClose, PanelLeftOpen, User as UserIcon, LogOut, Plug,
+    PanelLeftClose, PanelLeftOpen, User as UserIcon, LogOut, Plug, Workflow as WorkflowIcon,
 } from "lucide-react"
 import { useAuth } from "@/components/auth-provider"
 import { Logo } from "@/components/logo"
@@ -32,6 +32,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         { href: "/jobs",          label: "Jobs",           icon: FileText,        roles: ["admin", "manager", "user"] },
         { href: "/schemas",       label: "Schemas",        icon: Settings,        roles: ["admin", "manager"] },
         { href: "/integrations",  label: "Integration",    icon: Plug,            roles: ["admin", "manager"] },
+        { href: "/workflows",     label: "Workflow",       icon: WorkflowIcon,    roles: ["admin", "manager", "user"] },
         { href: "/activity-logs", label: "Activity Logs",  icon: FileText,        roles: ["admin", "manager", "user"] },
         { href: "/users",         label: "Users",          icon: Users,           roles: ["admin"] },
     ]
@@ -234,7 +235,11 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                     </nav>
                 )}
 
-                <main className="flex-1 overflow-y-auto p-6 md:p-8">
+                <main className={
+                    /^\/workflows\/[^/]+/.test(pathname)
+                        ? "flex-1 overflow-hidden" // workflow builder is full-bleed
+                        : "flex-1 overflow-y-auto p-6 md:p-8"
+                }>
                     {children}
                 </main>
             </div>

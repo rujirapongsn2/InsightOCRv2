@@ -1,5 +1,11 @@
+import asyncio
 from typing import Callable, Any
 from dataclasses import dataclass, field
+
+# Hard cap per tool call so one hung tool (e.g. an unresponsive external API)
+# cannot stall the whole agent run. Generous enough for sandboxed python /
+# report generation, which are the slowest legitimate tools.
+TOOL_EXECUTION_TIMEOUT_S = 180.0
 
 
 @dataclass
@@ -39,7 +45,18 @@ class ToolRegistry:
         tool = self._tools.get(name)
         if not tool:
             return {"error": f"Tool '{name}' not found"}
-        return await tool.handler(args=args, context=context)
+        try:
+            return await asyncio.wait_for(
+                tool.handler(args=args, context=context),
+                timeout=TOOL_EXECUTION_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            return {
+                "error": f"Tool '{name}' timed out after {int(TOOL_EXECUTION_TIMEOUT_S)}s",
+                "timeout": True,
+            }
+        except Exception as e:
+            return {"error": f"Tool '{name}' raised {type(e).__name__}: {e}"}
 
 
 tool_registry = ToolRegistry()

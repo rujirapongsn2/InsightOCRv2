@@ -6,6 +6,23 @@ from app.crud.crud_agent_conversation import agent_conversation as crud_conv
 from app.crud.crud_agent_memory import agent_memory as crud_memory
 from app.crud.crud_agent_skill import agent_skill as crud_skill
 
+# Cap on how much of a tool result is fed back to the LLM. Full results stay in
+# the DB; only the model-facing copy is truncated so giant OCR payloads don't
+# blow the context window or drown the model in noise.
+TOOL_RESULT_MAX_CHARS = 12000
+
+
+def tool_content_for_llm(result) -> str:
+    """Serialize a tool result for the LLM, truncating oversized payloads."""
+    content = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False, default=str)
+    if len(content) > TOOL_RESULT_MAX_CHARS:
+        omitted = len(content) - TOOL_RESULT_MAX_CHARS
+        content = (
+            content[:TOOL_RESULT_MAX_CHARS]
+            + f'... [truncated {omitted} chars — make a narrower tool call (e.g. one document, a filter, or a limit) if you need the rest]'
+        )
+    return content
+
 
 _CROSS_DOCUMENT_SKILL_NAME = "cross-document-html-report"
 _CONTRACT_SKILL_NAME = "contract-comparison-html-report"
@@ -101,7 +118,7 @@ class AgentContext:
                 history.append({
                     "role": "tool",
                     "tool_call_id": m.tool_call_id,
-                    "content": m.tool_result if isinstance(m.tool_result, str) else json.dumps(m.tool_result, ensure_ascii=False, default=str),
+                    "content": tool_content_for_llm(m.tool_result),
                 })
         return history
 

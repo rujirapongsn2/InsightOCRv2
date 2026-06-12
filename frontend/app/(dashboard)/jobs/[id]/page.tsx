@@ -53,7 +53,7 @@ interface EditableField {
     value: any
 }
 
-type IntegrationType = "api" | "workflow" | "llm"
+type IntegrationType = "api" | "workflow" | "llm" | "gdrive" | "onedrive"
 
 interface IntegrationConfig {
     method?: "POST" | "PUT"
