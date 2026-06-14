@@ -30,7 +30,7 @@ from app.core.config import settings
 from app.models.workflow import WorkflowRun, WorkflowNodeRun
 from app.models.document import Document
 from app.models.job import Job
-from app.models.integration import Integration
+from app.models.integration import Integration, IntegrationType, IntegrationStatus
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +53,20 @@ NODE_TYPES: List[Dict[str, Any]] = [
         "description": "เริ่ม workflow ตามตารางเวลา (cron) ที่ตั้งไว้ใน workflow settings",
         "config_fields": [],
         "output_fields": [{"name": "scheduled_at", "label": "เวลาที่ทริกเกอร์"}],
+    },
+    {
+        "type": "trigger_webhook",
+        "category": "trigger",
+        "label": "Webhook Trigger",
+        "description": "เริ่ม workflow จาก webhook ภายนอก เช่น web application หรือ LINE webhook",
+        "config_fields": [],
+        "output_fields": [
+            {"name": "body", "label": "Payload body"},
+            {"name": "query", "label": "Query parameters"},
+            {"name": "headers", "label": "Request headers"},
+            {"name": "method", "label": "HTTP method"},
+            {"name": "received_at", "label": "เวลาที่รับ webhook"},
+        ],
     },
     {
         "type": "job_source",
@@ -211,6 +225,32 @@ NODE_TYPES: List[Dict[str, Any]] = [
             {"name": "filename", "label": "ชื่อไฟล์"},
             {"name": "size", "label": "ขนาด (ตัวอักษร)"},
             {"name": "preview", "label": "ตัวอย่างเนื้อหา"},
+        ],
+    },
+    {
+        "type": "webhook_response",
+        "category": "action",
+        "label": "Webhook Response",
+        "description": "กำหนด result ที่ caller จะอ่านได้จาก webhook poll endpoint",
+        "config_fields": [
+            {"name": "visible", "label": "ใช้เป็น result ของ webhook", "type": "boolean", "default": True},
+            {"name": "status_code", "label": "HTTP status", "type": "number", "default": 200,
+             "placeholder": "200"},
+            {"name": "body", "label": "Result body", "type": "textarea", "required": True,
+             "placeholder": "{{llm_1.text}}",
+             "hint": "ใช้ template เพื่อเลือกผลจากโหนดก่อนหน้า เช่น {{trigger.body.events.0.message.text}}"},
+            {"name": "condition_left", "label": "เงื่อนไข: ค่าที่ตรวจ", "type": "text", "required": False,
+             "placeholder": "{{condition_1.result}}"},
+            {"name": "condition_operator", "label": "เงื่อนไข", "type": "select",
+             "options": ["", "equals", "not_equals", "contains", "not_contains", "greater_than",
+                         "less_than", "is_empty", "is_not_empty"], "default": ""},
+            {"name": "condition_right", "label": "เงื่อนไข: ค่าที่ใช้เทียบ", "type": "text", "required": False,
+             "placeholder": "true"},
+        ],
+        "output_fields": [
+            {"name": "visible", "label": "แสดงผลหรือไม่"},
+            {"name": "status_code", "label": "HTTP status"},
+            {"name": "body", "label": "Result body"},
         ],
     },
     {
@@ -456,18 +496,25 @@ def _exec_job_source(db: Session, config: dict, context: dict, log: Callable[[st
     }
 
 
-def _exec_llm(db: Session, config: dict, context: dict, log: Callable[[str], None]) -> Any:
+def resolve_llm_client(
+    db: Session,
+    integration_id: Optional[str] = None,
+    model: Optional[str] = None,
+    log: Optional[Callable[[str], None]] = None,
+):
+    """Build an OpenAI client + resolved model from a workflow Integration
+    (falling back to system defaults). Shared by the LLM node and the
+    AI variable-finder endpoint. Returns (client, model)."""
     from openai import OpenAI
 
-    prompt = config.get("prompt")
-    if not prompt:
-        raise NodeExecutionError("LLM node: prompt is required")
+    def _log(msg: str) -> None:
+        if log:
+            log(msg)
 
     api_key = settings.OPENAI_API_KEY
     base_url: Optional[str] = None
-    model = config.get("model") or "gpt-4o-mini"
+    resolved_model = model or "gpt-4o-mini"
 
-    integration_id = config.get("integration_id")
     if integration_id:
         integration = db.query(Integration).filter(Integration.id == integration_id).first()
         if not integration:
@@ -475,13 +522,29 @@ def _exec_llm(db: Session, config: dict, context: dict, log: Callable[[str], Non
         icfg = integration.config or {}
         api_key = icfg.get("apiKey") or api_key
         base_url = icfg.get("baseUrl") or None
-        model = config.get("model") or icfg.get("model") or model
-        log(f"Using LLM integration '{integration.name}' (model={model})")
+        resolved_model = model or icfg.get("model") or resolved_model
+        _log(f"Using LLM integration '{integration.name}' (model={resolved_model})")
+    elif api_key:
+        _log(f"Using system OPENAI_API_KEY (model={resolved_model})")
     else:
-        log(f"Using default LLM credentials (model={model})")
+        # No explicit integration and no system key: fall back to the first
+        # active LLM-type Integration so the AI helper works out-of-the-box
+        # in deployments that keep credentials only in Integrations.
+        fallback = (
+            db.query(Integration)
+            .filter(Integration.type == IntegrationType.LLM, Integration.status == IntegrationStatus.ACTIVE)
+            .order_by(Integration.created_at.asc())
+            .first()
+        )
+        if fallback:
+            icfg = fallback.config or {}
+            api_key = icfg.get("apiKey")
+            base_url = icfg.get("baseUrl") or None
+            resolved_model = model or icfg.get("model") or resolved_model
+            _log(f"Using fallback LLM integration '{fallback.name}' (model={resolved_model})")
 
     if not api_key:
-        raise NodeExecutionError("LLM node: no API key configured (set integration or OPENAI_API_KEY)")
+        raise NodeExecutionError("ยังไม่ได้ตั้งค่า LLM — สร้าง Integration ชนิด LLM หรือกำหนด OPENAI_API_KEY ก่อน")
 
     client_kwargs: Dict[str, Any] = {"api_key": api_key}
     if base_url:
@@ -489,7 +552,15 @@ def _exec_llm(db: Session, config: dict, context: dict, log: Callable[[str], Non
         if normalized.lower().endswith("/chat/completions"):
             normalized = normalized[: -len("/chat/completions")]
         client_kwargs["base_url"] = normalized
-    client = OpenAI(**client_kwargs)
+    return OpenAI(**client_kwargs), resolved_model
+
+
+def _exec_llm(db: Session, config: dict, context: dict, log: Callable[[str], None]) -> Any:
+    prompt = config.get("prompt")
+    if not prompt:
+        raise NodeExecutionError("LLM node: prompt is required")
+
+    client, model = resolve_llm_client(db, config.get("integration_id"), config.get("model"), log)
 
     messages: List[Dict[str, str]] = []
     system_prompt = config.get("system_prompt")
@@ -511,35 +582,136 @@ def _exec_llm(db: Session, config: dict, context: dict, log: Callable[[str], Non
     return {"text": text}
 
 
-def _exec_condition(db: Session, config: dict, context: dict, log: Callable[[str], None]) -> Any:
-    left = config.get("left")
-    right = config.get("right")
-    operator = config.get("operator") or "equals"
+def suggest_variables(
+    db: Session,
+    query: str,
+    candidates: List[Dict[str, Any]],
+    integration_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """AI variable finder. Given a natural-language description and a catalog
+    of available variables (token/label/sample), ask the LLM to rank the best
+    matches. Returns [{token, reason, confidence}] limited to known tokens.
 
+    The LLM only *selects* from the supplied tokens — sample values are
+    rendered client-side from real run data, so it can't fabricate values.
+    """
+    valid_tokens = {c.get("token") for c in candidates if c.get("token")}
+    if not valid_tokens:
+        return []
+
+    # Compact catalog so the prompt stays small even with many fields.
+    lines = []
+    for c in candidates[:200]:
+        token = c.get("token")
+        if not token:
+            continue
+        label = str(c.get("label") or "").strip()
+        sample = str(c.get("sample") or "").replace("\n", " ")[:80]
+        ctype = c.get("type") or ""
+        lines.append(f"- {token} | label: {label} | type: {ctype} | ตัวอย่าง: {sample}")
+    catalog = "\n".join(lines)
+
+    system = (
+        "You are a data-field matcher for a no-code workflow builder. "
+        "The user describes (in Thai or English) the data they want to insert. "
+        "Choose the variable tokens from the provided catalog that best match the request. "
+        "Match on meaning, label, sample values, and field naming — Thai and English are equivalent "
+        "(e.g. 'เลขที่ใบแจ้งหนี้' ≈ 'invoice number' ≈ 'Invoice_No'). "
+        "Return STRICT JSON only: an array of at most 5 objects "
+        '{"token": <exact token string from the catalog>, '
+        '"reason": <short Thai explanation>, '
+        '"confidence": <"high"|"medium"|"low">}. '
+        "Order by relevance, best first. Use ONLY tokens that appear verbatim in the catalog. "
+        "If nothing matches, return an empty array []."
+    )
+    user = f"คำขอของผู้ใช้: {query}\n\nรายการตัวแปรที่มี (catalog):\n{catalog}"
+
+    client, model = resolve_llm_client(db, integration_id, None, None)
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+    try:
+        response = client.chat.completions.create(model=model, messages=messages, temperature=0)
+    except Exception as exc:  # noqa: BLE001
+        # Some models (e.g. gpt-5-*) reject a non-default temperature — retry plainly.
+        if "temperature" in str(exc).lower():
+            response = client.chat.completions.create(model=model, messages=messages)
+        else:
+            raise
+    text = response.choices[0].message.content or "" if response.choices else ""
+    cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip())
+
+    try:
+        parsed = json.loads(cleaned)
+    except json.JSONDecodeError:
+        # Some models wrap the array in an object — try to dig it out.
+        m = re.search(r"\[.*\]", cleaned, re.DOTALL)
+        if not m:
+            raise NodeExecutionError("AI ไม่สามารถตีความผลลัพธ์ได้ ลองพิมพ์คำอธิบายใหม่")
+        parsed = json.loads(m.group(0))
+
+    if isinstance(parsed, dict):
+        # Tolerate {"results": [...]} or {"matches": [...]}
+        for key in ("results", "matches", "data", "tokens"):
+            if isinstance(parsed.get(key), list):
+                parsed = parsed[key]
+                break
+        else:
+            parsed = [parsed]
+
+    results: List[Dict[str, Any]] = []
+    seen: set = set()
+    for item in parsed if isinstance(parsed, list) else []:
+        if not isinstance(item, dict):
+            continue
+        token = item.get("token")
+        if token not in valid_tokens or token in seen:
+            continue
+        seen.add(token)
+        conf = str(item.get("confidence") or "medium").lower()
+        if conf not in ("high", "medium", "low"):
+            conf = "medium"
+        results.append({
+            "token": token,
+            "reason": str(item.get("reason") or "")[:200],
+            "confidence": conf,
+        })
+        if len(results) >= 5:
+            break
+    return results
+
+
+def _evaluate_condition(left: Any, operator: str, right: Any) -> bool:
     def as_number(v: Any) -> Optional[float]:
         try:
             return float(v)
         except (TypeError, ValueError):
             return None
 
-    result: bool
     if operator == "is_empty":
-        result = left is None or left == "" or left == [] or left == {}
-    elif operator == "is_not_empty":
-        result = not (left is None or left == "" or left == [] or left == {})
-    elif operator == "contains":
-        result = _stringify(right) in _stringify(left)
-    elif operator == "not_contains":
-        result = _stringify(right) not in _stringify(left)
-    elif operator in ("greater_than", "less_than"):
+        return left is None or left == "" or left == [] or left == {}
+    if operator == "is_not_empty":
+        return not (left is None or left == "" or left == [] or left == {})
+    if operator == "contains":
+        return _stringify(right) in _stringify(left)
+    if operator == "not_contains":
+        return _stringify(right) not in _stringify(left)
+    if operator in ("greater_than", "less_than"):
         ln, rn = as_number(left), as_number(right)
         if ln is None or rn is None:
             raise NodeExecutionError(f"Condition: cannot compare non-numeric values ({left!r} vs {right!r})")
-        result = ln > rn if operator == "greater_than" else ln < rn
-    elif operator == "not_equals":
-        result = _stringify(left) != _stringify(right)
-    else:  # equals
-        result = _stringify(left) == _stringify(right)
+        return ln > rn if operator == "greater_than" else ln < rn
+    if operator == "not_equals":
+        return _stringify(left) != _stringify(right)
+    return _stringify(left) == _stringify(right)
+
+
+def _exec_condition(db: Session, config: dict, context: dict, log: Callable[[str], None]) -> Any:
+    left = config.get("left")
+    right = config.get("right")
+    operator = config.get("operator") or "equals"
+    result = _evaluate_condition(left, operator, right)
 
     log(f"Condition: {left!r} {operator} {right!r} → {result}")
     return {"result": result}
@@ -650,6 +822,24 @@ def _exec_write_output(db: Session, config: dict, context: dict, log: Callable[[
     log(f"Wrote {len(text)} chars to {path}")
     return {"file_path": path, "filename": filename, "size": len(text),
             "preview": text[:2000], "run_id": str(run_id)}
+
+
+def _exec_webhook_response(db: Session, config: dict, context: dict, log: Callable[[str], None]) -> Any:
+    visible = bool(config.get("visible", True))
+    operator = config.get("condition_operator") or ""
+    if operator:
+        left = config.get("condition_left")
+        right = config.get("condition_right")
+        visible = visible and _evaluate_condition(left, operator, right)
+        log(f"Webhook response condition: {left!r} {operator} {right!r} → {visible}")
+
+    status_code = int(config.get("status_code") or 200)
+    if status_code < 100 or status_code > 599:
+        raise NodeExecutionError("Webhook Response: status_code must be between 100 and 599")
+
+    body = config.get("body")
+    log("Webhook response prepared" if visible else "Webhook response hidden by condition")
+    return {"visible": visible, "status_code": status_code, "body": body}
 
 
 # ── Cloud storage (Google Drive / OneDrive) ──────────────────────────
@@ -777,6 +967,7 @@ def _to_csv(content: Any) -> str:
 EXECUTORS: Dict[str, Callable] = {
     "trigger_manual": _exec_trigger,
     "trigger_schedule": _exec_trigger,
+    "trigger_webhook": _exec_trigger,
     "job_source": _exec_job_source,
     "document_source": _exec_document_source,
     "llm": _exec_llm,
@@ -785,6 +976,7 @@ EXECUTORS: Dict[str, Callable] = {
     "python_code": _exec_python_code,
     "http_request": _exec_http_request,
     "write_output": _exec_write_output,
+    "webhook_response": _exec_webhook_response,
     "gdrive_upload": _exec_gdrive_upload,
     "gdrive_import": _exec_gdrive_import,
     "onedrive_upload": _exec_onedrive_upload,
@@ -854,9 +1046,13 @@ def execute_workflow_run(db: Session, run: WorkflowRun) -> None:
     for e in edges:
         incoming.setdefault(e.get("target"), []).append(e)
 
-    trigger_types = {"trigger_manual", "trigger_schedule"}
+    trigger_types = {"trigger_manual", "trigger_schedule", "trigger_webhook"}
     node_status: Dict[str, str] = {}
     run_failed_error: Optional[str] = None
+    fallback_result: Any = None
+    fallback_result_node_id: Optional[str] = None
+    webhook_result: Any = None
+    webhook_result_node_id: Optional[str] = None
 
     try:
         ordered = _topological_order(nodes, edges)
@@ -924,6 +1120,13 @@ def execute_workflow_run(db: Session, run: WorkflowRun) -> None:
             nr.output = _safe_json(output)
             nr.status = "succeeded"
             node_status[node_id] = "succeeded"
+            if node_type == "webhook_response":
+                if isinstance(output, dict) and output.get("visible"):
+                    webhook_result = output
+                    webhook_result_node_id = node_id
+            else:
+                fallback_result = output
+                fallback_result_node_id = node_id
         except Exception as exc:  # noqa: BLE001 — node failures must not kill the loop
             logger.exception("Workflow node %s failed", node_id)
             nr.status = "failed"
@@ -937,6 +1140,10 @@ def execute_workflow_run(db: Session, run: WorkflowRun) -> None:
 
     run.status = "failed" if run_failed_error else "succeeded"
     run.error = run_failed_error
+    if not run_failed_error:
+        selected_result = webhook_result if webhook_result is not None else fallback_result
+        run.result = _safe_json(selected_result)
+        run.result_node_id = webhook_result_node_id or fallback_result_node_id
     run.finished_at = _now()
     db.commit()
 
@@ -998,7 +1205,7 @@ def execute_single_node(db: Session, run: WorkflowRun, node_id: str) -> None:
     db.commit()
 
     # Trigger nodes have no upstream — just echo the last run's trigger input
-    is_trigger = node_type in ("trigger_manual", "trigger_schedule")
+    is_trigger = node_type in ("trigger_manual", "trigger_schedule", "trigger_webhook")
     context = _build_context_from_last_run(db, run.workflow_id)
     if context is None and not is_trigger:
         nr.status = "failed"

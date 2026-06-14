@@ -618,3 +618,25 @@ Date: 2026-06-11
 4. ขั้น end-to-end ที่เหลือ (ต้องมี credential จริงจากผู้ใช้)
    - Google: สร้าง service account + แชร์โฟลเดอร์ Drive ให้อีเมล client_email; OneDrive: Azure app + Files.ReadWrite.All + admin consent + drive_id
    - จากนั้น: gdrive_import(folder→Job) ต้องมี Document ใหม่และ process_document_task ทำงาน; (Transform/Write→) gdrive_upload ต้องเห็นไฟล์บน Drive
+
+---
+
+Date: 2026-06-13
+
+## Manual Verification - Workflow Webhook Trigger
+
+1. Scope
+   - New `trigger_webhook` node starts workflows from external webhooks and exposes payload data as `{{trigger.body}}`, `{{trigger.query}}`, and `{{trigger.headers}}`.
+   - New `webhook_response` node selects the pollable workflow result; if no visible response node runs, result falls back to the last successful non-response node.
+   - Workflow webhook secret URLs are generated/rotated from the builder and stored server-side as a hash only.
+
+2. Verification performed
+   - `PYTHONPYCACHEPREFIX=/private/tmp/insightocr-pycache python3 -m py_compile ...` passed for modified backend files.
+   - `PYTHONPYCACHEPREFIX=/private/tmp/insightocr-pycache python3 -m pytest backend/test/test_workflow_engine_webhook.py -q` passed (3 tests).
+   - `cd frontend && npm run build` passed.
+
+3. Manual smoke to run with services
+   - Create workflow: Webhook Trigger -> Transform or LLM -> Webhook Response.
+   - Generate Webhook URL in the Webhook Trigger config panel.
+   - `curl -X POST <webhook_url> -H 'Content-Type: application/json' -d '{"events":[{"message":{"text":"hello LINE"}}]}'`
+   - Poll the returned `poll_url` until `status=succeeded`; confirm `result.body` contains the configured response.

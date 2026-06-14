@@ -43,6 +43,9 @@ export interface Workflow {
   schedule_enabled: boolean
   next_run_at?: string | null
   last_run_at?: string | null
+  webhook_enabled?: boolean
+  webhook_secret_created_at?: string | null
+  webhook_last_triggered_at?: string | null
   created_at?: string
   updated_at?: string
 }
@@ -65,7 +68,9 @@ export interface WorkflowRun {
   id: string
   workflow_id: string
   status: "queued" | "running" | "succeeded" | "failed" | "cancelled"
-  trigger_type: "manual" | "schedule" | "node_test"
+  trigger_type: "manual" | "schedule" | "webhook" | "node_test"
+  result?: any
+  result_node_id?: string | null
   error?: string | null
   started_at?: string | null
   finished_at?: string | null
@@ -97,6 +102,13 @@ export interface NodeTypeDef {
   description: string
   config_fields: NodeTypeField[]
   output_fields?: OutputField[]
+}
+
+export interface WorkflowWebhookSecret {
+  webhook_enabled: boolean
+  webhook_url: string
+  secret: string
+  secret_created_at: string
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -146,6 +158,12 @@ export const updateWorkflow = (
 
 export const deleteWorkflow = (token: string, id: string) =>
   request<void>(token, `/workflows/${id}`, { method: "DELETE" })
+
+export const rotateWorkflowWebhookSecret = (token: string, id: string) =>
+  request<WorkflowWebhookSecret>(token, `/workflows/${id}/webhook-secret`, { method: "POST" })
+
+export const disableWorkflowWebhookSecret = (token: string, id: string) =>
+  request<void>(token, `/workflows/${id}/webhook-secret`, { method: "DELETE" })
 
 export const runWorkflow = (token: string, id: string, input?: Record<string, any>) =>
   request<WorkflowRun>(token, `/workflows/${id}/run`, {
@@ -199,6 +217,32 @@ export async function downloadRunOutput(
   link.remove()
   URL.revokeObjectURL(objectUrl)
 }
+
+// ── AI variable finder ───────────────────────────────────────────────
+export interface VariableCandidate {
+  token: string
+  label?: string
+  sample?: string
+  type?: string
+}
+
+export interface VariableSuggestion {
+  token: string
+  reason: string
+  confidence: "high" | "medium" | "low"
+}
+
+export const suggestVariables = (
+  token: string,
+  workflowId: string,
+  query: string,
+  candidates: VariableCandidate[],
+  integrationId?: string | null
+) =>
+  request<{ suggestions: VariableSuggestion[] }>(token, `/workflows/${workflowId}/suggest-variables`, {
+    method: "POST",
+    body: JSON.stringify({ query, candidates, integration_id: integrationId || null }),
+  })
 
 // ── Jobs (for the Jobs node picker) ──────────────────────────────────
 export interface JobSummary {

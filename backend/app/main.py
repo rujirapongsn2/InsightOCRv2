@@ -65,6 +65,14 @@ with engine.connect() as conn:
     conn.execute(text("ALTER TABLE IF EXISTS integration_results ADD COLUMN IF NOT EXISTS integration_type varchar(20) NULL"))
     conn.execute(text("ALTER TABLE IF EXISTS integration_results ADD COLUMN IF NOT EXISTS integration_name varchar(255) NULL"))
 
+    # Workflow webhook trigger/result fields
+    conn.execute(text("ALTER TABLE IF EXISTS workflows ADD COLUMN IF NOT EXISTS webhook_enabled boolean DEFAULT false"))
+    conn.execute(text("ALTER TABLE IF EXISTS workflows ADD COLUMN IF NOT EXISTS webhook_secret_hash text NULL"))
+    conn.execute(text("ALTER TABLE IF EXISTS workflows ADD COLUMN IF NOT EXISTS webhook_secret_created_at timestamptz NULL"))
+    conn.execute(text("ALTER TABLE IF EXISTS workflows ADD COLUMN IF NOT EXISTS webhook_last_triggered_at timestamptz NULL"))
+    conn.execute(text("ALTER TABLE IF EXISTS workflow_runs ADD COLUMN IF NOT EXISTS result jsonb NULL"))
+    conn.execute(text("ALTER TABLE IF EXISTS workflow_runs ADD COLUMN IF NOT EXISTS result_node_id varchar(100) NULL"))
+
     # Agent skills: agentskills.io spec fields
     conn.execute(text("ALTER TABLE IF EXISTS agent_skills ADD COLUMN IF NOT EXISTS scope varchar(20) DEFAULT 'user'"))
     conn.execute(text("ALTER TABLE IF EXISTS agent_skills ADD COLUMN IF NOT EXISTS license varchar(100)"))

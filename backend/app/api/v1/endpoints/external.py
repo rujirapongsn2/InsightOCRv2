@@ -1,3 +1,4 @@
+import secrets
 from datetime import datetime, timezone
 from typing import Any, List
 from uuid import UUID
@@ -9,11 +10,14 @@ from app.api import deps
 from app.api.permissions import ensure_document_access, ensure_job_access, is_admin_user
 from app.api.v1.endpoints import documents as documents_endpoint
 from app.api.v1.endpoints import integrations as integrations_endpoint
+from app.core import security
+from app.core.config import settings
 from app.models.document import Document
 from app.models.integration import Integration, IntegrationStatus
 from app.models.job import Job
 from app.models.schema import DocumentSchema
 from app.models.user import User
+from app.models.workflow import Workflow, WorkflowRun
 from app.schemas.external import (
     ExternalDocumentDecisionRequest,
     ExternalDocumentDetail,
@@ -28,6 +32,7 @@ from app.schemas.external import (
     ExternalSchemaResponse,
     ExternalSendToIntegrationRequest,
 )
+from app.schemas.workflow import WorkflowWebhookResultResponse
 from app.utils.activity_logger import Actions, log_activity
 from app.utils.job_logger import get_job_logger
 
@@ -96,6 +101,46 @@ def _get_document_or_404(db: Session, document_id: UUID) -> Document:
     return document
 
 
+def _get_workflow_webhook_or_404(
+    db: Session,
+    workflow_id: UUID,
+    secret: str,
+    *,
+    require_trigger_node: bool = False,
+) -> Workflow:
+    workflow = db.query(Workflow).filter(Workflow.id == workflow_id).first()
+    if not workflow:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workflow not found")
+    if not workflow.is_active:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Workflow is inactive")
+    if not workflow.webhook_enabled or not workflow.webhook_secret_hash:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Webhook is not enabled")
+
+    given_hash = security.hash_workflow_webhook_secret(secret)
+    if not secrets.compare_digest(given_hash, workflow.webhook_secret_hash):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid webhook secret")
+
+    nodes = (workflow.definition or {}).get("nodes") or []
+    if require_trigger_node and not any(node.get("type") == "trigger_webhook" for node in nodes):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Workflow has no Webhook Trigger node")
+    return workflow
+
+
+async def _read_webhook_body(request: Request) -> Any:
+    try:
+        return await request.json()
+    except Exception:
+        raw = await request.body()
+        if not raw:
+            return {}
+        return raw.decode("utf-8", errors="replace")
+
+
+def _external_webhook_poll_url(request: Request, workflow_id: UUID, secret: str, run_id: UUID) -> str:
+    base_url = str(request.base_url).rstrip("/")
+    return f"{base_url}{settings.API_V1_STR}/external/workflows/{workflow_id}/webhook/{secret}/runs/{run_id}/result"
+
+
 def _serialize_document_status(document: Document, task_status: Any) -> ExternalDocumentStatusResponse:
     progress = None
     if task_status.progress is not None:
@@ -114,6 +159,75 @@ def _serialize_document_status(document: Document, task_status: Any) -> External
         processing_error=task_status.processing_error,
         page_count=task_status.page_count,
         progress=progress,
+    )
+
+
+@router.post("/workflows/{workflow_id}/webhook/{secret}", status_code=status.HTTP_202_ACCEPTED)
+async def trigger_external_workflow_webhook(
+    workflow_id: UUID,
+    secret: str,
+    request: Request,
+    db: Session = Depends(deps.get_db),
+) -> Any:
+    workflow = _get_workflow_webhook_or_404(db, workflow_id, secret, require_trigger_node=True)
+    now = datetime.now(timezone.utc)
+    trigger_input = {
+        "source": "webhook",
+        "received_at": now.isoformat(),
+        "method": request.method,
+        "query": dict(request.query_params),
+        "headers": {str(k).lower(): str(v) for k, v in request.headers.items()},
+        "body": await _read_webhook_body(request),
+    }
+    run = WorkflowRun(
+        workflow_id=workflow.id,
+        status="queued",
+        trigger_type="webhook",
+        trigger_input=trigger_input,
+        definition_snapshot=workflow.definition,
+    )
+    workflow.webhook_last_triggered_at = now
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+
+    from app.tasks.workflow_tasks import run_workflow_task
+    run_workflow_task.delay(str(run.id))
+    return {
+        "run_id": str(run.id),
+        "status": run.status,
+        "poll_url": _external_webhook_poll_url(request, workflow.id, secret, run.id),
+    }
+
+
+@router.get(
+    "/workflows/{workflow_id}/webhook/{secret}/runs/{run_id}/result",
+    response_model=WorkflowWebhookResultResponse,
+)
+def get_external_workflow_webhook_result(
+    workflow_id: UUID,
+    secret: str,
+    run_id: UUID,
+    db: Session = Depends(deps.get_db),
+) -> Any:
+    workflow = _get_workflow_webhook_or_404(db, workflow_id, secret)
+    run = (
+        db.query(WorkflowRun)
+        .filter(WorkflowRun.id == run_id, WorkflowRun.workflow_id == workflow.id)
+        .first()
+    )
+    if not run:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+    return WorkflowWebhookResultResponse(
+        run_id=run.id,
+        workflow_id=run.workflow_id,
+        status=run.status,
+        result=run.result if run.status == "succeeded" else None,
+        result_node_id=run.result_node_id if run.status == "succeeded" else None,
+        error=run.error,
+        created_at=run.created_at,
+        started_at=run.started_at,
+        finished_at=run.finished_at,
     )
 
 

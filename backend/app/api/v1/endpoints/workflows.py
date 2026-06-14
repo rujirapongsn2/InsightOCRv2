@@ -3,11 +3,13 @@ from datetime import datetime, timezone
 from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session, selectinload
 
 from app.api import deps
+from app.core import security
+from app.core.config import settings
 from app.models.user import User
 from app.models.workflow import Workflow, WorkflowRun
 from app.schemas.workflow import (
@@ -18,8 +20,16 @@ from app.schemas.workflow import (
     WorkflowRunRequest,
     WorkflowRunResponse,
     WorkflowRunListResponse,
+    WorkflowWebhookSecretResponse,
+    SuggestVariablesRequest,
+    SuggestVariablesResponse,
 )
-from app.services.workflow_engine import NODE_TYPES, WORKFLOW_OUTPUT_DIR
+from app.services.workflow_engine import (
+    NODE_TYPES,
+    WORKFLOW_OUTPUT_DIR,
+    NodeExecutionError,
+    suggest_variables,
+)
 
 router = APIRouter()
 
@@ -45,10 +55,42 @@ def _validate_cron(expr: Optional[str]) -> None:
         raise HTTPException(status_code=422, detail=f"Invalid cron expression: {expr}")
 
 
+def _webhook_url(request: Request, workflow_id: UUID, secret: str) -> str:
+    base_url = str(request.base_url).rstrip("/")
+    return f"{base_url}{settings.API_V1_STR}/external/workflows/{workflow_id}/webhook/{secret}"
+
+
 @router.get("/node-types")
 def list_node_types(current_user: User = Depends(deps.get_current_active_user)):
     """Node palette catalog for the workflow builder."""
     return {"node_types": NODE_TYPES}
+
+
+@router.post("/{workflow_id}/suggest-variables", response_model=SuggestVariablesResponse)
+def suggest_variables_endpoint(
+    workflow_id: UUID,
+    payload: SuggestVariablesRequest,
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_active_user),
+):
+    """AI variable finder: rank the supplied variable candidates against a
+    natural-language description. The LLM only selects from `candidates`;
+    sample values are rendered client-side from real run data."""
+    _get_workflow_or_404(db, workflow_id, current_user)
+    if not payload.candidates:
+        return {"suggestions": []}
+    try:
+        suggestions = suggest_variables(
+            db,
+            query=payload.query,
+            candidates=[c.model_dump() for c in payload.candidates],
+            integration_id=payload.integration_id,
+        )
+    except NodeExecutionError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except Exception as exc:  # noqa: BLE001 — surface LLM/transport errors cleanly
+        raise HTTPException(status_code=502, detail=f"AI ค้นหาตัวแปรไม่สำเร็จ: {exc}")
+    return {"suggestions": suggestions}
 
 
 @router.get("/", response_model=WorkflowListResponse)
@@ -124,6 +166,43 @@ def update_workflow(
     db.commit()
     db.refresh(wf)
     return wf
+
+
+@router.post("/{workflow_id}/webhook-secret", response_model=WorkflowWebhookSecretResponse)
+def rotate_workflow_webhook_secret(
+    workflow_id: UUID,
+    request: Request,
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_active_user),
+):
+    """Enable webhook trigger and reveal a newly generated secret URL once."""
+    wf = _get_workflow_or_404(db, workflow_id, current_user)
+    secret = security.generate_workflow_webhook_secret()
+    now = datetime.now(timezone.utc)
+    wf.webhook_enabled = True
+    wf.webhook_secret_hash = security.hash_workflow_webhook_secret(secret)
+    wf.webhook_secret_created_at = now
+    db.commit()
+    db.refresh(wf)
+    return WorkflowWebhookSecretResponse(
+        webhook_enabled=True,
+        webhook_url=_webhook_url(request, wf.id, secret),
+        secret=secret,
+        secret_created_at=now,
+    )
+
+
+@router.delete("/{workflow_id}/webhook-secret", status_code=204)
+def disable_workflow_webhook_secret(
+    workflow_id: UUID,
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_active_user),
+):
+    wf = _get_workflow_or_404(db, workflow_id, current_user)
+    wf.webhook_enabled = False
+    wf.webhook_secret_hash = None
+    wf.webhook_secret_created_at = None
+    db.commit()
 
 
 @router.delete("/{workflow_id}", status_code=204)

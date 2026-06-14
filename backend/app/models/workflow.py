@@ -22,6 +22,12 @@ class Workflow(Base):
     next_run_at = Column(DateTime(timezone=True), nullable=True)
     last_run_at = Column(DateTime(timezone=True), nullable=True)
 
+    # Inbound webhook trigger (secret is only revealed once when generated)
+    webhook_enabled = Column(Boolean, default=False)
+    webhook_secret_hash = Column(Text, nullable=True)
+    webhook_secret_created_at = Column(DateTime(timezone=True), nullable=True)
+    webhook_last_triggered_at = Column(DateTime(timezone=True), nullable=True)
+
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
@@ -42,6 +48,8 @@ class WorkflowRun(Base):
     trigger_input = Column(JSONB, nullable=True)
     # Snapshot of the definition at run time (so edits don't affect history)
     definition_snapshot = Column(JSONB, nullable=True)
+    result = Column(JSONB, nullable=True)
+    result_node_id = Column(String(100), nullable=True)
     error = Column(Text, nullable=True)
     task_id = Column(String, nullable=True)
 

@@ -10,6 +10,7 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 ALGORITHM = "HS256"
 API_ACCESS_TOKEN_PREFIX = "sid_pat_"
+WORKFLOW_WEBHOOK_SECRET_PREFIX = "sid_wh_"
 
 def create_access_token(
     subject: Union[str, Any], expires_delta: Optional[timedelta] = None
@@ -34,6 +35,14 @@ def get_api_access_token_prefix(token: str, length: int = 12) -> str:
 
 def hash_api_access_token(token: str) -> str:
     return sha256(token.encode("utf-8")).hexdigest()
+
+
+def generate_workflow_webhook_secret() -> str:
+    return f"{WORKFLOW_WEBHOOK_SECRET_PREFIX}{secrets.token_urlsafe(32)}"
+
+
+def hash_workflow_webhook_secret(secret: str) -> str:
+    return sha256(secret.encode("utf-8")).hexdigest()
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     return pwd_context.verify(plain_password, hashed_password)
