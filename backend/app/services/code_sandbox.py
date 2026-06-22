@@ -3,26 +3,105 @@ Docker-based Python code execution sandbox.
 
 Security model:
   - Ephemeral containers (auto-removed after execution)
-  - Read-only filesystem (except /tmp with 64MB)
-  - Memory limit 256MB, CPU capped at 0.5 core
-  - 30-second hard timeout
+  - Read-only filesystem (except /tmp tmpfs)
+  - Memory limit and /tmp size are configurable via SANDBOX_* env vars
+  - 60-second default hard timeout
   - Network enabled by default (for pip install, API calls)
     — can be disabled per-execution via allow_network=False
   - Image auto-pulled on first use or at startup
 """
 import json
 import logging
+import os
+import re
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
-SANDBOX_IMAGE = "python:3.12-slim"
-DEFAULT_TIMEOUT = 30
-DEFAULT_MEMORY_MB = 256
+SANDBOX_IMAGE = os.getenv("SANDBOX_IMAGE", "insightocr-sandbox:py312")
+SANDBOX_AUTO_BUILD = os.getenv("SANDBOX_AUTO_BUILD", "true").lower() not in {"0", "false", "no"}
+DEFAULT_TIMEOUT = int(os.getenv("SANDBOX_TIMEOUT_SECONDS", "60"))
+DEFAULT_MEMORY_MB = int(os.getenv("SANDBOX_MEMORY_MB", "512"))
+DEFAULT_TMPFS_MB = int(os.getenv("SANDBOX_TMPFS_MB", "512"))
 
 
 class CodeSandboxError(Exception):
     pass
+
+
+def _default_sandbox_build_context() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def _sandbox_dockerfile() -> Path:
+    configured = os.getenv("SANDBOX_DOCKERFILE")
+    if configured:
+        return Path(configured)
+    return _default_sandbox_build_context() / "Dockerfile.sandbox"
+
+
+def _should_build_sandbox_image() -> bool:
+    return SANDBOX_AUTO_BUILD and _sandbox_dockerfile().exists() and not SANDBOX_IMAGE.startswith("python:")
+
+
+def _build_sandbox_image(client) -> bool:
+    dockerfile = _sandbox_dockerfile()
+    context_dir = Path(os.getenv("SANDBOX_BUILD_CONTEXT", str(dockerfile.parent)))
+    try:
+        logger.info("Building sandbox image %s from %s", SANDBOX_IMAGE, dockerfile)
+        client.images.build(
+            path=str(context_dir),
+            dockerfile=str(dockerfile.relative_to(context_dir)) if dockerfile.is_relative_to(context_dir) else str(dockerfile),
+            tag=SANDBOX_IMAGE,
+            rm=True,
+            pull=False,
+        )
+        logger.info("Sandbox image %s built successfully", SANDBOX_IMAGE)
+        return True
+    except Exception as e:
+        logger.warning("Failed to build sandbox image %s: %s", SANDBOX_IMAGE, e)
+        return False
+
+
+def _sandbox_environment() -> dict[str, str]:
+    env = {
+        "HOME": "/tmp",
+        "PIP_CACHE_DIR": "/tmp/pip-cache",
+        "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+        "PYTHONUNBUFFERED": "1",
+        "MPLCONFIGDIR": "/tmp/matplotlib",
+    }
+    for key in (
+        "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
+        "http_proxy", "https_proxy", "no_proxy",
+        "PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL", "PIP_TRUSTED_HOST",
+    ):
+        value = os.getenv(key)
+        if value:
+            env[key] = value
+    return env
+
+
+def _sandbox_network_name(client) -> str | None:
+    configured = os.getenv("SANDBOX_DOCKER_NETWORK", "auto").strip()
+    if configured.lower() in {"", "none", "disabled", "false"}:
+        return None
+    if configured.lower() != "auto":
+        return configured
+
+    hostname = os.getenv("HOSTNAME")
+    if not hostname:
+        return None
+    try:
+        current = client.containers.get(hostname)
+        networks = list((current.attrs.get("NetworkSettings", {}).get("Networks") or {}).keys())
+    except Exception as e:
+        logger.debug("Could not auto-detect sandbox Docker network: %s", e)
+        return None
+
+    preferred = [name for name in networks if name not in {"bridge", "host", "none"}]
+    return (preferred or networks or [None])[0]
 
 
 def ensure_sandbox_image() -> bool:
@@ -38,6 +117,8 @@ def ensure_sandbox_image() -> bool:
             logger.info(f"Sandbox image {SANDBOX_IMAGE} already present")
             return True
         except docker.errors.ImageNotFound:
+            if _should_build_sandbox_image() and _build_sandbox_image(client):
+                return True
             logger.info(f"Pulling sandbox image {SANDBOX_IMAGE}...")
             client.images.pull(SANDBOX_IMAGE)
             logger.info(f"Sandbox image {SANDBOX_IMAGE} pulled successfully")
@@ -77,18 +158,101 @@ async def execute_python(
 
     # Wrap user code with input injection + result capture
     wrapped = f"""
-import json, sys, traceback, subprocess, os, base64, mimetypes
+import json, sys, traceback, os, base64, mimetypes, glob, re, shlex
+import importlib.metadata as _metadata
+import subprocess as _real_sp
+
+# ── Sandbox subprocess shim ──────────────────────────────────────────────
+# Redirect any bare `pip install` subprocess call so packages land in /tmp
+# even if the caller did not use _pip_install().
+
+def _sandbox_pip_command(args, **kwargs):
+    raw = args[0] if isinstance(args, tuple) and len(args) == 1 else args
+    was_string = isinstance(raw, str)
+    if was_string:
+        try:
+            cmd = shlex.split(raw)
+        except ValueError:
+            return raw
+    else:
+        cmd = list(raw)
+    is_pip = (
+        len(cmd) >= 3
+        and any("pip" in str(c) for c in cmd[:4])
+        and "install" in cmd
+    )
+    if is_pip and "--target" not in cmd and "-t" not in cmd:
+        idx = cmd.index("install")
+        cmd = cmd[:idx+1] + ["--target", "/tmp"] + cmd[idx+1:]
+        if "/tmp" not in sys.path:
+            sys.path.insert(0, "/tmp")
+    if was_string and kwargs.get("shell"):
+        return " ".join(shlex.quote(str(c)) for c in cmd)
+    return cmd
+
+class _SubprocessShim:
+    @staticmethod
+    def check_call(args, **kwargs): return _real_sp.check_call(_sandbox_pip_command(args, **kwargs), **kwargs)
+    @staticmethod
+    def check_output(args, **kwargs): return _real_sp.check_output(_sandbox_pip_command(args, **kwargs), **kwargs)
+    @staticmethod
+    def run(args, **kwargs): return _real_sp.run(_sandbox_pip_command(args, **kwargs), **kwargs)
+    @staticmethod
+    def Popen(args, **kwargs): return _real_sp.Popen(_sandbox_pip_command(args, **kwargs), **kwargs)
+    def __getattr__(self, name): return getattr(_real_sp, name)
+
+sys.modules["subprocess"] = _SubprocessShim()
+import subprocess  # now points to shim
+# ─────────────────────────────────────────────────────────────────────────
 
 inputs = {json.dumps(inputs, ensure_ascii=False)}
 result = None
 __error__ = None
 __files__ = []
 
+def _package_name(spec: str) -> str:
+    spec = spec.strip()
+    spec = spec.split("[", 1)[0]
+    return re.split(r"[<>=!~]", spec, 1)[0].strip()
+
+def _installed_packages(packages: list[str]) -> tuple[list[str], list[str]]:
+    installed = []
+    missing = []
+    for pkg in packages:
+        name = _package_name(pkg)
+        if not name:
+            continue
+        try:
+            _metadata.version(name)
+            installed.append(pkg)
+        except _metadata.PackageNotFoundError:
+            missing.append(pkg)
+    return installed, missing
+
 def _pip_install(packages: str):
     # Install pip packages to /tmp (only writable path in sandbox).
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "--target", "/tmp"] + packages.split())
+    requested = packages.split()
+    _, missing = _installed_packages(requested)
+    if not missing:
+        if "/tmp" not in sys.path:
+            sys.path.insert(0, "/tmp")
+        return
+    _real_sp.check_call([sys.executable, "-m", "pip", "install", "-q", "--disable-pip-version-check", "--no-cache-dir", "--target", "/tmp"] + missing)
     if "/tmp" not in sys.path:
         sys.path.insert(0, "/tmp")
+
+def _thai_font_path() -> str:
+    candidates = [
+        "/usr/share/fonts/truetype/noto/NotoSansThai-Regular.ttf",
+        "/usr/share/fonts/truetype/tlwg/Sarabun.ttf",
+        "/usr/share/fonts/truetype/tlwg/Sarabun-Regular.ttf",
+        "/tmp/Sarabun.ttf",
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    matches = glob.glob("/usr/share/fonts/**/*Thai*.ttf", recursive=True) + glob.glob("/usr/share/fonts/**/*Sarabun*.ttf", recursive=True)
+    return matches[0] if matches else ""
 
 def _save_file(path: str) -> dict:
     # Read a binary file from the sandbox and base64-encode it for output.
@@ -99,7 +263,15 @@ def _save_file(path: str) -> dict:
     with open(path, "rb") as f:
         data = f.read()
     filename = os.path.basename(path)
-    mime_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    extension = os.path.splitext(filename)[1].lower()
+    mime_type = {{
+        ".csv": "text/csv; charset=utf-8",
+        ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ".pdf": "application/pdf",
+        ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ".zip": "application/zip",
+    }}.get(extension) or mimetypes.guess_type(filename)[0] or "application/octet-stream"
     encoded = base64.b64encode(data).decode("ascii")
     file_info = {{
         "filename": filename,
@@ -111,6 +283,30 @@ def _save_file(path: str) -> dict:
     __files__.append(file_info)
     return file_info
 
+def _auto_capture_result_files():
+    if __error__ is not None:
+        return
+    candidates = []
+    if isinstance(result, dict):
+        for key in ("path", "file_path", "output_path"):
+            value = result.get(key)
+            if isinstance(value, str):
+                candidates.append(value)
+        value = result.get("files")
+        if isinstance(value, list):
+            candidates.extend([item for item in value if isinstance(item, str)])
+    elif isinstance(result, str):
+        candidates.append(result)
+
+    seen = {{item.get("path") for item in __files__ if isinstance(item, dict)}}
+    for path in candidates:
+        if not path.startswith("/tmp/") or path in seen or not os.path.isfile(path):
+            continue
+        saved = _save_file(path)
+        if isinstance(saved, dict) and not saved.get("error"):
+            saved["auto_captured"] = True
+            seen.add(path)
+
 try:
     # ── User Code Start ──
 {_indent(code, 4)}
@@ -121,6 +317,8 @@ except Exception as e:
         "message": str(e),
         "traceback": traceback.format_exc(),
     }}
+
+_auto_capture_result_files()
 
 __output__ = {{
     "result": result,
@@ -139,24 +337,32 @@ print("__SANDBOX_OUTPUT__:" + json.dumps(__output__, ensure_ascii=False, default
         try:
             client.images.get(SANDBOX_IMAGE)
         except docker.errors.ImageNotFound:
-            logger.info(f"Pulling {SANDBOX_IMAGE} on demand...")
-            client.images.pull(SANDBOX_IMAGE)
+            if not (_should_build_sandbox_image() and _build_sandbox_image(client)):
+                logger.info(f"Pulling {SANDBOX_IMAGE} on demand...")
+                client.images.pull(SANDBOX_IMAGE)
 
-        container_output = client.containers.run(
-            image=SANDBOX_IMAGE,
-            command=["python", "-c", wrapped],
-            mem_limit=f"{memory_mb}m",
-            memswap_limit=f"{memory_mb}m",
-            cpu_period=100000,
-            cpu_quota=50000,  # 0.5 CPU
-            network_disabled=not allow_network,
-            read_only=True,
-            tmpfs={"/tmp": "size=128m,mode=1777"},
-            remove=True,
-            stdout=True,
-            stderr=True,
-            detach=False,
-        )
+        run_kwargs = {
+            "image": SANDBOX_IMAGE,
+            "command": ["python", "-c", wrapped],
+            "mem_limit": f"{memory_mb}m",
+            "memswap_limit": f"{memory_mb}m",
+            "cpu_period": 100000,
+            "cpu_quota": 50000,  # 0.5 CPU
+            "network_disabled": not allow_network,
+            "read_only": True,
+            "tmpfs": {"/tmp": f"size={DEFAULT_TMPFS_MB}m,mode=1777,exec"},
+            "working_dir": "/tmp",
+            "environment": _sandbox_environment(),
+            "remove": True,
+            "stdout": True,
+            "stderr": True,
+            "detach": False,
+        }
+        network_name = _sandbox_network_name(client) if allow_network else None
+        if network_name:
+            run_kwargs["network"] = network_name
+
+        container_output = client.containers.run(**run_kwargs)
 
         output = container_output.decode("utf-8", errors="replace")
 
@@ -170,8 +376,14 @@ print("__SANDBOX_OUTPUT__:" + json.dumps(__output__, ensure_ascii=False, default
                     result_data["result"] = sandbox_out.get("result")
                     result_data["error"] = sandbox_out.get("error")
                     result_data["files"] = sandbox_out.get("files", [])
-                except json.JSONDecodeError:
-                    pass
+                except json.JSONDecodeError as e:
+                    logger.warning(
+                        "Sandbox JSON decode failed: %s; raw=%r",
+                        e.msg, line[19:][:200],
+                    )
+                    result_data["error"] = (
+                        f"Sandbox returned malformed JSON output: {e.msg}"
+                    )
         return result_data
 
     except ImportError:
@@ -179,6 +391,7 @@ print("__SANDBOX_OUTPUT__:" + json.dumps(__output__, ensure_ascii=False, default
         return {"error": "Sandbox unavailable: docker package not installed"}
     except docker.errors.ContainerError as e:
         stderr = e.stderr.decode("utf-8", errors="replace") if e.stderr else ""
+        logger.warning("Sandbox container exited with error: %s", stderr[-4000:])
         return {"error": "Container exited with error", "stderr": stderr}
     except docker.errors.ImageNotFound:
         return {"error": f"Sandbox image {SANDBOX_IMAGE} not found. Please run: docker pull {SANDBOX_IMAGE}"}

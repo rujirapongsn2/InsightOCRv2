@@ -7,13 +7,17 @@ Optimizations (Phase 6):
 """
 import json
 import asyncio
+import logging
 import re
 from typing import AsyncGenerator, Any
 from uuid import UUID, uuid4
 from types import SimpleNamespace
+from pathlib import Path
 from sqlalchemy.orm import Session
 from openai import AsyncOpenAI
 import httpx
+
+logger = logging.getLogger(__name__)
 
 from app.agent.context import AgentContext, build_system_prompt, tool_content_for_llm
 from app.agent.events import sse_event, SSEEventType
@@ -23,6 +27,7 @@ from app.agent.tools import document_tools, integration_tools, memory_tools, cod
 from app.crud.crud_agent_message import agent_message as crud_msg
 from app.crud.crud_agent_pending import agent_pending as crud_pending
 from app.crud.crud_agent_conversation import agent_conversation as crud_conv
+from app.models.agent_message import AgentMessage
 from app.utils.activity_logger import log_activity
 
 
@@ -113,6 +118,30 @@ def _tool_failed(result: Any) -> bool:
     return isinstance(result, dict) and ("error" in result or result.get("ok") is False)
 
 
+def _aggregate_success(
+    stopped: str | None,
+    reflection: dict[str, Any] | None,
+    critical_failures: list[dict[str, Any]],
+    current_turn_file_success: bool,
+    requires_file: bool,
+) -> tuple[bool, list[str]]:
+    """Combine all signals into a single success verdict + human-readable gaps.
+
+    Returns (success, failed_steps). `success` is True only when every signal
+    is clean. `failed_steps` is the union of reasons — surfaced to the UI.
+    """
+    failed_steps: list[str] = []
+    if stopped == "max_iterations":
+        failed_steps.append("Reached max tool iterations without completing")
+    if reflection is not None and not reflection.get("complete"):
+        failed_steps.extend(reflection.get("missing") or [])
+    for f in critical_failures:
+        failed_steps.append(f["error"])
+    if requires_file and not current_turn_file_success:
+        failed_steps.append("Requested file output was not produced or verified")
+    return (len(failed_steps) == 0), failed_steps
+
+
 def _tool_error_summary(tool_name: str, result: Any) -> str:
     if not isinstance(result, dict):
         return f"{tool_name} failed"
@@ -125,11 +154,42 @@ def _tool_error_summary(tool_name: str, result: Any) -> str:
 
 
 def _is_file_write_success(tool_name: str, result: Any) -> bool:
-    return tool_name in {"write_file", "create_docx", "run_report_code"} and isinstance(result, dict) and result.get("ok") is True and bool(result.get("path"))
+    return (
+        tool_name in {"execute_python", "write_file", "create_docx", "create_pdf", "convert_to_xlsx", "run_report_code"}
+        and isinstance(result, dict)
+        and result.get("ok") is True
+        and result.get("verified") is True
+        and bool(result.get("path"))
+    )
 
 
 def _is_report_success(tool_name: str, result: Any) -> bool:
-    return tool_name == "run_report_code" and isinstance(result, dict) and result.get("ok") is True and bool(result.get("path"))
+    return tool_name == "run_report_code" and _is_file_write_success(tool_name, result)
+
+
+def _verify_file_tool_result(context: AgentContext, tool_name: str, result: Any) -> Any:
+    if tool_name not in {"execute_python", "write_file", "create_docx", "create_pdf", "convert_to_xlsx", "run_report_code"}:
+        return result
+    if not isinstance(result, dict) or result.get("ok") is not True or not result.get("path"):
+        return result
+
+    verification = filesystem_tools.verify_saved_file(
+        str(context.job_id),
+        str(result.get("path")),
+        expected_size=result.get("size") if result.get("size") is not None else None,
+    )
+    if verification.get("ok") is True:
+        verified = dict(result)
+        verified["verified"] = True
+        verified["verified_size"] = verification.get("size")
+        verified["mime_type"] = result.get("mime_type") or verification.get("mime_type")
+        return verified
+
+    failed = dict(result)
+    failed["ok"] = False
+    failed["verified"] = False
+    failed["error"] = verification.get("error") or "File verification failed"
+    return failed
 
 
 def _looks_like_raw_tool_payload(text: str | None) -> bool:
@@ -178,9 +238,19 @@ def _latest_successful_report(tool_results: list[dict[str, Any]]) -> dict[str, A
 
 def _claims_file_success(text: str) -> bool:
     lowered = (text or "").lower()
-    return any(token in lowered for token in [
-        "เรียบร้อย", "บันทึก", "สร้างไฟล์", "ทำไฟล์", "saved", "created", "generated", "download", ".docx", "outputs/",
-    ])
+    if "outputs/" in lowered:
+        return True
+    if "download" in lowered or "ดาวน์โหลด" in lowered:
+        return True
+    if any(token in lowered for token in ["สร้างไฟล์", "ทำไฟล์", "บันทึกไฟล์", "ไฟล์ถูกสร้าง", "ไฟล์พร้อมใช้งาน"]):
+        return True
+    if "ไฟล์" in lowered and any(token in lowered for token in ["บันทึกเรียบร้อย", "ตรวจสอบไฟล์แล้ว", "พร้อมดาวน์โหลด"]):
+        return True
+    if any(ext in lowered for ext in [".csv", ".docx", ".md", ".pdf", ".pptx", ".xlsx"]):
+        return any(token in lowered for token in [
+            "created successfully", "saved successfully", "file created", "file saved", "generated file",
+        ])
+    return False
 
 
 def _requires_web_search(user_message: str) -> bool:
@@ -193,9 +263,71 @@ def _requires_web_search(user_message: str) -> bool:
 
 def _requires_file_output(user_message: str) -> bool:
     text = (user_message or "").lower()
-    file_tokens = ["ไฟล์", "docx", "word", "ใบเสนอราคา", "quotation", "บันทึก"]
-    action_tokens = ["สร้าง", "ทำ", "เขียน", "แก้", "แก้ไข", "เพิ่ม", "อัปเดต", "update", "export", "save"]
+    file_tokens = ["ไฟล์", "pdf", "excel", "xlsx", "csv", "docx", "word", "ใบเสนอราคา", "quotation", "บันทึก"]
+    action_tokens = ["สร้าง", "ทำ", "เขียน", "แก้", "แก้ไข", "เพิ่ม", "อัปเดต", "แปลง", "update", "export", "save", "convert"]
     return any(token in text for token in file_tokens) and any(token in text for token in action_tokens)
+
+
+def _is_xlsx_conversion_request(user_message: str) -> bool:
+    text = (user_message or "").lower()
+    wants_excel = any(token in text for token in ["excel", "xlsx", "spreadsheet", "เอ็กเซล"])
+    wants_convert = any(token in text for token in ["แปลง", "convert", "ทำเป็น", "เปลี่ยนเป็น"])
+    return wants_excel and wants_convert
+
+
+def _is_pdf_creation_request(user_message: str) -> bool:
+    text = (user_message or "").lower()
+    wants_pdf = "pdf" in text or "พีดีเอฟ" in text
+    wants_create = any(token in text for token in ["สร้าง", "แปลง", "ทำเป็น", "เปลี่ยนเป็น", "export", "save", "convert"])
+    return wants_pdf and wants_create
+
+
+def _claims_failure(text: str) -> bool:
+    lowered = (text or "").lower()
+    return any(token in lowered for token in [
+        "ไม่สำเร็จ", "ยังไม่ได้", "ไม่พบผลลัพธ์", "failed", "failure", "not created", "not saved",
+    ])
+
+
+def _file_success_final_text(result: dict[str, Any], user_message: str) -> str:
+    path = result.get("path")
+    source = result.get("source_path")
+    thai = bool(re.search(r"[\u0e00-\u0e7f]", user_message or ""))
+    suffix = Path(str(path or "")).suffix.lower()
+    artifact_name = {
+        ".xlsx": "Excel",
+        ".xls": "Excel",
+        ".csv": "CSV",
+        ".pdf": "PDF",
+        ".docx": "Word",
+        ".html": "HTML",
+        ".md": "Markdown",
+    }.get(suffix, "ไฟล์" if thai else "file")
+    if thai:
+        if source:
+            return f"เรียบร้อยครับ ผมแปลงไฟล์ `{source}` เป็น {artifact_name} และตรวจสอบไฟล์แล้ว: `{path}`"
+        return f"เรียบร้อยครับ ผมสร้างและตรวจสอบไฟล์แล้ว: `{path}`"
+    if source:
+        return f"Done. I converted `{source}` to {artifact_name} and verified the file: `{path}`"
+    return f"Done. I created and verified the file: `{path}`"
+
+
+def _sanitize_unverified_file_claims(text: str) -> str:
+    """Remove stale file/download claims while preserving the useful answer body."""
+    cleaned: list[str] = []
+    for line in (text or "").splitlines():
+        lowered = line.lower()
+        has_file_path = "outputs/" in lowered or any(ext in lowered for ext in [".csv", ".docx", ".md", ".pdf", ".pptx", ".xlsx"])
+        has_file_claim = any(token in lowered for token in [
+            "ไฟล์", "download", "ดาวน์โหลด", "created", "generated", "saved", "verified",
+            "สร้างเสร็จ", "บันทึก", "ตรวจสอบไฟล์", "มีอยู่แล้ว",
+        ])
+        if has_file_path and has_file_claim:
+            continue
+        if "พร้อมดาวน์โหลด" in lowered or "ให้พร้อมดาวน์โหลด" in lowered:
+            continue
+        cleaned.append(line)
+    return "\n".join(cleaned).strip()
 
 
 def _required_tool_instruction(kind: str) -> str:
@@ -207,7 +339,9 @@ def _required_tool_instruction(kind: str) -> str:
         )
     return (
         "The user's current request asks to create or update a Word/file artifact. "
-        "Call create_docx or write_file in this same turn and only give the file name after the tool returns ok=true. "
+        "Call convert_to_xlsx for existing-file-to-Excel conversion, or execute_python with _save_file auto-capture, "
+        "create_docx, run_report_code, or write_file in this same turn "
+        "and only give the file name after the tool returns ok=true and verified=true. "
         "Do not reuse an older file-success result from conversation history."
     )
 
@@ -216,7 +350,7 @@ def _tool_failure_instruction(tool_name: str, result: Any) -> str:
     return (
         "A tool just failed. You must either fix the problem with another appropriate tool call, "
         "or clearly tell the user the action failed. Do not claim that any file was created or saved "
-        f"unless a later write_file or create_docx tool returns ok=true. Failure: {_tool_error_summary(tool_name, result)}"
+        f"unless a later file-producing tool returns ok=true and verified=true. Failure: {_tool_error_summary(tool_name, result)}"
     )
 
 
@@ -225,8 +359,83 @@ def _failure_final_text(tool_errors: list[dict[str, Any]]) -> str:
     return (
         "ยังดำเนินการไม่สำเร็จครับ: "
         f"{_tool_error_summary(last.get('tool', 'tool'), last.get('result'))}. "
-        "ผมยังไม่พบผลลัพธ์จากเครื่องมือที่ยืนยันว่าไฟล์ถูกสร้างหรือบันทึกสำเร็จ"
+        "ผมยังไม่พบผลลัพธ์จากเครื่องมือที่ยืนยันว่าไฟล์ถูกสร้าง บันทึก และตรวจสอบสำเร็จ"
     )
+
+
+# ── Plan & Reflect stages ────────────────────────────────────────────
+# Keywords that signal a multi-step / action task worth an explicit plan.
+# Pure QA ("ยอดรวมเท่าไหร่", "เอกสารมีกี่ใบ") stays fast — no planning round-trip.
+_PLAN_TRIGGER_TOKENS = (
+    "สร้าง", "ทำรายงาน", "รายงาน", "เปรียบเทียบ", "วิเคราะห์", "ตรวจสอบ", "ตรวจ",
+    "อนุมัติ", "แก้ไข", "อัปเดต", "นำเข้า", "ส่งออก", "ส่งไป", "จัดทำ", "รวบรวม",
+    "ทุกเอกสาร", "แต่ละ", "ทั้งหมด", "แล้วส่ง", "และส่ง", "ใบเสนอราคา",
+    "report", "compare", "analyze", "validate", "generate", "export", "import",
+    "approve", "create", "build", "all documents", "each",
+)
+
+
+def _is_complex_request(user_message: str) -> bool:
+    """Heuristic: should this request get an explicit plan + reflection pass?"""
+    text = (user_message or "").strip().lower()
+    if len(text) >= 80:
+        return True
+    if any(tok in text for tok in _PLAN_TRIGGER_TOKENS):
+        return True
+    # multiple clauses chained → likely multi-step
+    if text.count("แล้ว") + text.count(" and ") + text.count("และ") >= 1 and len(text) >= 40:
+        return True
+    return _requires_file_output(user_message) or _requires_web_search(user_message)
+
+
+_PLAN_SYSTEM_PROMPT = (
+    "You are the planning module of a document-management agent. "
+    "Break the user's request into a SHORT ordered checklist of concrete sub-goals "
+    "(2–6 items) that, once all done, fully satisfy the request. "
+    "Each item is a brief actionable phrase in the user's language — not a tool name. "
+    "Return STRICT JSON only: {\"steps\": [\"...\", \"...\"]}. "
+    "If the request is a single trivial question, return {\"steps\": []}."
+)
+
+
+def _parse_plan(text: str) -> list[str]:
+    obj = _extract_json_object(text)
+    if not obj:
+        return []
+    steps = obj.get("steps")
+    if not isinstance(steps, list):
+        return []
+    out: list[str] = []
+    for s in steps:
+        s = str(s).strip()
+        if s:
+            out.append(s[:200])
+        if len(out) >= 6:
+            break
+    return out
+
+
+_REFLECT_SYSTEM_PROMPT = (
+    "You are the final-review module of a document-management agent. "
+    "Given the user's original request, the plan checklist, a summary of what was "
+    "actually done (tools + results), and the draft answer, decide whether the result "
+    "TRULY and COMPLETELY satisfies the user's intent. Be strict: a partially-correct "
+    "or incomplete answer is NOT complete. "
+    "Return STRICT JSON only: "
+    "{\"complete\": true|false, \"missing\": [\"...\"], \"revised_answer\": \"...optional...\"}. "
+    "Set complete=false and list concrete gaps in `missing` only when real work remains. "
+    "Provide `revised_answer` only if you can improve wording without doing more work."
+)
+
+
+def _parse_reflection(text: str) -> dict[str, Any]:
+    obj = _extract_json_object(text) or {}
+    missing = obj.get("missing")
+    return {
+        "complete": bool(obj.get("complete", True)),
+        "missing": [str(m).strip() for m in missing if str(m).strip()] if isinstance(missing, list) else [],
+        "revised_answer": (str(obj["revised_answer"]).strip() if obj.get("revised_answer") else None),
+    }
 
 def _extract_tool_calls_from_content(text: str | None) -> list:
     """Support providers that return tool calls as JSON text instead of native tool_calls."""
@@ -299,6 +508,17 @@ class AgentLoop:
         self.context = AgentContext(db=db, user_id=user_id, job_id=job_id, conversation_id=conversation_id)
 
     async def run(self, user_message: str) -> AsyncGenerator[str, None]:
+        try:
+            async for event in self._run_inner(user_message):
+                yield event
+        except Exception as e:
+            logger.error("AgentLoop.run crashed (unhandled): %s", e, exc_info=True)
+            try:
+                yield sse_event(SSEEventType.ERROR, {"message": f"ระบบพบข้อผิดพลาดที่ไม่คาดคิด: {str(e)}"})
+            except Exception:
+                pass
+
+    async def _run_inner(self, user_message: str) -> AsyncGenerator[str, None]:
         crud_msg.add(self.db, conversation_id=self.conversation_id, role="user", content=user_message, iteration=0)
         crud_conv.update_title(self.db, self.conversation_id, user_message[:60])
 
@@ -329,12 +549,58 @@ class AgentLoop:
         tool_events_seen = 0
         latest_tool_error_index = 0
         latest_file_success_index = 0
+        latest_file_success_result: dict[str, Any] | None = None
         latest_report_success: dict[str, Any] | None = None
         unresolved_tool_errors: list[dict[str, Any]] = []
+        critical_tool_failures: list[dict[str, Any]] = []
+        reflection_result: dict[str, Any] | None = None
         current_turn_tools: set[str] = set()
         current_turn_file_success = False
         nudged_required_search = False
         nudged_required_file = False
+        stale_file_claim_nudges = 0
+
+        if _is_xlsx_conversion_request(user_message):
+            source_path = self._latest_convertible_output_path()
+            if source_path:
+                async for event in self._run_direct_file_conversion(user_message, source_path):
+                    yield event
+                return
+
+        if _is_pdf_creation_request(user_message):
+            source_path = self._latest_text_output_path()
+            source_content = None if source_path else self._latest_assistant_content_for_pdf()
+            if source_path or source_content:
+                async for event in self._run_direct_pdf_creation(user_message, source_path, source_content):
+                    yield event
+                return
+
+        # ── Stage: PLAN ──────────────────────────────────────────────
+        # For non-trivial requests, decompose into an explicit checklist so the
+        # execution loop has concrete sub-goals and the reflection stage has a
+        # yardstick. Trivial QA skips this to stay fast.
+        plan_steps: list[str] = []
+        plan_msg = None
+        reflected = False
+        if _is_complex_request(user_message):
+            plan_steps = await self._build_plan(client, model, user_message, history)
+            if plan_steps:
+                yield sse_event(SSEEventType.PLAN, {"steps": plan_steps})
+                # Persist as a UI-only "plan" message so the checklist survives in
+                # history (load_history skips this role, so it never reaches the LLM).
+                plan_msg = crud_msg.add(
+                    self.db, conversation_id=self.conversation_id, role="plan",
+                    tool_result={"steps": plan_steps, "reflection": None}, iteration=0,
+                )
+                checklist = "\n".join(f"{i+1}. {s}" for i, s in enumerate(plan_steps))
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        "Plan for this request — work through every item, then give a final answer that "
+                        "covers all of them. Do not stop until each item is genuinely done or you have "
+                        f"clearly reported why it cannot be:\n{checklist}"
+                    ),
+                })
 
         for iteration in range(1, self.max_iterations + 1):
             yield sse_event(SSEEventType.THINKING, {"iteration": iteration})
@@ -394,6 +660,12 @@ class AgentLoop:
                 # Determine execution strategy
                 needs_confirmation = any(requires_confirmation(name, args) for _, name, args in parsed)
 
+                # Tool-failure nudges are deferred and flushed only AFTER every
+                # tool response is appended — injecting a system message between
+                # the tool messages of one assistant turn breaks the OpenAI
+                # "tool_calls must be followed by a tool message per id" rule.
+                failure_notes: list[str] = []
+
                 if needs_confirmation:
                     # Sequential — confirmation gates require per-tool user interaction
                     for tc, tool_name, tool_args in parsed:
@@ -415,6 +687,7 @@ class AgentLoop:
                                 yield sse_event(SSEEventType.TOOL_REJECTED, {"id": tc.id, "name": tool_name})
                             else:
                                 result = await tool_registry.execute(tool_name, tool_args, self.context)
+                                result = _verify_file_tool_result(self.context, tool_name, result)
                                 log_activity(
                                     self.db, user_id=self.user_id,
                                     action=f"agent_tool_{tool_name}",
@@ -424,6 +697,7 @@ class AgentLoop:
                                 )
                         else:
                             result = await tool_registry.execute(tool_name, tool_args, self.context)
+                            result = _verify_file_tool_result(self.context, tool_name, result)
 
                         yield sse_event(SSEEventType.TOOL_RESULT, {"id": tc.id, "name": tool_name, "result": result})
                         crud_msg.add(self.db, conversation_id=self.conversation_id, role="tool",
@@ -437,12 +711,16 @@ class AgentLoop:
                         current_turn_tools.add(tool_name)
                         if _is_file_write_success(tool_name, result):
                             current_turn_file_success = True
+                            latest_file_success_result = result
                         if _is_report_success(tool_name, result):
                             latest_report_success = result
                         if _tool_failed(result):
                             latest_tool_error_index = tool_events_seen
                             unresolved_tool_errors.append({"tool": tool_name, "result": result})
-                            messages.append({"role": "system", "content": _tool_failure_instruction(tool_name, result)})
+                            critical_tool_failures.append(
+                                {"tool": tool_name, "error": _tool_error_summary(tool_name, result)}
+                            )
+                            failure_notes.append(_tool_failure_instruction(tool_name, result))
                         elif _is_file_write_success(tool_name, result):
                             latest_file_success_index = tool_events_seen
                             unresolved_tool_errors.clear()
@@ -454,6 +732,8 @@ class AgentLoop:
                     for (tc, tool_name, _), result in zip(parsed, results):
                         if isinstance(result, Exception):
                             result = {"error": str(result)}
+                        else:
+                            result = _verify_file_tool_result(self.context, tool_name, result)
                         yield sse_event(SSEEventType.TOOL_RESULT, {"id": tc.id, "name": tool_name, "result": result})
                         crud_msg.add(self.db, conversation_id=self.conversation_id, role="tool",
                                      tool_call_id=tc.id, tool_name=tool_name,
@@ -466,15 +746,24 @@ class AgentLoop:
                         current_turn_tools.add(tool_name)
                         if _is_file_write_success(tool_name, result):
                             current_turn_file_success = True
+                            latest_file_success_result = result
                         if _is_report_success(tool_name, result):
                             latest_report_success = result
                         if _tool_failed(result):
                             latest_tool_error_index = tool_events_seen
                             unresolved_tool_errors.append({"tool": tool_name, "result": result})
-                            messages.append({"role": "system", "content": _tool_failure_instruction(tool_name, result)})
+                            critical_tool_failures.append(
+                                {"tool": tool_name, "error": _tool_error_summary(tool_name, result)}
+                            )
+                            failure_notes.append(_tool_failure_instruction(tool_name, result))
                         elif _is_file_write_success(tool_name, result):
                             latest_file_success_index = tool_events_seen
                             unresolved_tool_errors.clear()
+
+                # Flush deferred failure nudges — now that all tool messages for
+                # this assistant turn are contiguous, system messages are safe.
+                for note in failure_notes:
+                    messages.append({"role": "system", "content": note})
 
             else:
                 final_text = msg.content or ""
@@ -494,7 +783,40 @@ class AgentLoop:
                     nudged_required_file = True
                     continue
                 if _requires_file_output(user_message) and not current_turn_file_success and _claims_file_success(final_text):
-                    final_text = "ยังไม่ได้สร้างหรือแก้ไขไฟล์ในรอบคำสั่งนี้ครับ เพราะยังไม่มีผลลัพธ์จาก create_docx หรือ write_file ที่ยืนยันว่า ok=true"
+                    final_text = "ยังไม่ได้สร้างหรือแก้ไขไฟล์ในรอบคำสั่งนี้ครับ เพราะยังไม่มีผลลัพธ์จากเครื่องมือสร้างไฟล์ที่ยืนยันว่า ok=true และ verified=true"
+                if (
+                    _claims_file_success(final_text)
+                    and not current_turn_file_success
+                    and stale_file_claim_nudges < 2
+                    and iteration < self.max_iterations
+                ):
+                    messages.append({
+                        "role": "system",
+                        "content": (
+                            "Your draft claims a file was created, saved, downloaded, verified, or available at an outputs/ path, "
+                            "but no file-producing tool returned ok=true and verified=true in the CURRENT user turn. "
+                            "Do not reuse file-success claims from conversation history. "
+                            "Either call an appropriate file-producing tool now, or rewrite the answer directly in chat without any claim "
+                            "that a file was created/saved/verified. If the user asked for a table, provide the table inline in chat. "
+                            "Do not mention outputs/, download, .xlsx, .docx, .pdf, or .md unless a current-turn verified file tool succeeded."
+                        ),
+                    })
+                    stale_file_claim_nudges += 1
+                    continue
+                if (
+                    _requires_file_output(user_message)
+                    and current_turn_file_success
+                    and latest_file_success_result
+                    and _claims_failure(final_text)
+                ):
+                    final_text = _file_success_final_text(latest_file_success_result, user_message)
+                if _claims_file_success(final_text) and not current_turn_file_success and stale_file_claim_nudges >= 2:
+                    sanitized = _sanitize_unverified_file_claims(final_text)
+                    final_text = (
+                        sanitized
+                        if sanitized and not _claims_file_success(sanitized)
+                        else "รอบคำสั่งนี้ยังไม่มีเครื่องมือที่ยืนยันว่าไฟล์ถูกสร้าง บันทึก และตรวจสอบสำเร็จครับ"
+                    )
                 if (
                     latest_tool_error_index > latest_file_success_index
                     and unresolved_tool_errors
@@ -502,13 +824,54 @@ class AgentLoop:
                 ):
                     final_text = _failure_final_text(unresolved_tool_errors)
 
+                # ── Stage: REFLECT ───────────────────────────────────
+                # Before finalizing, grade the draft answer against the plan and
+                # the user's intent. If real work remains, feed the gaps back and
+                # keep working (once) instead of returning an incomplete answer.
+                if (
+                    plan_steps and not reflected and current_turn_tools
+                    and not unresolved_tool_errors and iteration < self.max_iterations
+                ):
+                    reflected = True
+                    reflection = await self._reflect(
+                        client, model, user_message, plan_steps, final_text, current_turn_tools
+                    )
+                    reflection_result = reflection
+                    if not reflection["complete"] and reflection["missing"]:
+                        yield sse_event(SSEEventType.REFLECTION, {
+                            "complete": False, "missing": reflection["missing"],
+                        })
+                        self._persist_reflection(plan_msg, plan_steps, False, reflection["missing"])
+                        gaps = "\n".join(f"- {m}" for m in reflection["missing"])
+                        messages.append({
+                            "role": "system",
+                            "content": (
+                                "Self-review found the request is not yet fully satisfied. "
+                                "Address these remaining gaps using tools, then give the final answer. "
+                                "Do not claim completion until they are genuinely done:\n" + gaps
+                            ),
+                        })
+                        continue
+                    yield sse_event(SSEEventType.REFLECTION, {"complete": True})
+                    self._persist_reflection(plan_msg, plan_steps, True, [])
+                    if reflection["revised_answer"]:
+                        final_text = reflection["revised_answer"]
+
                 crud_msg.add(self.db, conversation_id=self.conversation_id, role="assistant",
                              content=final_text, iteration=iteration, model_used=model)
 
                 for chunk in (final_text[i:i+50] for i in range(0, len(final_text), 50)):
                     yield sse_event(SSEEventType.DELTA, {"text": chunk})
 
-                yield sse_event(SSEEventType.DONE, {"iterations": iteration})
+                success, failed_steps = _aggregate_success(
+                    None, reflection_result, critical_tool_failures,
+                    current_turn_file_success, _requires_file_output(user_message),
+                )
+                yield sse_event(SSEEventType.DONE, {
+                    "iterations": iteration,
+                    "success": success,
+                    "failed_steps": failed_steps,
+                })
                 return
 
         # Out of iterations — force one tool-free wrap-up call so the user gets
@@ -532,15 +895,281 @@ class AgentLoop:
         except Exception:
             pass
         if not final_text or _looks_like_raw_tool_payload(final_text):
-            final_text = _max_iterations_fallback_text(user_message)
-        if _claims_file_success(final_text) and not current_turn_file_success and unresolved_tool_errors:
-            final_text = _failure_final_text(unresolved_tool_errors)
+            final_text = (
+                _file_success_final_text(latest_file_success_result, user_message)
+                if current_turn_file_success and latest_file_success_result
+                else _max_iterations_fallback_text(user_message)
+            )
+        if current_turn_file_success and latest_file_success_result and _claims_failure(final_text):
+            final_text = _file_success_final_text(latest_file_success_result, user_message)
+        if _claims_file_success(final_text) and not current_turn_file_success:
+            final_text = (
+                _failure_final_text(unresolved_tool_errors)
+                if unresolved_tool_errors
+                else "รอบคำสั่งนี้ยังไม่มีเครื่องมือที่ยืนยันว่าไฟล์ถูกสร้าง บันทึก และตรวจสอบสำเร็จครับ"
+            )
 
         crud_msg.add(self.db, conversation_id=self.conversation_id, role="assistant",
                      content=final_text, iteration=self.max_iterations, model_used=model)
         for chunk in (final_text[i:i+50] for i in range(0, len(final_text), 50)):
             yield sse_event(SSEEventType.DELTA, {"text": chunk})
-        yield sse_event(SSEEventType.DONE, {"iterations": self.max_iterations, "stopped": "max_iterations"})
+        success, failed_steps = _aggregate_success(
+            "max_iterations", reflection_result, critical_tool_failures,
+            current_turn_file_success, _requires_file_output(user_message),
+        )
+        yield sse_event(SSEEventType.DONE, {
+            "iterations": self.max_iterations,
+            "stopped": "max_iterations",
+            "success": success,
+            "failed_steps": failed_steps,
+        })
+
+    async def _build_plan(self, client, model, user_message: str, history: list[dict]) -> list[str]:
+        """PLAN stage: one tool-free LLM call that decomposes the request into a
+        short checklist. Failures degrade gracefully to no plan (legacy behavior)."""
+        recent = [m for m in history if m.get("role") in ("user", "assistant") and m.get("content")][-4:]
+        ctx = "\n".join(f"{m['role']}: {str(m['content'])[:300]}" for m in recent)
+        user_block = (f"Recent conversation:\n{ctx}\n\n" if ctx else "") + f"Request to plan:\n{user_message}"
+        try:
+            response = await _chat_with_retry(
+                client, model=model,
+                messages=[
+                    {"role": "system", "content": _PLAN_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_block},
+                ],
+                temperature=LLM_TEMPERATURE, stream=False,
+            )
+            return _parse_plan(response.choices[0].message.content or "")
+        except Exception:
+            return []
+
+    async def _reflect(self, client, model, user_message: str, plan_steps: list[str],
+                       draft_answer: str, tools_used: set[str]) -> dict[str, Any]:
+        """REFLECT stage: grade the draft answer against the plan + user intent.
+
+        On reflection failure, return complete=False so the loop surfaces the
+        problem to the user instead of silently claiming success.
+        """
+        checklist = "\n".join(f"{i+1}. {s}" for i, s in enumerate(plan_steps))
+        user_block = (
+            f"User's original request:\n{user_message}\n\n"
+            f"Plan checklist:\n{checklist}\n\n"
+            f"Tools actually used: {', '.join(sorted(tools_used)) or 'none'}\n\n"
+            f"Draft answer to review:\n{draft_answer[:4000]}"
+        )
+        try:
+            response = await _chat_with_retry(
+                client, model=model,
+                messages=[
+                    {"role": "system", "content": _REFLECT_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_block},
+                ],
+                temperature=LLM_TEMPERATURE, stream=False,
+            )
+            return _parse_reflection(response.choices[0].message.content or "")
+        except Exception as e:
+            logger.error("Reflection failed: %s", e, exc_info=True)
+            return {"complete": False,
+                    "missing": [f"Self-review could not run: {type(e).__name__}: {str(e)[:200]}"],
+                    "revised_answer": None}
+
+    def _persist_reflection(self, plan_msg, plan_steps: list[str], complete: bool, missing: list[str]) -> None:
+        """Update the persisted plan message with the final reflection outcome so
+        the checklist + review result survive in conversation history."""
+        if plan_msg is None:
+            return
+        try:
+            # Reassign a fresh dict so SQLAlchemy flags the JSONB column dirty.
+            plan_msg.tool_result = {
+                "steps": plan_steps,
+                "reflection": {"complete": complete, "missing": missing},
+            }
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+
+    def _latest_convertible_output_path(self) -> str | None:
+        preferred_exts = {".docx", ".pdf", ".csv", ".tsv", ".txt", ".md", ".html", ".json", ".jsonl", ".report", ".summary"}
+        return self._latest_output_path_with_exts(preferred_exts)
+
+    def _latest_text_output_path(self) -> str | None:
+        preferred_exts = {".md", ".txt", ".html", ".csv", ".tsv", ".json", ".report", ".summary"}
+        return self._latest_output_path_with_exts(preferred_exts)
+
+    def _latest_output_path_with_exts(self, preferred_exts: set[str]) -> str | None:
+        try:
+            messages = (
+                self.db.query(AgentMessage)
+                .filter(AgentMessage.conversation_id == self.conversation_id)
+                .order_by(AgentMessage.created_at.desc())
+                .limit(80)
+                .all()
+            )
+        except Exception:
+            return None
+
+        for msg in messages:
+            result = msg.tool_result
+            candidates: list[str] = []
+            if isinstance(result, dict):
+                for key in ("path", "download_path", "source_path"):
+                    value = result.get(key)
+                    if isinstance(value, str):
+                        candidates.append(value)
+                saved_files = result.get("saved_files")
+                if isinstance(saved_files, list):
+                    for item in saved_files:
+                        if isinstance(item, dict) and isinstance(item.get("path"), str):
+                            candidates.append(item["path"])
+                        elif isinstance(item, str):
+                            candidates.append(item)
+            for path in candidates:
+                clean_path = path.strip()
+                if clean_path.startswith(f"jobs/{self.job_id}/"):
+                    clean_path = clean_path[len(f"jobs/{self.job_id}/"):]
+                if not clean_path.startswith("outputs/"):
+                    continue
+                if Path(clean_path).suffix.lower() in preferred_exts:
+                    return clean_path
+        return None
+
+    def _latest_assistant_content_for_pdf(self) -> str | None:
+        try:
+            messages = (
+                self.db.query(AgentMessage)
+                .filter(AgentMessage.conversation_id == self.conversation_id)
+                .filter(AgentMessage.role == "assistant")
+                .order_by(AgentMessage.created_at.desc())
+                .limit(20)
+                .all()
+            )
+        except Exception:
+            return None
+        for msg in messages:
+            content = (msg.content or "").strip()
+            if len(content) < 120:
+                continue
+            if msg.tool_calls:
+                continue
+            sanitized = _sanitize_unverified_file_claims(content)
+            if sanitized:
+                return sanitized[:80000]
+        return None
+
+    async def _run_direct_file_conversion(self, user_message: str, source_path: str) -> AsyncGenerator[str, None]:
+        yield sse_event(SSEEventType.THINKING, {"iteration": 1})
+        tool_name = "convert_to_xlsx"
+        tool_args = {"source_path": source_path}
+        call_id = f"call_{uuid4().hex[:12]}"
+        tool_call = {
+            "id": call_id,
+            "type": "function",
+            "function": {"name": tool_name, "arguments": json.dumps(tool_args, ensure_ascii=False)},
+        }
+        crud_msg.add(
+            self.db,
+            conversation_id=self.conversation_id,
+            role="assistant",
+            content=None,
+            tool_calls=[tool_call],
+            iteration=1,
+            model_used=self.llm_config.get("model", "gpt-4o-mini"),
+        )
+        yield sse_event(SSEEventType.TOOL_CALL, {"id": call_id, "name": tool_name, "arguments": tool_args})
+        result = await tool_registry.execute(tool_name, tool_args, self.context)
+        result = _verify_file_tool_result(self.context, tool_name, result)
+        crud_msg.add(
+            self.db,
+            conversation_id=self.conversation_id,
+            role="tool",
+            tool_call_id=call_id,
+            tool_name=tool_name,
+            tool_result=result,
+            iteration=1,
+        )
+        yield sse_event(SSEEventType.TOOL_RESULT, {"id": call_id, "name": tool_name, "result": result})
+
+        if _is_file_write_success(tool_name, result):
+            final_text = _file_success_final_text(result, user_message)
+        else:
+            final_text = _failure_final_text([{"tool": tool_name, "result": result}])
+        crud_msg.add(
+            self.db,
+            conversation_id=self.conversation_id,
+            role="assistant",
+            content=final_text,
+            iteration=1,
+            model_used=self.llm_config.get("model", "gpt-4o-mini"),
+        )
+        for chunk in (final_text[i:i+50] for i in range(0, len(final_text), 50)):
+            yield sse_event(SSEEventType.DELTA, {"text": chunk})
+        yield sse_event(SSEEventType.DONE, {"iterations": 1})
+
+    async def _run_direct_pdf_creation(
+        self,
+        user_message: str,
+        source_path: str | None,
+        source_content: str | None,
+    ) -> AsyncGenerator[str, None]:
+        yield sse_event(SSEEventType.THINKING, {"iteration": 1})
+        tool_name = "create_pdf"
+        if source_path:
+            stem = Path(source_path).stem or "agent_export"
+            tool_args = {
+                "source_path": source_path,
+                "output_path": f"outputs/{stem}.pdf",
+                "title": "InsightDOC PDF Export",
+            }
+        else:
+            tool_args = {
+                "content": source_content or "",
+                "output_path": "outputs/agent_response.pdf",
+                "title": "InsightDOC PDF Export",
+            }
+        call_id = f"call_{uuid4().hex[:12]}"
+        tool_call = {
+            "id": call_id,
+            "type": "function",
+            "function": {"name": tool_name, "arguments": json.dumps(tool_args, ensure_ascii=False)},
+        }
+        crud_msg.add(
+            self.db,
+            conversation_id=self.conversation_id,
+            role="assistant",
+            content=None,
+            tool_calls=[tool_call],
+            iteration=1,
+            model_used=self.llm_config.get("model", "gpt-4o-mini"),
+        )
+        yield sse_event(SSEEventType.TOOL_CALL, {"id": call_id, "name": tool_name, "arguments": tool_args})
+        result = await tool_registry.execute(tool_name, tool_args, self.context)
+        result = _verify_file_tool_result(self.context, tool_name, result)
+        crud_msg.add(
+            self.db,
+            conversation_id=self.conversation_id,
+            role="tool",
+            tool_call_id=call_id,
+            tool_name=tool_name,
+            tool_result=result,
+            iteration=1,
+        )
+        yield sse_event(SSEEventType.TOOL_RESULT, {"id": call_id, "name": tool_name, "result": result})
+
+        if _is_file_write_success(tool_name, result):
+            final_text = _file_success_final_text(result, user_message)
+        else:
+            final_text = _failure_final_text([{"tool": tool_name, "result": result}])
+        crud_msg.add(
+            self.db,
+            conversation_id=self.conversation_id,
+            role="assistant",
+            content=final_text,
+            iteration=1,
+            model_used=self.llm_config.get("model", "gpt-4o-mini"),
+        )
+        for chunk in (final_text[i:i+50] for i in range(0, len(final_text), 50)):
+            yield sse_event(SSEEventType.DELTA, {"text": chunk})
+        yield sse_event(SSEEventType.DONE, {"iterations": 1})
 
     def _is_summary_request(self, user_message: str) -> bool:
         text = user_message.lower()
@@ -792,6 +1421,7 @@ When a report tool such as run_report_code succeeds, final answers must be short
                     yield sse_event(SSEEventType.TOOL_REJECTED, {"id": call_id, "name": tool_name})
                 else:
                     result = await tool_registry.execute(tool_name, tool_args, self.context)
+                    result = _verify_file_tool_result(self.context, tool_name, result)
                     log_activity(
                         self.db, user_id=self.user_id,
                         action=f"agent_tool_{tool_name}",
@@ -801,6 +1431,7 @@ When a report tool such as run_report_code succeeds, final answers must be short
                     )
             else:
                 result = await tool_registry.execute(tool_name, tool_args, self.context)
+                result = _verify_file_tool_result(self.context, tool_name, result)
 
             yield sse_event(SSEEventType.TOOL_RESULT, {"id": call_id, "name": tool_name, "result": result})
             crud_msg.add(self.db, conversation_id=self.conversation_id, role="tool",

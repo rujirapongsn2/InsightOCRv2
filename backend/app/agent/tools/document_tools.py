@@ -60,8 +60,18 @@ async def _compare_documents_handler(args: dict, context) -> dict:
     doc2 = context.db.query(Document).filter(Document.id == args["doc_id_2"], Document.job_id == context.job_id).first()
     if not doc1 or not doc2:
         return {"error": "One or both documents not found"}
-    d1 = doc1.reviewed_data or doc1.extracted_data or {}
-    d2 = doc2.reviewed_data or doc2.extracted_data or {}
+    # Extracted/reviewed data may be a dict, a list (e.g. multi-record/section
+    # contracts), or a scalar. Normalize to a flat dict so the key-diff below
+    # works for any shape instead of assuming .keys() exists.
+    def _normalize(data) -> dict:
+        if isinstance(data, dict):
+            return data
+        if isinstance(data, list):
+            return {f"[{i}]": v for i, v in enumerate(data)}
+        return {"value": data} if data is not None else {}
+
+    d1 = _normalize(doc1.reviewed_data or doc1.extracted_data or {})
+    d2 = _normalize(doc2.reviewed_data or doc2.extracted_data or {})
     diff = {}
     for k in set(d1.keys()) | set(d2.keys()):
         if k not in d1:
@@ -80,8 +90,21 @@ async def _update_document_field_handler(args: dict, context) -> dict:
     reviewed_data = dict(doc.reviewed_data or doc.extracted_data or {})
     reviewed_data[args["field"]] = args["value"]
     doc.reviewed_data = reviewed_data
-    context.db.commit()
-    return {"ok": True, "doc_id": str(doc.id), "field": args["field"], "value": args["value"]}
+    try:
+        context.db.commit()
+    except Exception as e:
+        context.db.rollback()
+        return {"ok": False, "error": f"DB commit failed: {type(e).__name__}: {e}"}
+    context.db.refresh(doc)
+    actual = (doc.reviewed_data or {}).get(args["field"])
+    if actual != args["value"]:
+        return {
+            "ok": False,
+            "error": "Read-back mismatch: field not persisted",
+            "expected": args["value"],
+            "actual": actual,
+        }
+    return {"ok": True, "verified": True, "doc_id": str(doc.id), "field": args["field"], "value": args["value"]}
 
 
 async def _approve_document_handler(args: dict, context) -> dict:
@@ -94,11 +117,23 @@ async def _approve_document_handler(args: dict, context) -> dict:
     doc.reviewed_by = context.user_id
     if not doc.reviewed_data:
         doc.reviewed_data = dict(doc.extracted_data or {})
-    context.db.commit()
+    try:
+        context.db.commit()
+    except Exception as e:
+        context.db.rollback()
+        return {"ok": False, "error": f"DB commit failed: {type(e).__name__}: {e}"}
+    context.db.refresh(doc)
+    if doc.status != "reviewed" or doc.review_decision != "approved":
+        return {
+            "ok": False,
+            "error": "Read-back mismatch: review state not persisted",
+            "status": doc.status,
+            "decision": doc.review_decision,
+        }
     log_activity(context.db, user_id=context.user_id, action="review_document",
                  resource_type="document", resource_id=str(doc.id),
                  details={"decision": "approved", "agent_initiated": True, "note": args.get("note")})
-    return {"ok": True, "doc_id": str(doc.id), "filename": doc.filename, "status": "reviewed"}
+    return {"ok": True, "verified": True, "doc_id": str(doc.id), "filename": doc.filename, "status": "reviewed"}
 
 
 async def _reject_document_handler(args: dict, context) -> dict:
@@ -109,11 +144,23 @@ async def _reject_document_handler(args: dict, context) -> dict:
     doc.review_decision = "rejected"
     doc.reviewed_at = datetime.now(timezone.utc)
     doc.reviewed_by = context.user_id
-    context.db.commit()
+    try:
+        context.db.commit()
+    except Exception as e:
+        context.db.rollback()
+        return {"ok": False, "error": f"DB commit failed: {type(e).__name__}: {e}"}
+    context.db.refresh(doc)
+    if doc.status != "reviewed" or doc.review_decision != "rejected":
+        return {
+            "ok": False,
+            "error": "Read-back mismatch: review state not persisted",
+            "status": doc.status,
+            "decision": doc.review_decision,
+        }
     log_activity(context.db, user_id=context.user_id, action="review_document",
                  resource_type="document", resource_id=str(doc.id),
                  details={"decision": "rejected", "agent_initiated": True})
-    return {"ok": True, "doc_id": str(doc.id), "filename": doc.filename, "status": "reviewed"}
+    return {"ok": True, "verified": True, "doc_id": str(doc.id), "filename": doc.filename, "status": "reviewed"}
 
 
 async def _bulk_approve_handler(args: dict, context) -> dict:
@@ -121,6 +168,7 @@ async def _bulk_approve_handler(args: dict, context) -> dict:
     if args.get("min_confidence"):
         q = q.filter(Document.extraction_confidence >= args["min_confidence"])
     docs = q.all()
+    target_ids = [str(d.id) for d in docs]
     for d in docs:
         d.status = "reviewed"
         d.review_decision = "approved"
@@ -128,8 +176,23 @@ async def _bulk_approve_handler(args: dict, context) -> dict:
         d.reviewed_by = context.user_id
         if not d.reviewed_data:
             d.reviewed_data = dict(d.extracted_data or {})
-    context.db.commit()
-    return {"ok": True, "approved_count": len(docs)}
+    try:
+        context.db.commit()
+    except Exception as e:
+        context.db.rollback()
+        return {"ok": False, "error": f"DB commit failed: {type(e).__name__}: {e}"}
+    context.db.expire_all()
+    persisted = context.db.query(Document).filter(
+        Document.id.in_(target_ids), Document.status == "reviewed"
+    ).count()
+    if persisted != len(target_ids):
+        return {
+            "ok": False,
+            "error": "Read-back mismatch: not all documents persisted as reviewed",
+            "expected": len(target_ids),
+            "actual": persisted,
+        }
+    return {"ok": True, "verified": True, "approved_count": persisted}
 
 
 # ── Tool Registrations ──

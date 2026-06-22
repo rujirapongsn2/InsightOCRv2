@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useEffect, useRef, useCallback } from "react"
-import { X, Plus, Trash2, Bot, ChevronDown, AlertTriangle, Loader2, Brain, Library, Sparkles } from "lucide-react"
+import { X, Plus, Trash2, Bot, ChevronDown, AlertTriangle, Loader2, Brain, Library, Sparkles, ListChecks, Check, Circle } from "lucide-react"
 import { getApiBaseUrl } from "@/lib/api"
 import AgentMessage from "./AgentMessage"
 import ToolCallCard from "./ToolCallCard"
@@ -22,7 +22,7 @@ interface Conversation {
 
 interface Message {
     id: string
-    role: "user" | "assistant" | "tool"
+    role: "user" | "assistant" | "tool" | "plan"
     content: string | null
     tool_calls?: any[]
     tool_call_id?: string
@@ -45,6 +45,12 @@ interface AgentEvent {
     description?: string
     message?: string
     iterations?: number
+    steps?: string[]
+    complete?: boolean
+    missing?: string[]
+    success?: boolean
+    failed_steps?: string[]
+    stopped?: string
 }
 
 interface PendingAction {
@@ -89,6 +95,9 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
     const [inputValue, setInputValue] = useState("")
     const [streaming, setStreaming] = useState(false)
     const [thinkingIteration, setThinkingIteration] = useState<number | null>(null)
+    const [planSteps, setPlanSteps] = useState<string[]>([])
+    const [reflection, setReflection] = useState<{ complete: boolean; missing: string[] } | null>(null)
+    const [doneStatus, setDoneStatus] = useState<{ success: boolean; failedSteps: string[] } | null>(null)
     const [streamText, setStreamText] = useState("")
     const [pendingAction, setPendingAction] = useState<PendingAction | null>(null)
     const [loading, setLoading] = useState(true)
@@ -126,19 +135,21 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
         load()
     }, [apiBase, jobId, headers])
 
+    const reloadActiveMessages = useCallback(async () => {
+        if (!activeConversation) return
+        try {
+            const res = await fetch(`${apiBase}/agent/conversations/${activeConversation}`, { headers: headers() })
+            if (res.ok) {
+                const data = await res.json()
+                setMessages(data.messages || [])
+            }
+        } catch { }
+    }, [activeConversation, apiBase, headers])
+
     useEffect(() => {
         if (!activeConversation) { setMessages([]); return }
-        const load = async () => {
-            try {
-                const res = await fetch(`${apiBase}/agent/conversations/${activeConversation}`, { headers: headers() })
-                if (res.ok) {
-                    const data = await res.json()
-                    setMessages(data.messages || [])
-                }
-            } catch { }
-        }
-        load()
-    }, [activeConversation, apiBase, headers])
+        reloadActiveMessages()
+    }, [activeConversation, reloadActiveMessages])
 
     const loadMemories = useCallback(async (scope: "user" | "job" = memoryScope) => {
         setLoadingMemories(true)
@@ -219,6 +230,9 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
         setEvents([])
         setError(null)
         setThinkingIteration(null)
+        setPlanSteps([])
+        setReflection(null)
+        setDoneStatus(null)
 
         const userMsgObj: Message = { id: crypto.randomUUID(), role: "user", content: userMsg, created_at: new Date().toISOString() }
         setMessages(prev => [...prev, userMsgObj])
@@ -239,6 +253,7 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
             let buffer = ""
             let finalText = ""
             const newEvents: AgentEvent[] = []
+            let receivedDone = false
 
             while (true) {
                 const { done, value } = await reader.read()
@@ -254,6 +269,12 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
                             case "thinking":
                                 setThinkingIteration(evt.iteration || null)
                                 break
+                            case "plan":
+                                setPlanSteps(evt.steps || [])
+                                break
+                            case "reflection":
+                                setReflection({ complete: !!evt.complete, missing: evt.missing || [] })
+                                break
                             case "tool_call":
                             case "tool_result":
                             case "tool_rejected":
@@ -268,12 +289,21 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
                                 setStreamText(finalText)
                                 break
                             case "done":
+                                receivedDone = true
                                 setStreaming(false)
                                 setThinkingIteration(null)
+                                setDoneStatus({
+                                    success: evt.success !== false,
+                                    failedSteps: Array.isArray(evt.failed_steps) ? evt.failed_steps : [],
+                                })
                                 if (finalText) {
                                     setMessages(prev => [...prev, { id: crypto.randomUUID(), role: "assistant", content: finalText, created_at: new Date().toISOString() }])
                                     setStreamText("")
                                 }
+                                // Reconcile with authoritative history (adds the persisted
+                                // plan card + tool messages in order), then drop the live
+                                // event cards so they don't double-render.
+                                reloadActiveMessages().then(() => setEvents([]))
                                 break
                             case "error":
                                 setError(evt.message || "Agent error")
@@ -283,8 +313,20 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
                     } catch { }
                 }
             }
+            // Stream closed without a "done" event — backend likely threw an
+            // unhandled exception and dropped the connection.
+            if (!receivedDone) {
+                setStreaming(false)
+                setThinkingIteration(null)
+                setError("การเชื่อมต่อขาดหาย — กรุณาลองส่งคำถามใหม่อีกครั้ง")
+                reloadActiveMessages().then(() => setEvents([]))
+            }
         } catch (e: any) {
-            setError(e.message || "Network error")
+            // Safari reports aborted SSE connections as "Load failed";
+            // Chrome/Firefox say "Failed to fetch". Show a friendlier message.
+            const raw: string = e?.message || ""
+            const isConnErr = raw === "Load failed" || raw === "Failed to fetch" || raw.includes("network") || raw.includes("connection")
+            setError(isConnErr ? "การเชื่อมต่อขาดหาย — กรุณาลองส่งคำถามใหม่อีกครั้ง" : raw || "Network error")
             setStreaming(false)
         }
     }
@@ -331,8 +373,48 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
         }
     }
 
+    const renderPlanCard = (
+        steps: string[],
+        refl: { complete: boolean; missing: string[] } | null,
+        isLive: boolean,
+        key?: string,
+    ) => (
+        <div key={key} className="mx-3 rounded-lg border border-softnix-blue/30 bg-softnix-blue/5 p-3">
+            <div className="flex items-center gap-1.5 mb-2">
+                <ListChecks className="h-3.5 w-3.5 text-softnix-blue" />
+                <span className="text-[11px] font-semibold text-softnix-deep">แผนการทำงาน</span>
+                {isLive && !refl && <Loader2 className="h-3 w-3 animate-spin text-softnix-blue ml-auto" />}
+                {refl?.complete && <span className="ml-auto text-[10px] text-emerald-600 font-medium">ตรวจสอบครบถ้วน ✓</span>}
+            </div>
+            <ul className="space-y-1">
+                {steps.map((step, i) => (
+                    <li key={i} className="flex items-start gap-1.5 text-[11px] text-slate-gray">
+                        {refl?.complete
+                            ? <Check className="h-3 w-3 mt-0.5 text-emerald-500 flex-shrink-0" />
+                            : <Circle className="h-3 w-3 mt-0.5 text-mute-gray flex-shrink-0" />}
+                        <span>{step}</span>
+                    </li>
+                ))}
+            </ul>
+            {refl && !refl.complete && refl.missing.length > 0 && (
+                <div className="mt-2 pt-2 border-t border-amber-200">
+                    <p className="text-[10px] font-medium text-amber-700 mb-0.5">งานที่ยังขาด:</p>
+                    <ul className="space-y-0.5">
+                        {refl.missing.map((m, i) => (
+                            <li key={i} className="text-[10px] text-amber-600">• {m}</li>
+                        ))}
+                    </ul>
+                </div>
+            )}
+        </div>
+    )
+
     const renderPersistedMessage = (msg: Message) => {
         if (msg.role === "tool") return null
+        if (msg.role === "plan") {
+            const tr = msg.tool_result || {}
+            return renderPlanCard(tr.steps || [], tr.reflection || null, false, msg.id)
+        }
         if (msg.role === "assistant" && Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) {
             return msg.tool_calls.map((toolCall: any, index: number) => {
                 const call = {
@@ -461,6 +543,7 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
                     </div>
                 )}
                 {messages.map(msg => renderPersistedMessage(msg))}
+                {streaming && planSteps.length > 0 && renderPlanCard(planSteps, reflection, true, "live-plan")}
                 {events.filter(e => e.type === "tool_call").map(evt => (
                     <ToolCallCard key={evt.id} call={evt} result={toolResultsMap[evt.id!]} conversationId={activeConversation || undefined} />
                 ))}
@@ -474,6 +557,19 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
                     <div className="mx-3 flex items-start gap-2 p-3 rounded-lg bg-red-50 border border-red-200">
                         <AlertTriangle className="h-4 w-4 text-red-500 mt-0.5 flex-shrink-0" />
                         <p className="text-xs text-red-700">{error}</p>
+                    </div>
+                )}
+                {doneStatus && !doneStatus.success && (
+                    <div className="mx-3 mb-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                        <div className="flex items-center gap-2 font-medium">
+                            <AlertTriangle className="h-4 w-4" />
+                            การทำงานยังไม่สมบูรณ์ — ตรวจพบปัญหา:
+                        </div>
+                        {doneStatus.failedSteps.length > 0 && (
+                            <ul className="mt-1 list-disc pl-6 space-y-0.5">
+                                {doneStatus.failedSteps.map((s, i) => <li key={i}>{s}</li>)}
+                            </ul>
+                        )}
                     </div>
                 )}
                 <div ref={messagesEndRef} />
