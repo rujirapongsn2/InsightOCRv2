@@ -19,6 +19,7 @@ from app.utils.job_logger import get_job_logger
 import shutil
 import os
 import uuid
+import asyncio
 import requests
 import warnings
 import json
@@ -320,12 +321,11 @@ def get_task_status(
     progress: Optional[ProgressInfo] = None
     if document.status == "processing":
         try:
-            import redis as _redis_lib, json as _json
-            from app.core.config import settings as _cfg
-            _r = _redis_lib.from_url(_cfg.REDIS_URL, decode_responses=True)
+            from app.db.redis import get_redis_client
+            _r = get_redis_client()
             _raw = _r.get(f"doc_progress:{document_id}")
             if _raw:
-                _data = _json.loads(_raw)
+                _data = json.loads(_raw)
                 progress = ProgressInfo(
                     percent=_data.get("percent", 0),
                     stage=_data.get("stage", ""),
@@ -342,6 +342,101 @@ def get_task_status(
         page_count=document.page_count,
         progress=progress,
     )
+
+_TERMINAL_STATUSES = {"extraction_completed", "reviewed", "failed"}
+_MAX_STREAM_SECONDS = 35 * 60
+
+
+@router.get("/{document_id}/progress-stream")
+async def document_progress_stream(
+    *,
+    db: Session = Depends(deps.get_db),
+    document_id: str,
+    current_user: User = Depends(deps.get_current_active_user),
+) -> Any:
+    """Server-Sent Events stream for document processing progress.
+
+    Replaces per-second HTTP polling. The server holds one long-lived
+    connection per client and pushes progress events read from Redis
+    (`doc_progress:{id}`) plus periodic DB status checks.
+    """
+    document = db.query(Document).filter(Document.id == document_id).first()
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+    ensure_document_access(current_user, document)
+
+    try:
+        from app.db.redis import get_redis_client
+        redis_client = get_redis_client()
+    except Exception:
+        redis_client = None
+    progress_key = f"doc_progress:{document_id}"
+
+    async def _event_stream():
+        start = asyncio.get_event_loop().time()
+        last_keepalive = start
+        tick = 0
+        while True:
+            now = asyncio.get_event_loop().time()
+            if now - start > _MAX_STREAM_SECONDS:
+                yield f"data: {json.dumps({'type': 'timeout'})}\n\n"
+                return
+
+            progress_payload: Optional[dict] = None
+            if redis_client is not None:
+                try:
+                    raw = redis_client.get(progress_key)
+                    if raw:
+                        progress_payload = json.loads(raw)
+                except Exception:
+                    progress_payload = None
+
+            tick += 1
+            status: Optional[str] = None
+            extracted_data: Any = None
+            processing_error: Optional[str] = None
+            if tick % 5 == 0:
+                try:
+                    db.expire(document)
+                    fresh = db.query(Document).filter(Document.id == document_id).first()
+                    if fresh:
+                        status = fresh.status
+                        extracted_data = fresh.extracted_data
+                        processing_error = fresh.processing_error
+                except Exception:
+                    pass
+
+            payload = {
+                "type": "progress",
+                "percent": (progress_payload or {}).get("percent", 0),
+                "stage": (progress_payload or {}).get("stage", ""),
+                "message": (progress_payload or {}).get("message", ""),
+                "status": status,
+                "extracted_data": extracted_data,
+                "processing_error": processing_error,
+            }
+            yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+            if status in _TERMINAL_STATUSES:
+                yield f"data: {json.dumps({'type': 'done', 'status': status})}\n\n"
+                return
+
+            if now - last_keepalive >= 15:
+                yield ": keepalive\n\n"
+                last_keepalive = now
+
+            await asyncio.sleep(1.0)
+
+    return StreamingResponse(
+        _event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
 
 @router.get("/{document_id}", response_model=DocumentSchema)
 def read_document(

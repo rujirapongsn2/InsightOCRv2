@@ -752,12 +752,12 @@ def process_document_task(self, document_id: str, schema_id: str | None = None):
             external_job_id: str | None = None
             failed_statuses = {"failed", "error", "cancelled", "canceled"}
 
-            # Setup Redis progress key (used by /task-status endpoint)
+            # Setup Redis progress key (used by /task-status and /progress-stream endpoints)
             _redis_prog: redis_lib.Redis | None = None
             _redis_prog_key = f"doc_progress:{document_id}"
             try:
-                from app.core.config import settings as _cfg
-                _redis_prog = redis_lib.from_url(_cfg.REDIS_URL, decode_responses=True)
+                from app.db.redis import get_redis_client
+                _redis_prog = get_redis_client()
             except Exception:
                 _redis_prog = None
 
@@ -878,8 +878,8 @@ def process_document_task(self, document_id: str, schema_id: str | None = None):
 
                 # Redis client for writing live progress (bypasses Celery state override)
                 try:
-                    from app.core.config import settings as _settings
-                    _redis = redis_lib.from_url(_settings.REDIS_URL, decode_responses=True)
+                    from app.db.redis import get_redis_client
+                    _redis = get_redis_client()
                     _redis_key = f"doc_progress:{document_id}"
                 except Exception:
                     _redis = None

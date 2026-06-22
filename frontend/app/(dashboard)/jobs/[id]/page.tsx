@@ -107,7 +107,7 @@ export default function JobDetailPage() {
     const [editedOcrText, setEditedOcrText] = useState("")
     const [editedData, setEditedData] = useState<ExtractedEntry[]>([])
     const fileInputRef = useRef<HTMLInputElement>(null)
-    const pollingIntervalsRef = useRef<Map<string, ReturnType<typeof setInterval>>>(new Map())
+    const pollingIntervalsRef = useRef<Map<string, AbortController>>(new Map())
     const [showIntegrationModal, setShowIntegrationModal] = useState(false)
     const [selectedIntegration, setSelectedIntegration] = useState<string>("")
     const [sendingIntegration, setSendingIntegration] = useState(false)
@@ -296,8 +296,8 @@ export default function JobDetailPage() {
         loadResultHistory()
 
         return () => {
-            // Clear all active polling intervals on unmount
-            pollingIntervalsRef.current.forEach(interval => clearInterval(interval))
+            // Tear down any active SSE streams on unmount
+            pollingIntervalsRef.current.forEach(controller => controller.abort())
             pollingIntervalsRef.current.clear()
         }
     }, [jobId])
@@ -350,64 +350,84 @@ export default function JobDetailPage() {
         ))
     }
 
-    const MAX_POLL_MS = 35 * 60 * 1000  // 35 minutes
+    const MAX_POLL_MS = 35 * 60 * 1000  // 35 minutes — matches backend hard cap
 
     const startPolling = (docId: string) => {
         const token = typeof window !== "undefined" ? localStorage.getItem("token") : null
+        const controller = new AbortController()
         const startTime = Date.now()
         setProcessingDocs(prev => new Set(prev).add(docId))
-        const pollInterval = setInterval(async () => {
-            // Stop polling if max duration exceeded
-            if (Date.now() - startTime > MAX_POLL_MS) {
-                clearInterval(pollInterval)
-                pollingIntervalsRef.current.delete(docId)
-                setProcessingDocs(prev => { const s = new Set(prev); s.delete(docId); return s })
-                setDocProgress(prev => { const p = { ...prev }; delete p[docId]; return p })
-                await fetchDocuments()
-                return
-            }
+        pollingIntervalsRef.current.set(docId, controller)
 
+        const cleanup = async () => {
+            pollingIntervalsRef.current.delete(docId)
+            setProcessingDocs(prev => { const s = new Set(prev); s.delete(docId); return s })
+            setDocProgress(prev => { const p = { ...prev }; delete p[docId]; return p })
+        }
+
+        const hardTimeout = window.setTimeout(() => {
+            controller.abort()
+            cleanup().then(fetchDocuments)
+        }, MAX_POLL_MS);
+
+        (async () => {
             try {
-                const statusRes = await fetch(`${apiBase}/documents/${docId}/task-status`, {
+                const res = await fetch(`${apiBase}/documents/${docId}/progress-stream`, {
                     headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+                    signal: controller.signal,
                 })
-                if (!statusRes.ok) {
-                    clearInterval(pollInterval)
-                    pollingIntervalsRef.current.delete(docId)
-                    setProcessingDocs(prev => { const s = new Set(prev); s.delete(docId); return s })
-                    setDocProgress(prev => { const p = { ...prev }; delete p[docId]; return p })
+                if (!res.ok || !res.body) {
+                    clearTimeout(hardTimeout)
+                    await cleanup()
                     return
                 }
-
-                const status = await statusRes.json()
-
-                if (status.progress) {
-                    setDocProgress(prev => ({
-                        ...prev,
-                        [docId]: {
-                            percent: status.progress.percent ?? 0,
-                            stage: status.progress.stage ?? "",
+                const reader = res.body.getReader()
+                const decoder = new TextDecoder()
+                let buffer = ""
+                while (true) {
+                    const { done, value } = await reader.read()
+                    if (done) break
+                    buffer += decoder.decode(value, { stream: true })
+                    const lines = buffer.split("\n")
+                    buffer = lines.pop() || ""
+                    for (const line of lines) {
+                        if (!line.startsWith("data: ")) continue
+                        let evt: any
+                        try {
+                            evt = JSON.parse(line.slice(6))
+                        } catch {
+                            continue
                         }
-                    }))
+                        if (evt.percent !== undefined) {
+                            setDocProgress(prev => ({
+                                ...prev,
+                                [docId]: { percent: evt.percent ?? 0, stage: evt.stage ?? "" },
+                            }))
+                        }
+                        if (
+                            evt.type === "done" ||
+                            evt.type === "timeout" ||
+                            ["extraction_completed", "reviewed", "failed"].includes(evt.status)
+                        ) {
+                            clearTimeout(hardTimeout)
+                            controller.abort()
+                            await cleanup()
+                            await fetchDocuments()
+                            return
+                        }
+                    }
                 }
-
-                if (status.status === "extraction_completed" || status.status === "reviewed" || status.status === "failed") {
-                    clearInterval(pollInterval)
-                    pollingIntervalsRef.current.delete(docId)
-                    setProcessingDocs(prev => { const s = new Set(prev); s.delete(docId); return s })
-                    setDocProgress(prev => { const p = { ...prev }; delete p[docId]; return p })
-                    await fetchDocuments()
+            } catch (err) {
+                if ((err as Error)?.name !== "AbortError") {
+                    console.error("Progress stream error", err)
                 }
-            } catch (pollError) {
-                console.error("Polling error", pollError)
-                clearInterval(pollInterval)
-                pollingIntervalsRef.current.delete(docId)
-                setProcessingDocs(prev => { const s = new Set(prev); s.delete(docId); return s })
-                setDocProgress(prev => { const p = { ...prev }; delete p[docId]; return p })
+            } finally {
+                clearTimeout(hardTimeout)
+                await cleanup()
             }
-        }, 1000)
-        pollingIntervalsRef.current.set(docId, pollInterval)
-        return pollInterval
+        })()
+
+        return controller
     }
 
     const handleProcess = async (docId: string) => {

@@ -54,10 +54,15 @@ services:
       - ./backend/.env
     environment:
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
-      - SANDBOX_IMAGE=python:3.12-slim
+      - SANDBOX_IMAGE=insightocr-sandbox:py312
+      - SANDBOX_AUTO_BUILD=true
+      - SANDBOX_DOCKER_NETWORK=auto
+      - SANDBOX_MEMORY_MB=512
+      - SANDBOX_TMPFS_MB=512
       - HTTP_PROXY=http://gateway:8888
       - HTTPS_PROXY=http://gateway:8888
       - NO_PROXY=localhost,127.0.0.1,backend,db,redis,minio,frontend,nginx,gateway
+      - WEB_CONCURRENCY=4
     depends_on:
       - db
       - redis
@@ -66,7 +71,7 @@ services:
     security_opt:
       - no-new-privileges:true
     group_add:
-      - "988" # Host docker group for /var/run/docker.sock sandbox access
+      - "0" # GID 0 (root) matches Docker Desktop socket group on macOS (srw-rw---- root root)
     cap_drop:
       - ALL
     cap_add:
@@ -77,7 +82,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1G
+          memory: 2G
     restart: unless-stopped
     healthcheck:
       test: [ "CMD", "curl", "-f", "http://localhost:8000/health" ]
@@ -88,7 +93,7 @@ services:
   celery_worker:
     build: ./backend
     container_name: softnix_ocr_celery
-    command: celery -A app.celery_app worker --loglevel=info --concurrency=4
+    command: celery -A app.celery_app worker --loglevel=info --concurrency=8
     volumes:
       - documents_uploads:/app/uploads
       - /var/run/docker.sock:/var/run/docker.sock  # Sandbox: workflow Python Code nodes
@@ -96,7 +101,11 @@ services:
       - ./backend/.env
     environment:
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
-      - SANDBOX_IMAGE=python:3.12-slim
+      - SANDBOX_IMAGE=insightocr-sandbox:py312
+      - SANDBOX_AUTO_BUILD=true
+      - SANDBOX_DOCKER_NETWORK=auto
+      - SANDBOX_MEMORY_MB=512
+      - SANDBOX_TMPFS_MB=512
       - HTTP_PROXY=http://gateway:8888
       - HTTPS_PROXY=http://gateway:8888
       - NO_PROXY=localhost,127.0.0.1,backend,db,redis,minio,frontend,nginx,gateway
@@ -109,7 +118,7 @@ services:
     security_opt:
       - no-new-privileges:true
     group_add:
-      - "988" # Host docker group for /var/run/docker.sock sandbox access
+      - "0" # GID 0 (root) matches Docker Desktop socket group on macOS (srw-rw---- root root)
     cap_drop:
       - ALL
     read_only: true
@@ -118,7 +127,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 2G
+          memory: 3G
     restart: unless-stopped
 
   celery_beat:
@@ -190,6 +199,7 @@ services:
     container_name: softnix_ocr_db
     expose:
       - "5432"
+    command: postgres -c max_connections=200
     environment:
       - POSTGRES_USER=${DB_USER:-postgres}
       - POSTGRES_PASSWORD=${DB_PASSWORD}
