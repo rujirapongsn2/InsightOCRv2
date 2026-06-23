@@ -677,6 +677,7 @@ class AgentLoop:
                             )
                             yield sse_event(SSEEventType.CONFIRMATION_REQUIRED, {
                                 "pending_action_id": str(pending.id),
+                                "tool_call_id": tc.id,
                                 "tool_name": tool_name,
                                 "description": pending.description,
                                 "arguments": tool_args,
@@ -1411,6 +1412,7 @@ When a report tool such as run_report_code succeeds, final answers must be short
                 )
                 yield sse_event(SSEEventType.CONFIRMATION_REQUIRED, {
                     "pending_action_id": str(pending.id),
+                    "tool_call_id": tc.id,
                     "tool_name": tool_name,
                     "description": pending.description,
                     "arguments": tool_args,

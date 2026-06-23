@@ -1,7 +1,7 @@
 "use client"
 
 import { useState } from "react"
-import { ChevronDown, CheckCircle, XCircle, Loader2, Download } from "lucide-react"
+import { ChevronDown, CheckCircle, XCircle, Loader2, Download, ShieldCheck } from "lucide-react"
 import { downloadAgentFile, normalizeAgentFilePath } from "@/lib/agent-download"
 
 const CATEGORY_ICONS: Record<string, string> = {
@@ -12,7 +12,7 @@ function getCategory(name: string): string {
     if (["list_documents", "get_document_detail", "search_documents", "compare_documents", "update_document_field", "approve_document", "reject_document", "bulk_approve"].includes(name)) return "document"
     if (["list_integrations", "call_api_integration", "send_to_workflow"].includes(name)) return "integration"
     if (["execute_python", "run_report_code"].includes(name)) return "code"
-    if (["read_file", "write_file", "list_files", "delete_file", "create_docx"].includes(name)) return "filesystem"
+    if (["read_file", "write_file", "list_files", "delete_file", "create_docx", "create_pdf", "convert_to_xlsx"].includes(name)) return "filesystem"
     if (["save_memory", "recall_memory", "list_memories", "forget_memory"].includes(name)) return "memory"
     if (["create_skill", "import_skill", "export_skill", "list_skills", "execute_skill", "delete_skill", "discover_skills"].includes(name)) return "skill"
     return "other"
@@ -22,6 +22,7 @@ interface ToolCallCardProps {
     call: { id?: string; name?: string; arguments?: any }
     result?: any
     conversationId?: string
+    autoConfirmed?: boolean
 }
 
 function getErrorMessage(result: any): string | null {
@@ -31,12 +32,12 @@ function getErrorMessage(result: any): string | null {
     return String(result.error)
 }
 
-export default function ToolCallCard({ call, result, conversationId }: ToolCallCardProps) {
+export default function ToolCallCard({ call, result, conversationId, autoConfirmed }: ToolCallCardProps) {
     const [expanded, setExpanded] = useState(false)
     const icon = CATEGORY_ICONS[getCategory(call.name || "")] || "🔧"
     const hasResult = result !== undefined
     const errorMessage = getErrorMessage(result)
-    const isWriteSuccess = ["write_file", "create_docx", "run_report_code"].includes(call.name || "") && result?.ok === true && result?.path
+    const isWriteSuccess = ["write_file", "create_docx", "create_pdf", "convert_to_xlsx", "run_report_code"].includes(call.name || "") && result?.ok === true && result?.path
     const normalizedPath = isWriteSuccess ? normalizeAgentFilePath(result.path) : ""
     const [downloadError, setDownloadError] = useState<string | null>(null)
     const [downloading, setDownloading] = useState(false)
@@ -59,6 +60,12 @@ export default function ToolCallCard({ call, result, conversationId }: ToolCallC
             <button onClick={() => setExpanded(v => !v)} className="w-full flex items-center gap-2 px-3 py-2 text-left">
                 <span>{icon}</span>
                 <code className="font-mono text-charcoal flex-1">{call.name}</code>
+                {autoConfirmed && (
+                    <span className="inline-flex items-center gap-1 rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700" title="Auto-confirmed โดย Confirm All toggle">
+                        <ShieldCheck className="h-3 w-3" />
+                        auto
+                    </span>
+                )}
                 {!hasResult && <Loader2 className="h-3 w-3 animate-spin text-mute-gray" />}
                 {hasResult && (errorMessage ? <XCircle className="h-3.5 w-3.5 text-red-500" /> : <CheckCircle className="h-3.5 w-3.5 text-emerald-500" />)}
                 <ChevronDown className={`h-3.5 w-3.5 text-mute-gray transition-transform ${expanded ? "rotate-180" : ""}`} />

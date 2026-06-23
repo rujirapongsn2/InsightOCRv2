@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useEffect, useRef, useCallback } from "react"
-import { X, Plus, Trash2, Bot, ChevronDown, AlertTriangle, Loader2, Brain, Library, Sparkles, ListChecks, Check, Circle } from "lucide-react"
+import { X, Plus, Trash2, Bot, ChevronDown, AlertTriangle, Loader2, Brain, Library, Sparkles, ListChecks, Check, Circle, ShieldCheck } from "lucide-react"
 import { getApiBaseUrl } from "@/lib/api"
 import AgentMessage from "./AgentMessage"
 import ToolCallCard from "./ToolCallCard"
@@ -51,6 +51,7 @@ interface AgentEvent {
     success?: boolean
     failed_steps?: string[]
     stopped?: string
+    tool_call_id?: string
 }
 
 interface PendingAction {
@@ -100,6 +101,10 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
     const [doneStatus, setDoneStatus] = useState<{ success: boolean; failedSteps: string[] } | null>(null)
     const [streamText, setStreamText] = useState("")
     const [pendingAction, setPendingAction] = useState<PendingAction | null>(null)
+    const [autoConfirm, setAutoConfirm] = useState(false)
+    const [autoConfirmedIds, setAutoConfirmedIds] = useState<Set<string>>(new Set())
+    const autoConfirmRef = useRef(false)
+    useEffect(() => { autoConfirmRef.current = autoConfirm }, [autoConfirm])
     const [loading, setLoading] = useState(true)
     const [error, setError] = useState<string | null>(null)
     const [showConvList, setShowConvList] = useState(false)
@@ -282,7 +287,20 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
                                 setEvents([...newEvents])
                                 break
                             case "confirmation_required":
-                                setPendingAction(evt as unknown as PendingAction)
+                                if (autoConfirmRef.current && evt.tool_call_id && evt.pending_action_id) {
+                                    const toolCallId = evt.tool_call_id
+                                    const pendingId = evt.pending_action_id
+                                    setAutoConfirmedIds(prev => new Set(prev).add(toolCallId))
+                                    fetch(`${apiBase}/agent/confirm/${pendingId}`, {
+                                        method: "POST", headers: headers(),
+                                        body: JSON.stringify({ approved: true }),
+                                    }).catch(err => {
+                                        console.error("Auto-confirm failed, falling back to manual dialog", err)
+                                        setPendingAction(evt as unknown as PendingAction)
+                                    })
+                                } else {
+                                    setPendingAction(evt as unknown as PendingAction)
+                                }
                                 break
                             case "delta":
                                 finalText += evt.text || ""
@@ -460,6 +478,16 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
                     {streaming && <ThinkingIndicator iteration={thinkingIteration} compact />}
                 </div>
                 <div className="flex items-center gap-1">
+                    <button
+                        onClick={() => setAutoConfirm(v => !v)}
+                        className={`text-xs px-2 py-1 rounded flex items-center gap-1 transition-colors ${
+                            autoConfirm ? "bg-emerald-500/30 text-emerald-200" : "text-white/70 hover:text-white"
+                        }`}
+                        title={autoConfirm ? "Auto-confirm เปิดอยู่ — คลิกเพื่อปิด (scope: session นี้เท่านั้น)" : "เปิด Auto-confirm สำหรับ session นี้"}
+                    >
+                        <ShieldCheck className="h-3.5 w-3.5" />
+                        {autoConfirm ? "Auto: ON" : "Auto"}
+                    </button>
                     <button onClick={toggleMemories} className="text-white/70 hover:text-white p-1 rounded" title="Memories">
                         <Brain className="h-4 w-4" />
                     </button>
@@ -482,7 +510,13 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
                         <Plus className="h-4 w-4" /> New conversation
                     </button>
                     {conversations.map(conv => (
-                        <div key={conv.id} className={`flex items-center gap-2 p-2 rounded cursor-pointer text-sm ${activeConversation === conv.id ? "bg-[#EBF4FB] border border-[#AED6F1]" : "hover:bg-off-white"}`} onClick={() => { setActiveConversation(conv.id); setShowConvList(false) }}>
+                        <div key={conv.id} className={`flex items-center gap-2 p-2 rounded cursor-pointer text-sm ${activeConversation === conv.id ? "bg-[#EBF4FB] border border-[#AED6F1]" : "hover:bg-off-white"}`} onClick={() => {
+                            setActiveConversation(conv.id)
+                            setShowConvList(false)
+                            setAutoConfirm(false)
+                            setAutoConfirmedIds(new Set())
+                            setPendingAction(null)
+                        }}>
                             <span className="flex-1 truncate">{conv.title || "New conversation"}</span>
                             <button onClick={e => { e.stopPropagation(); deleteConversation(conv.id) }} className="text-mute-gray hover:text-red-500"><Trash2 className="h-3.5 w-3.5" /></button>
                         </div>
@@ -545,7 +579,13 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
                 {messages.map(msg => renderPersistedMessage(msg))}
                 {streaming && planSteps.length > 0 && renderPlanCard(planSteps, reflection, true, "live-plan")}
                 {events.filter(e => e.type === "tool_call").map(evt => (
-                    <ToolCallCard key={evt.id} call={evt} result={toolResultsMap[evt.id!]} conversationId={activeConversation || undefined} />
+                    <ToolCallCard
+                        key={evt.id}
+                        call={evt}
+                        result={toolResultsMap[evt.id!]}
+                        conversationId={activeConversation || undefined}
+                        autoConfirmed={evt.id ? autoConfirmedIds.has(evt.id) : false}
+                    />
                 ))}
                 {streaming && !streamText && events.filter(e => e.type === "tool_call").length === 0 && (
                     <ThinkingIndicator iteration={thinkingIteration} />
