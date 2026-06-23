@@ -205,7 +205,7 @@ sys.modules["subprocess"] = _SubprocessShim()
 import subprocess  # now points to shim
 # ─────────────────────────────────────────────────────────────────────────
 
-inputs = {json.dumps(inputs, ensure_ascii=False)}
+inputs = json.loads({json.dumps(json.dumps(inputs, ensure_ascii=False))})
 result = None
 __error__ = None
 __files__ = []

@@ -1,0 +1,77 @@
+{
+  "name": "ทดสอบโหนด - Jobs / Condition / Transform / Python Code",
+  "description": "Workflow ตัวอย่างสำหรับทดสอบ 4 node types: Jobs, Condition, Transform, Python Code. ดึงข้อมูลจาก Invoice_Process job.",
+  "is_active": true,
+  "definition": {
+    "nodes": [
+      {
+        "id": "trigger_1",
+        "type": "trigger_manual",
+        "position": {"x": 50, "y": 250},
+        "data": {"label": "Manual Trigger", "config": {}}
+      },
+      {
+        "id": "jobs_1",
+        "type": "job_source",
+        "position": {"x": 320, "y": 250},
+        "data": {
+          "label": "ดึงเอกสาร Invoice_Process",
+          "config": {
+            "job_id": "b0238985-52d4-4ef0-8144-45d5bf83ece0",
+            "data_source": "reviewed",
+            "only_completed": true,
+            "limit": 10
+          }
+        }
+      },
+      {
+        "id": "condition_1",
+        "type": "condition",
+        "position": {"x": 640, "y": 250},
+        "data": {
+          "label": "มีเอกสารหรือไม่ (count > 0)?",
+          "config": {
+            "left": "{{jobs_1.count}}",
+            "operator": "greater_than",
+            "right": "0"
+          }
+        }
+      },
+      {
+        "id": "transform_1",
+        "type": "transform",
+        "position": {"x": 960, "y": 150},
+        "data": {
+          "label": "สกัด summary fields",
+          "config": {
+            "mappings": [
+              {"target": "job_name",     "value": "{{jobs_1.job_name}}"},
+              {"target": "doc_count",    "value": "{{jobs_1.count}}"},
+              {"target": "first_doc_no", "value": "{{jobs_1.records.0.document_number}}"},
+              {"target": "first_buyer",  "value": "{{jobs_1.records.0.buyer}}"}
+            ]
+          }
+        }
+      },
+      {
+        "id": "python_1",
+        "type": "python_code",
+        "position": {"x": 1280, "y": 150},
+        "data": {
+          "label": "คำนวณสถิติ line items",
+          "config": {
+            "input": "{{jobs_1.records}}",
+            "timeout": 30,
+            "code": "raw = inputs.get(\"value\", inputs.get(\"records\", []))\nrecords = raw if isinstance(raw, list) else []\ntotal_line_items = 0\nfor r in records:\n    if not isinstance(r, dict):\n        continue\n    items = r.get(\"line_items\") or r.get(\"lineItems\") or []\n    total_line_items += len(items) if isinstance(items, list) else 0\nresult = {\n    \"documents\": len(records),\n    \"total_line_items\": total_line_items,\n    \"avg_line_items_per_doc\": round(total_line_items / len(records), 2) if records else 0,\n    \"note\": f\"Computed from {len(records)} invoice documents\"\n}\n"
+          }
+        }
+      }
+    ],
+    "edges": [
+      {"id": "e1", "source": "trigger_1",   "target": "jobs_1"},
+      {"id": "e2", "source": "jobs_1",      "target": "condition_1"},
+      {"id": "e3", "source": "condition_1", "target": "transform_1", "sourceHandle": "true"},
+      {"id": "e4", "source": "transform_1", "target": "python_1"}
+    ]
+  }
+}
