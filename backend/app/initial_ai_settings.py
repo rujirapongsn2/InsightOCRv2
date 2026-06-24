@@ -13,16 +13,16 @@ def init_ai_settings(db: Session) -> None:
     # Check if default setting already exists
     existing = db.query(AISettings).filter(AISettings.name == "softnix_genai").first()
     if existing:
-        existing.display_name = "Softnix GenAI"
-        existing.api_url = provider_url
-        existing.api_key = provider_key
-        existing.is_active = True
-        existing.is_default = True
+        # Only overwrite fields that are explicitly configured via env vars.
+        # If env vars are not set, preserve whatever the admin saved through the UI.
+        if settings.AI_PROVIDER_URL:
+            existing.api_url = provider_url
+        if settings.AI_PROVIDER_KEY:
+            existing.api_key = provider_key
         existing.description = existing.description or "Default Softnix GenAI provider for field suggestions"
 
-        db.query(AISettings).filter(AISettings.name != "softnix_genai").update({"is_default": False})
         db.commit()
-        print("Synced default AI setting: Softnix GenAI")
+        print("Checked default AI setting: Softnix GenAI (env-only fields synced)")
         return
 
     # Create default Softnix GenAI setting

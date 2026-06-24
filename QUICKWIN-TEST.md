@@ -640,3 +640,95 @@ Date: 2026-06-13
    - Generate Webhook URL in the Webhook Trigger config panel.
    - `curl -X POST <webhook_url> -H 'Content-Type: application/json' -d '{"events":[{"message":{"text":"hello LINE"}}]}'`
    - Poll the returned `poll_url` until `status=succeeded`; confirm `result.body` contains the configured response.
+
+---
+
+Date: 2026-06-15
+
+## Manual Verification - Agent Python Sandbox Image and Office File Support
+
+1. Scope
+   - Added a dedicated `insightocr-sandbox:py312` image for Agent/Workflow Python sandbox runs.
+   - Preinstalled document/data packages: fpdf2, reportlab, requests, openpyxl, xlsxwriter, pandas, python-docx, pypdf, pillow, xlrd, plus Thai-capable fonts.
+   - Sandbox runner now forwards proxy/PIP env, auto-detects the backend Docker network, uses `/tmp` as the writable working directory, and can auto-build the sandbox image from `backend/Dockerfile.sandbox`.
+   - Agent guidance now treats Excel/CSV/PDF generation as first-class supported sandbox tasks without runtime pip installs for common packages.
+
+2. Verification performed
+   - `PYTHONPYCACHEPREFIX=/private/tmp/insightocr-pycache python3 -m py_compile backend/app/services/code_sandbox.py backend/app/agent/tools/code_tools.py backend/app/agent/context.py` passed.
+   - `docker build -f backend/Dockerfile.sandbox -t insightocr-sandbox:py312 backend` passed.
+   - `docker run --rm -v ... insightocrv2-backend pytest test/agent/test_code_sandbox_config.py test/agent/test_code_tools.py -q` passed: 18 tests.
+   - Live sandbox smoke via `execute_python(..., allow_network=False)` created `.xlsx`, `.csv`, and Thai PDF successfully with the prebuilt `insightocr-sandbox:py312` image.
+
+3. Manual smoke to run after rebuild
+   - `docker compose build backend`
+   - Start/restart backend and verify startup builds or finds `insightocr-sandbox:py312`.
+   - Ask Agent DOC to create:
+     - a Thai PDF from chat content,
+     - an `.xlsx` workbook with at least one styled sheet,
+     - a UTF-8 `.csv` file.
+   - Confirm each tool result returns `ok=true` or a `_save_file()` result, and that the generated file downloads correctly.
+
+---
+
+Date: 2026-06-15
+
+## Manual Verification - Agent File Result Anti-Hallucination Guard
+
+1. Scope
+   - `write_file` now rejects invalid binary payloads before saving Office/PDF/image files.
+   - Agent loop now performs post-write verification for `write_file`, `create_docx`, and `run_report_code` before treating a file result as successful.
+   - A file-creation final answer is allowed only after the saved object exists in job storage, has a non-zero verified size, and binary formats pass structural validation.
+   - `read_file(return_base64=true)` remains the supported path for editing existing binary outputs; old `/tmp/...` files from prior sandbox runs must not be reused.
+
+2. Verification performed
+   - `PYTHONPYCACHEPREFIX=/private/tmp/insightocr-pycache python3 -m py_compile backend/app/agent/loop.py backend/app/agent/tools/filesystem_tools.py backend/test/agent/test_agent_file_verification.py backend/test/agent/test_filesystem_tools.py` passed.
+   - `docker run --rm -v ... insightocrv2-backend pytest test/agent/test_agent_file_verification.py test/agent/test_filesystem_tools.py -q` passed: 32 tests.
+   - `docker run --rm -v ... insightocrv2-backend pytest test/e2e/test_agent_loop_e2e.py -q` passed: 7 tests.
+
+3. Manual smoke to run after rebuild
+   - Ask Agent DOC to create a new `.xlsx` file and confirm the `write_file` tool result includes `verified=true`.
+   - Try a follow-up edit to the generated workbook; confirm the agent reads the saved file with `read_file(return_base64=true)` rather than using an old `/tmp` path.
+   - Download the workbook and open it in Excel/Numbers.
+
+4. Follow-up fix for execute_python-only file generation
+   - Root cause: some agent-generated code saved `/tmp/<file>` and returned `result={"path": "/tmp/<file>"}` without calling `_save_file()` or `write_file`, so no file reached job storage.
+   - Sandbox now auto-captures existing `/tmp` file paths returned via `result.path`, `result.file_path`, or `result.output_path`.
+   - `execute_python` handler now auto-persists captured files under `outputs/`, verifies them, and returns `ok=true`, `verified=true`, `path`, and `saved_files`.
+   - Verification: live smoke created Thai PDF with only `result={'path':'/tmp/auto_capture.pdf'}` and returned `outputs/auto_capture.pdf`, `verified=true`.
+   - Tests: `pytest test/agent/test_code_tools.py test/agent/test_agent_file_verification.py test/agent/test_filesystem_tools.py -q` passed: 48 tests; `pytest test/e2e/test_agent_loop_e2e.py -q` passed: 7 tests.
+
+5. Follow-up fix for "ช่วยแปลงเป็น excel" from an existing DOCX output
+   - Root cause: the agent tried to read DOCX base64 and generate ad-hoc Python, causing `KeyError: 'docx_base64'` and repeated Python `NameError: name 'true' is not defined`; after a later successful file write, stale tool-failure context could still make the final answer report failure.
+   - Added deterministic `convert_to_xlsx` filesystem tool for saved DOCX/PDF/CSV/text/report to Excel conversion, plus a direct conversion route for short prompts like `ช่วยแปลงเป็น excel` that uses the latest convertible output in the same conversation.
+   - Agent file success tracking now keeps the latest verified file result and overrides stale failure text only when a later file-producing tool returned `ok=true` and `verified=true`.
+   - UI now treats `convert_to_xlsx` as a filesystem write tool and shows the download button.
+   - Verification after rebuild/restart:
+     - `docker exec softnix_ocr_backend python -m pytest /app/test/agent/test_filesystem_tools.py /app/test/agent/test_agent_file_verification.py /app/test/agent/test_code_tools.py -q` passed: 52 tests.
+     - `docker exec softnix_ocr_backend python -m pytest /app/test/e2e/test_agent_loop_e2e.py -q` passed: 7 tests.
+     - `docker compose build frontend` passed, including Next.js production build + TypeScript.
+     - API prompt test against the original conversation with `content="ช่วยแปลงเป็น excel"` returned one tool call: `convert_to_xlsx`, `ok=true`, `verified=true`, `path=outputs/contract_risk_comparison_summary.xlsx`, `size=4458`, `rows=34`.
+     - Stored workbook verification passed and ZIP/OpenXML entries were present: `[Content_Types].xml`, `_rels/.rels`, `xl/_rels/workbook.xml.rels`, `xl/workbook.xml`, `xl/worksheets/sheet1.xml`; `zip.testzip()` returned `None`.
+
+6. Follow-up fix for table/report prompts with stale file history
+   - Root cause: text `write_file` returned a scoped storage path (`jobs/<job_id>/outputs/...`) while post-write verification expected a job-relative path (`outputs/...`), causing false `not found after write` even though `list_files/read_file` could see the file.
+   - Added filesystem path normalization so tools accept either `outputs/...` or `jobs/<current_job_id>/outputs/...`, reject cross-job scoped paths, and return job-relative paths consistently.
+   - Added guardrails for stale file claims in conversation history:
+     - prior assistant file/download claims are omitted from LLM history unless current-turn tools verify a file;
+     - source document names such as `Contract_V1.pdf` are no longer misclassified as generated-output claims;
+     - unverified output/download claims are rewritten or sanitized before final response.
+   - Verification after rebuild/restart:
+     - `docker exec softnix_ocr_backend python -m pytest /app/test/agent/test_filesystem_tools.py /app/test/agent/test_agent_file_verification.py /app/test/agent/test_code_tools.py /app/test/e2e/test_agent_loop_e2e.py -q` passed: 65 tests.
+     - API prompt test against the original failing conversation with `content="เปรียบเทียบสัญญามิติความเสี่ยงในรูปแบบตาราง"` completed with `done`, no `write_file` verification error, no stale `outputs/...` success claim, and returned the risk comparison table inline in chat.
+
+7. Follow-up fix for PDF creation disconnects
+   - Root cause: short PDF prompts such as `ช่วยสร้างเป้น pdf` let the agent call raw `execute_python`; the sandbox run could finish with `error=null` but `files=[]` and `result=null`, so no verified artifact existed and the UI eventually showed a connection-lost banner instead of a deterministic completion.
+   - Added deterministic `create_pdf` tool for converting saved text-like outputs or current text content to PDF under `outputs/`.
+   - Added a direct PDF route for short follow-up prompts so the agent uses the latest saved text/Markdown/CSV/HTML output instead of ad-hoc Python.
+   - Hardened PDF generation for Thai text, Markdown tables, long unbroken text, and unsupported emoji by pre-wrapping text by rendered width and normalizing symbols before writing.
+   - Sanitized persisted sandbox file results so SSE tool results return file metadata only, not large base64 payloads.
+   - UI now treats `create_pdf` as a downloadable filesystem write tool.
+   - Verification after rebuild/restart:
+     - `docker exec softnix_ocr_backend python -m pytest /app/test/agent/test_code_tools.py /app/test/agent/test_filesystem_tools.py /app/test/agent/test_agent_file_verification.py /app/test/e2e/test_agent_loop_e2e.py -q` passed: 66 tests.
+     - API prompt test against the original failing conversation with `content="ช่วยสร้างเป้น pdf"` returned one tool call: `create_pdf`, `ok=true`, `verified=true`, `path=outputs/risk_comparison_table.pdf`, `size=16639`, `mime_type=application/pdf`, followed by `done`.
+     - Stored PDF verification passed with `verify_saved_file(...)=ok`; `pypdf.PdfReader` opened the generated file and reported 3 pages.
+     - `docker compose build frontend` passed, including Next.js production build + TypeScript, then frontend was restarted.
