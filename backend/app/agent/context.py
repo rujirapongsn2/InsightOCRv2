@@ -12,6 +12,18 @@ from app.crud.crud_agent_skill import agent_skill as crud_skill
 TOOL_RESULT_MAX_CHARS = 12000
 
 
+def _looks_like_prior_file_claim(content: str | None) -> bool:
+    lowered = (content or "").lower()
+    if not lowered:
+        return False
+    has_file_ref = "outputs/" in lowered or any(ext in lowered for ext in [".csv", ".docx", ".md", ".pdf", ".pptx", ".xlsx"])
+    has_claim = any(token in lowered for token in [
+        "ไฟล์", "ดาวน์โหลด", "สร้างเสร็จ", "บันทึก", "ตรวจสอบไฟล์", "มีอยู่แล้ว",
+        "created", "generated", "saved", "download", "verified",
+    ])
+    return has_file_ref and has_claim
+
+
 def tool_content_for_llm(result) -> str:
     """Serialize a tool result for the LLM, truncating oversized payloads."""
     content = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False, default=str)
@@ -110,6 +122,12 @@ class AgentContext:
             if m.role == "user":
                 history.append({"role": "user", "content": m.content})
             elif m.role == "assistant":
+                if _looks_like_prior_file_claim(m.content) and not m.tool_calls:
+                    history.append({
+                        "role": "assistant",
+                        "content": "[Previous assistant file/download claim omitted. File creation must be verified by a current-turn tool result.]",
+                    })
+                    continue
                 entry = {"role": "assistant", "content": m.content}
                 if m.tool_calls:
                     entry["tool_calls"] = m.tool_calls
@@ -188,7 +206,25 @@ Help users understand, validate, correct, enrich, approve, route, and export doc
 ## Tool Guidance
 - Document tools are the source of truth for uploaded documents. Never invent document values.
 - Use `create_docx` when the user asks for a Word/.docx quotation, report, letter, or draft. Only say the file was created after `create_docx` or `write_file` returns `ok=true` with a path.
-- Use `run_report_code` for AI-generated HTML reports because it performs syntax checks, sandbox execution, result validation, and safe file writing. Use raw `execute_python` only for calculations, table normalization, CSV/Excel generation, validation scripts, or non-report transformations. If a Python package is missing, retry with `_pip_install(...)` or switch to a more specific tool such as `create_docx`.
+- Use `run_report_code` for AI-generated HTML reports because it performs syntax checks, sandbox execution, result validation, and safe file writing. Use raw `execute_python` only for calculations, table normalization, CSV/Excel generation, PDF creation, validation scripts, or non-report transformations.
+- Use `create_pdf` when the user asks to create/convert the latest answer, report, Markdown table, or saved text-like output to PDF. Prefer this deterministic PDF tool over raw `execute_python`.
+- Use `convert_to_xlsx` when the user asks to convert an existing saved output/report/Word/PDF/CSV/text file to Excel. Prefer this deterministic conversion tool over `read_file` + `execute_python`.
+- The sandbox image preinstalls common document/data packages: `fpdf2`, `reportlab`, `requests`, `openpyxl`, `xlsxwriter`, `pandas`, `python-docx`, `pypdf`, `pillow`, and `xlrd`. CSV uses Python's built-in `csv` module. If a package is missing, call `_pip_install('pkg1 pkg2')`; NEVER call subprocess or os.system pip directly (the sandbox filesystem is read-only; only /tmp is writable).
+- For Excel output: use `openpyxl` or `xlsxwriter`, save to `/tmp/<name>.xlsx`, then call `_save_file('/tmp/<name>.xlsx')` and pass the returned base64 to `write_file`.
+- For editing an existing Excel/PDF/DOCX output: first call `read_file(path='outputs/name.xlsx', return_base64=true)`, pass that base64 into `execute_python`, decode it to `/tmp/input.xlsx` or `BytesIO`, modify it, save a new `/tmp/output.xlsx`, then call `_save_file('/tmp/output.xlsx')` and `write_file`. Never read an old `/tmp/...` path from a previous tool call; every execute_python run is a fresh ephemeral container.
+- For CSV output: use Python's built-in `csv` module, encode as UTF-8, save to `/tmp/<name>.csv`, then call `_save_file('/tmp/<name>.csv')` or write text directly with `write_file`.
+- For custom PDF output with Thai text only when `create_pdf` is insufficient: use `execute_python`, `fpdf2`, and `_thai_font_path()` to load a Thai-capable font already present in the sandbox. Template:
+```python
+from fpdf import FPDF
+font_path = _thai_font_path()
+pdf = FPDF(); pdf.add_page()
+pdf.add_font('Thai', '', font_path)
+pdf.set_font('Thai', size=14)
+pdf.cell(0, 10, 'ข้อความภาษาไทย')
+pdf.output('/tmp/output.pdf')
+result = _save_file('/tmp/output.pdf')
+```
+- For PDF output: do NOT attempt to convert an existing docx to pdf (no conversion tool is available in the sandbox).
 - Use filesystem tools to read/write reports and generated artifacts under the Job scope. If any tool returns `error`, report or fix that error before claiming success.
 - Use memory tools for durable user/job preferences only when helpful. Memories are hints, not source of truth.
 - Use skill tools when a reusable procedure is relevant; load full procedures with `execute_skill`.

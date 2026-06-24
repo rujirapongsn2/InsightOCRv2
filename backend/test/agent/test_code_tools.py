@@ -4,12 +4,13 @@ Unit tests for execute_python tool handler.
 Run: cd backend && python -m pytest test/agent/test_code_tools.py -v
 """
 import uuid
+import base64
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from app.agent.context import AgentContext
-from app.agent.tools.code_tools import _execute_python_handler, _run_report_code_handler, _normalize_report_path
+from app.agent.tools.code_tools import _create_pdf_handler, _execute_python_handler, _run_report_code_handler, _normalize_report_path
 
 pytestmark = pytest.mark.asyncio
 
@@ -85,6 +86,77 @@ class TestExecutePython:
             mock_exec.return_value = {"error": "Sandbox unavailable: docker package not installed"}
             result = await _execute_python_handler({"code": "pass"}, ctx)
         assert "error" in result
+
+    async def test_execute_auto_persists_generated_file(self):
+        ctx = _make_context()
+        pdf = b"%PDF-1.4\n% test\n"
+        with patch("app.agent.tools.code_tools.execute_python") as mock_exec, \
+             patch("app.agent.tools.code_tools.get_storage_service") as mock_storage, \
+             patch("app.agent.tools.filesystem_tools.get_storage_service") as mock_verify_storage:
+            mock_exec.return_value = {
+                "result": {"path": "/tmp/test.pdf"},
+                "error": None,
+                "files": [{
+                    "filename": "test.pdf",
+                    "path": "/tmp/test.pdf",
+                    "mime_type": "application/pdf",
+                    "base64": base64.b64encode(pdf).decode("ascii"),
+                    "size": len(pdf),
+                    "auto_captured": True,
+                }],
+            }
+            svc = mock_storage.return_value
+            mock_verify_storage.return_value = svc
+            svc.exists.return_value = True
+            svc.get_local_path.return_value.__enter__.return_value = "/tmp/test.pdf"
+            with patch("pathlib.Path.stat") as mock_stat, \
+                 patch("pathlib.Path.read_bytes", return_value=pdf):
+                mock_stat.return_value.st_size = len(pdf)
+                result = await _execute_python_handler({"code": "result = {'path': '/tmp/test.pdf'}"}, ctx)
+
+        assert result["ok"] is True
+        assert result["path"] == "outputs/test.pdf"
+        assert result["verified"] is True
+        assert result["saved_files"][0]["auto_captured"] is True
+        svc.upload_file.assert_called_once()
+
+
+class TestCreatePdf:
+    async def test_create_pdf_persists_verified_file(self):
+        ctx = _make_context()
+        pdf = b"%PDF-1.4\n% test pdf\n"
+        with patch("app.agent.tools.code_tools.execute_python") as mock_exec, \
+             patch("app.agent.tools.code_tools.get_storage_service") as mock_storage, \
+             patch("app.agent.tools.filesystem_tools.get_storage_service") as mock_verify_storage:
+            mock_exec.return_value = {
+                "result": {"path": "/tmp/risk_report.pdf"},
+                "error": None,
+                "files": [{
+                    "filename": "risk_report.pdf",
+                    "path": "/tmp/risk_report.pdf",
+                    "mime_type": "application/pdf",
+                    "base64": base64.b64encode(pdf).decode("ascii"),
+                    "size": len(pdf),
+                }],
+            }
+            svc = mock_storage.return_value
+            mock_verify_storage.return_value = svc
+            svc.exists.return_value = True
+            svc.get_local_path.return_value.__enter__.return_value = "/tmp/risk_report.pdf"
+            with patch("pathlib.Path.stat") as mock_stat, \
+                 patch("pathlib.Path.read_bytes", return_value=pdf):
+                mock_stat.return_value.st_size = len(pdf)
+                result = await _create_pdf_handler(
+                    {"content": "ตารางความเสี่ยง", "output_path": "outputs/risk_report.pdf"},
+                    ctx,
+                )
+
+        assert result["ok"] is True
+        assert result["path"] == "outputs/risk_report.pdf"
+        assert result["verified"] is True
+        assert result["mime_type"] == "application/pdf"
+        mock_exec.assert_called_once()
+        assert mock_exec.call_args.kwargs["allow_network"] is False
 
 
 class TestRunReportCode:
