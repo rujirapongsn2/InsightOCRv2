@@ -107,46 +107,44 @@ A modern document processing system with OCR (Optical Character Recognition) and
 
 ### Installation (Docker, recommended)
 
-1) Clone the repository:
+**TL;DR — 3 commands:**
 ```bash
 git clone https://github.com/rujirapongsn2/InsightDOCv2.git
 cd InsightDOCv2
+./scripts/setup.sh
 ```
 
-2) Create environment files (root + backend + frontend):
+The `setup.sh` script handles everything: prerequisites check, secret generation, env file creation, OCR endpoint prompt, image build, service start, and health checks. Open `http://localhost` when it finishes — login is `admin@softnix.ai`.
+
+📖 **See [`INSTALL.md`](./INSTALL.md)** for:
+- Detailed prerequisites (Docker version, RAM, disk)
+- OS-specific notes (Linux docker group, macOS Docker Desktop)
+- What each setup phase does
+- Troubleshooting (port conflicts, sandbox build fail, OCR missing)
+- Production hardening checklist (TLS, backups, monitoring)
+
+---
+
+### Manual install (alternative)
+
+If you prefer not to use `setup.sh`:
+
 ```bash
-# Root (docker compose)
-cp .env.example .env
+# 1. Create env files from templates
+cp .env.example .env                          # root — Docker compose vars
+cp backend/.env.example backend/.env          # backend — OCR endpoint, storage
+# Edit both files: replace CHANGE_ME_* with real secrets, fill OCR_ENDPOINT
 
-# Backend
-cp backend/.env.dev.example backend/.env   # หรือใช้ .env.prod.example ถ้า deploy
+# 2. Start services
+docker compose up -d --build
 
-# Frontend
-cp frontend/.env.development.example frontend/.env.local
-```
-- แก้ค่าใน `.env`, `backend/.env`, `frontend/.env.local` ให้ครบถ้วน (ดู `ENV_SETUP.md` และไฟล์ *.example เป็นแนวทาง)
-- คีย์สำคัญ: `SECRET_KEY`, `DATABASE_URL`, `BACKEND_CORS_ORIGINS`, `NEXT_PUBLIC_API_URL`, OCR endpoints/keys
-
-3) Start services (เลือกวิธีใดวิธีหนึ่ง):
-```bash
-docker compose up -d        # หรือ
-./scripts/services.sh up    # helper script
+# 3. Verify (optional)
+docker compose ps
+curl http://localhost/health
 ```
 
-4) Setup gateway/nginx (จำเป็นหลังขึ้น container แล้ว):
-```bash
-./scripts/setup/setup-nginx.sh
-```
-
-5) ตรวจสอบ services และ network isolation:
-- จะมีอย่างน้อย 8 services (backend, frontend, nginx, gateway, db, redis, minio, celery_worker)  
-  ตรวจสอบด้วย: `docker ps`
-- ยืนยัน isolation (ตัวอย่าง):  
-  `docker compose exec redis ping -c1 8.8.8.8` ➜ ควร `Network unreachable`  
-  `docker compose exec backend curl -k https://<external-api>/me` ➜ ควรเข้าถึงได้ผ่าน gateway proxy
-
-6) Access the application:
-- Frontend: http://localhost:3000
+Then access the application:
+- Frontend: http://localhost:3000 (or http://localhost via nginx)
 - Backend API: http://localhost:8000
 - API Docs: http://localhost:8000/docs
 
@@ -392,13 +390,12 @@ To configure AI Field Suggestion:
 ### Quick Start
 Use the provided `.env.example` templates to get started:
 
-**Development:**
-- `backend/.env.dev.example` → `backend/.env`
-- `frontend/.env.development.example` → `frontend/.env.local`
+- `.env.example` → `.env` (root — Docker compose vars)
+- `backend/.env.example` → `backend/.env` (backend app config)
+- `frontend/.env.development.example` → `frontend/.env.local` (frontend dev)
+- `frontend/.env.production.example` → `frontend/.env.local` (frontend prod)
 
-**Production:**
-- `backend/.env.prod.example` → `backend/.env`
-- `frontend/.env.production.example` → `frontend/.env.local`
+Or just run `./scripts/setup.sh` — it handles all of this automatically.
 
 ### Backend Variables
 
