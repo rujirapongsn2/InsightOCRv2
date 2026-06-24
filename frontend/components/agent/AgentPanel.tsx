@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useEffect, useRef, useCallback } from "react"
-import { X, Plus, Trash2, Bot, ChevronDown, AlertTriangle, Loader2, Brain, Library, Sparkles, ListChecks, Check, Circle, ShieldCheck } from "lucide-react"
+import { X, Plus, Trash2, Bot, ChevronDown, AlertTriangle, Loader2, Brain, Library, Sparkles, ListChecks, Check, Circle, ShieldCheck, ShieldAlert, FileText, GitCompare, CheckCircle2 } from "lucide-react"
 import { getApiBaseUrl } from "@/lib/api"
 import AgentMessage from "./AgentMessage"
 import ToolCallCard from "./ToolCallCard"
@@ -479,14 +479,40 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
                 </div>
                 <div className="flex items-center gap-1">
                     <button
-                        onClick={() => setAutoConfirm(v => !v)}
-                        className={`text-xs px-2 py-1 rounded flex items-center gap-1 transition-colors ${
-                            autoConfirm ? "bg-emerald-500/30 text-emerald-200" : "text-white/70 hover:text-white"
-                        }`}
-                        title={autoConfirm ? "Auto-confirm เปิดอยู่ — คลิกเพื่อปิด (scope: session นี้เท่านั้น)" : "เปิด Auto-confirm สำหรับ session นี้"}
+                        onClick={createConversation}
+                        className="text-xs px-2 py-1 rounded flex items-center gap-1 bg-white/15 hover:bg-white/25 text-white transition-colors"
+                        title="เริ่ม conversation ใหม่"
                     >
-                        <ShieldCheck className="h-3.5 w-3.5" />
-                        {autoConfirm ? "Auto: ON" : "Auto"}
+                        <Plus className="h-3.5 w-3.5" />
+                        <span className="hidden sm:inline">ใหม่</span>
+                    </button>
+                    <div className="w-px h-4 bg-white/20 mx-0.5" />
+                    <button
+                        onClick={() => {
+                            if (autoConfirm) {
+                                setAutoConfirm(false)
+                                return
+                            }
+                            const ok = window.confirm(
+                                "เปิด 'ยืนยันอัตโนมัติ' แล้ว Agent จะอนุมัติการกระทำที่รุนแรงทั้งหมด\n" +
+                                "(ลบไฟล์, อนุมัติเอกสาร, แก้ไข field, ส่ง API) โดยอัตโนมัติ\n" +
+                                "ใน session นี้โดยไม่ถามซ้ำอีก\n\n" +
+                                "คุณแน่ใจหรือไม่?"
+                            )
+                            if (ok) setAutoConfirm(true)
+                        }}
+                        className={`text-xs px-2 py-1 rounded flex items-center gap-1 transition-colors ${
+                            autoConfirm
+                                ? "bg-amber-500/30 text-amber-200 ring-1 ring-amber-400/50"
+                                : "text-white/70 hover:text-white"
+                        }`}
+                        title={autoConfirm
+                            ? "⚠️ ยืนยันอัตโนมัติเปิดอยู่ — Agent จะอนุมัติการกระทำที่รุนแรงทั้งหมดโดยไม่ถาม คลิกเพื่อปิด"
+                            : "เปิดยืนยันอัตโนมัติ — Agent จะอนุมัติทุก destructive action ใน session นี้โดยไม่ถามซ้ำ"
+                        }
+                    >
+                        {autoConfirm ? <ShieldAlert className="h-3.5 w-3.5" /> : <ShieldCheck className="h-3.5 w-3.5" />}
+                        {autoConfirm ? "ยืนยันอัตโนมัติ: เปิด" : "ยืนยันอัตโนมัติ"}
                     </button>
                     <button onClick={toggleMemories} className="text-white/70 hover:text-white p-1 rounded" title="Memories">
                         <Brain className="h-4 w-4" />
@@ -494,7 +520,7 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
                     <button onClick={() => setShowSkillLibrary(v => !v)} className="text-white/70 hover:text-white p-1 rounded" title="Skill Library">
                         <Library className="h-4 w-4" />
                     </button>
-                    <button onClick={() => setShowConvList(v => !v)} className="text-white/70 hover:text-white p-1 rounded" title="Conversations">
+                    <button onClick={() => setShowConvList(v => !v)} className="text-white/70 hover:text-white p-1 rounded" title="รายการสนทนา">
                         <ChevronDown className={`h-4 w-4 transition-transform ${showConvList ? "rotate-180" : ""}`} />
                     </button>
                     {!isInline && (
@@ -574,6 +600,47 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
                         <button onClick={createConversation} className="mt-4 px-4 py-2 bg-softnix-blue text-white text-sm rounded-lg hover:bg-softnix-deep">
                             <Plus className="h-4 w-4 inline mr-1" />New Conversation
                         </button>
+                    </div>
+                )}
+                {messages.length === 0 && !streaming && (
+                    <div className="flex-1 min-h-[50vh] flex flex-col items-center justify-center px-4 text-center">
+                        <div className="h-12 w-12 rounded-full bg-gradient-to-br from-softnix-blue to-softnix-deep flex items-center justify-center mb-3">
+                            <Bot className="h-6 w-6 text-white" />
+                        </div>
+                        <h3 className="text-sm font-semibold text-charcoal mb-1">สวัสดีครับ ผมพร้อมช่วยคุณ</h3>
+                        <p className="text-xs text-mute-gray mb-4">เลือกคำสั่งด้านล่าง หรือพิมพ์คำถามของคุณได้เลย</p>
+                        <div className="w-full max-w-md space-y-2">
+                            <button
+                                onClick={() => { setInputValue("ช่วยสรุปเอกสาร"); document.getElementById("agent-input")?.focus() }}
+                                className="w-full flex items-center gap-3 rounded-lg border border-hairline bg-white px-3 py-2.5 text-left text-xs hover:border-softnix-blue hover:bg-blue-50/30 transition-colors"
+                            >
+                                <FileText className="h-4 w-4 text-softnix-blue flex-shrink-0" />
+                                <div>
+                                    <div className="font-medium text-charcoal">ช่วยสรุปเอกสาร</div>
+                                    <div className="text-mute-gray text-[11px]">สรุปเนื้อหาและจุดสำคัญของเอกสาร</div>
+                                </div>
+                            </button>
+                            <button
+                                onClick={() => { setInputValue("ช่วยเปรียบเทียบ"); document.getElementById("agent-input")?.focus() }}
+                                className="w-full flex items-center gap-3 rounded-lg border border-hairline bg-white px-3 py-2.5 text-left text-xs hover:border-softnix-blue hover:bg-blue-50/30 transition-colors"
+                            >
+                                <GitCompare className="h-4 w-4 text-softnix-blue flex-shrink-0" />
+                                <div>
+                                    <div className="font-medium text-charcoal">ช่วยเปรียบเทียบ</div>
+                                    <div className="text-mute-gray text-[11px]">เปรียบเทียบข้อมูลระหว่างเอกสารใน job</div>
+                                </div>
+                            </button>
+                            <button
+                                onClick={() => { setInputValue("ช่วยตรวจสอบความถูกต้องตามเงื่อนไข"); document.getElementById("agent-input")?.focus() }}
+                                className="w-full flex items-center gap-3 rounded-lg border border-hairline bg-white px-3 py-2.5 text-left text-xs hover:border-softnix-blue hover:bg-blue-50/30 transition-colors"
+                            >
+                                <CheckCircle2 className="h-4 w-4 text-softnix-blue flex-shrink-0" />
+                                <div>
+                                    <div className="font-medium text-charcoal">ช่วยตรวจสอบความถูกต้องตามเงื่อนไข</div>
+                                    <div className="text-mute-gray text-[11px]">ตรวจสอบข้อมูลเอกสารว่าถูกต้องตามเงื่อนไขที่กำหนด</div>
+                                </div>
+                            </button>
+                        </div>
                     </div>
                 )}
                 {messages.map(msg => renderPersistedMessage(msg))}
