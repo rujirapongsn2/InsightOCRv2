@@ -145,7 +145,9 @@ elif [[ "$RAM_GB" -ge 8 ]]; then
 fi
 
 # Disk space (block if < 10 GB)
-DISK_AVAIL_GB=$(df -Pg "$PROJECT_ROOT" 2>/dev/null | awk 'NR==2 {print $4}' || echo 0)
+# Use POSIX output in KiB and convert ourselves. GNU df does not support
+# BSD/macOS-style `-g`, so `df -Pg` reports 0 on many Linux hosts.
+DISK_AVAIL_GB=$(df -P -k "$PROJECT_ROOT" 2>/dev/null | awk 'NR==2 {printf "%d", $4/1024/1024}' || echo 0)
 if [[ "$DISK_AVAIL_GB" -lt 10 ]]; then
     die "Free disk ${DISK_AVAIL_GB} GB < 10 GB minimum. Clear space and re-run."
 fi
