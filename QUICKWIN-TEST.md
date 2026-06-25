@@ -1,5 +1,20 @@
 # QUICKWIN TEST
 
+Date: 2026-06-25
+
+## Manual Verification - Agent Job Access Permission
+
+1. Backend permission fix
+   - Updated Agent job access to reuse the shared `ensure_job_access` helper from `app.api.permissions`.
+   - Confirmed admins/superusers now follow the same Job access rules in Agent DOC as `/api/v1/jobs/{job_id}`.
+   - Confirmed missing jobs still return `404 Job not found`.
+
+2. Static checks
+   - Ran `env PYTHONPYCACHEPREFIX=/private/tmp/insightocr-pycache python3 -m py_compile backend/app/api/v1/endpoints/agent.py`.
+   - Ran `git diff --check`.
+
+---
+
 Date: 2026-03-30
 
 ## Manual Verification

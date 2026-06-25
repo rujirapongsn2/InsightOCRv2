@@ -7,6 +7,7 @@ import os
 from urllib.parse import quote
 
 from app.api import deps
+from app.api.permissions import ensure_job_access
 from app.agent.loop import AgentLoop
 from app.crud.crud_agent_conversation import agent_conversation as crud_conv
 from app.crud.crud_agent_memory import agent_memory as crud_memory
@@ -39,9 +40,7 @@ def _ensure_job_access(db: Session, job_id: UUID, current_user):
     job = db.query(Job).filter(Job.id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    if job.user_id and job.user_id != current_user.id:
-        raise HTTPException(status_code=404, detail="Job not found")
-    return job
+    return ensure_job_access(current_user, job)
 
 
 def _ensure_llm_integration(db: Session, integration_id: UUID):
