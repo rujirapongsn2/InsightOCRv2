@@ -31,6 +31,7 @@ from app.models.workflow import WorkflowRun, WorkflowNodeRun
 from app.models.document import Document
 from app.models.job import Job
 from app.models.integration import Integration, IntegrationType, IntegrationStatus
+from app.models.ai_settings import AISettings
 
 logger = logging.getLogger(__name__)
 
@@ -120,10 +121,8 @@ NODE_TYPES: List[Dict[str, Any]] = [
         "label": "LLM / Agent",
         "description": "ส่งข้อมูลให้ LLM วิเคราะห์ สรุป แปลง หรือตรวจสอบตาม prompt",
         "config_fields": [
-            {"name": "integration_id", "label": "LLM Integration", "type": "text", "required": False,
-             "hint": "เว้นว่าง = ใช้ค่า default ของระบบ หรือใส่ id จากเมนู Integration"},
-            {"name": "model", "label": "Model", "type": "text", "default": "gpt-4o-mini",
-             "placeholder": "gpt-4o-mini"},
+            {"name": "ai_provider_id", "label": "AI Agent Provider", "type": "ai_provider_select", "required": False,
+             "hint": "เลือก provider จาก Setting AI; เว้นว่าง = ใช้ Agent Provider ที่ตั้งไว้กลางระบบ"},
             {"name": "system_prompt", "label": "System prompt", "type": "textarea", "required": False,
              "placeholder": "คุณเป็นผู้ช่วยสรุปข้อมูลเอกสาร ตอบเป็นภาษาไทย กระชับ",
              "hint": "กำหนดบทบาท/สไตล์การตอบของ AI"},
@@ -496,81 +495,250 @@ def _exec_job_source(db: Session, config: dict, context: dict, log: Callable[[st
     }
 
 
-def resolve_llm_client(
+def _normalize_openai_base_url(base_url: Optional[str]) -> Optional[str]:
+    if not base_url:
+        return None
+    normalized = base_url.strip().rstrip("/")
+    if normalized.lower().endswith("/chat/completions"):
+        normalized = normalized[: -len("/chat/completions")]
+    return normalized
+
+
+def _ai_setting_provider(setting: AISettings, model: Optional[str], source: str) -> Dict[str, Any]:
+    provider_type = getattr(setting, "provider_type", None) or "completion_messages"
+    resolved_model = (model or "").strip() or getattr(setting, "model", None) or "gpt-4o-mini"
+    if provider_type == "openai_compatible":
+        return {
+            "provider": "openai_compatible",
+            "apiKey": setting.api_key,
+            "baseUrl": setting.api_url,
+            "model": resolved_model,
+            "source": source,
+            "name": setting.display_name or setting.name,
+        }
+    return {
+        "provider": "completion_messages",
+        "apiUrl": setting.api_url,
+        "apiKey": setting.api_key,
+        "model": resolved_model,
+        "source": source,
+        "name": setting.display_name or setting.name,
+    }
+
+
+def resolve_llm_provider(
     db: Session,
     integration_id: Optional[str] = None,
     model: Optional[str] = None,
     log: Optional[Callable[[str], None]] = None,
-):
-    """Build an OpenAI client + resolved model from a workflow Integration
-    (falling back to system defaults). Shared by the LLM node and the
-    AI variable-finder endpoint. Returns (client, model)."""
-    from openai import OpenAI
+    ai_provider_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Resolve the provider for Workflow LLM nodes.
+
+    Priority:
+    1. Explicit AI Settings provider selected on the node
+    2. Legacy explicit LLM Integration ID on the node
+    3. Setting AI > Agent Provider
+    4. System AGENT_PROVIDER_* env fallback
+    5. Default active AI Setting / OPENAI_API_KEY fallback
+    6. First active LLM Integration for backward compatibility
+    """
 
     def _log(msg: str) -> None:
         if log:
             log(msg)
 
-    api_key = settings.OPENAI_API_KEY
-    base_url: Optional[str] = None
-    resolved_model = model or "gpt-4o-mini"
+    requested_model = (model or "").strip() or None
+
+    if ai_provider_id:
+        ai_setting = db.query(AISettings).filter(AISettings.id == ai_provider_id, AISettings.is_active == True).first()
+        if not ai_setting:
+            raise NodeExecutionError(f"AI provider not found or inactive: {ai_provider_id}")
+        if not ai_setting.api_url or not ai_setting.api_key:
+            raise NodeExecutionError(f"AI provider '{ai_setting.display_name or ai_setting.name}' is missing URL or key")
+        provider = _ai_setting_provider(ai_setting, requested_model, "workflow_ai_provider")
+        _log(f"Using selected AI provider '{provider['name']}' ({provider['provider']}, model={provider['model']})")
+        return provider
 
     if integration_id:
         integration = db.query(Integration).filter(Integration.id == integration_id).first()
         if not integration:
             raise NodeExecutionError(f"Integration not found: {integration_id}")
         icfg = integration.config or {}
-        api_key = icfg.get("apiKey") or api_key
-        base_url = icfg.get("baseUrl") or None
-        resolved_model = model or icfg.get("model") or resolved_model
-        _log(f"Using LLM integration '{integration.name}' (model={resolved_model})")
-    elif api_key:
-        _log(f"Using system OPENAI_API_KEY (model={resolved_model})")
-    else:
-        # No explicit integration and no system key: fall back to the first
-        # active LLM-type Integration so the AI helper works out-of-the-box
-        # in deployments that keep credentials only in Integrations.
-        fallback = (
-            db.query(Integration)
-            .filter(Integration.type == IntegrationType.LLM, Integration.status == IntegrationStatus.ACTIVE)
-            .order_by(Integration.created_at.asc())
-            .first()
-        )
-        if fallback:
-            icfg = fallback.config or {}
-            api_key = icfg.get("apiKey")
-            base_url = icfg.get("baseUrl") or None
-            resolved_model = model or icfg.get("model") or resolved_model
-            _log(f"Using fallback LLM integration '{fallback.name}' (model={resolved_model})")
+        api_key = icfg.get("apiKey")
+        if not api_key:
+            raise NodeExecutionError(f"LLM integration '{integration.name}' is missing apiKey")
+        provider = {
+            "provider": "openai_compatible",
+            "apiKey": api_key,
+            "baseUrl": icfg.get("baseUrl") or None,
+            "model": requested_model or icfg.get("model") or "gpt-4o-mini",
+            "source": "workflow_llm_integration",
+            "name": integration.name,
+        }
+        _log(f"Using LLM integration '{integration.name}' (model={provider['model']})")
+        return provider
 
-    if not api_key:
-        raise NodeExecutionError("ยังไม่ได้ตั้งค่า LLM — สร้าง Integration ชนิด LLM หรือกำหนด OPENAI_API_KEY ก่อน")
+    agent_setting = (
+        db.query(AISettings)
+        .filter(AISettings.is_agent_provider == True, AISettings.is_active == True)
+        .first()
+    )
+    if agent_setting and agent_setting.api_url and agent_setting.api_key:
+        provider = _ai_setting_provider(agent_setting, requested_model, "ai_settings_agent_provider")
+        _log(f"Using AI Settings Agent Provider '{provider['name']}' ({provider['provider']}, model={provider['model']})")
+        return provider
 
-    client_kwargs: Dict[str, Any] = {"api_key": api_key}
+    if settings.AGENT_PROVIDER_KEY:
+        provider = {
+            "provider": "openai_compatible",
+            "apiKey": settings.AGENT_PROVIDER_KEY,
+            "baseUrl": settings.AGENT_PROVIDER_URL,
+            "model": requested_model or settings.AGENT_MODEL or "gpt-4o-mini",
+            "source": "system_agent_provider",
+            "name": "System Agent Provider",
+        }
+        _log(f"Using system Agent Provider (model={provider['model']})")
+        return provider
+
+    default_setting = (
+        db.query(AISettings)
+        .filter(AISettings.is_default == True, AISettings.is_active == True)
+        .first()
+    )
+    if default_setting and default_setting.api_url and default_setting.api_key:
+        provider = _ai_setting_provider(default_setting, requested_model, "ai_settings_default_provider")
+        _log(f"Using AI Settings default provider '{provider['name']}' ({provider['provider']}, model={provider['model']})")
+        return provider
+
+    if settings.OPENAI_API_KEY:
+        provider = {
+            "provider": "openai_compatible",
+            "apiKey": settings.OPENAI_API_KEY,
+            "baseUrl": None,
+            "model": requested_model or "gpt-4o-mini",
+            "source": "system_openai_api_key",
+            "name": "OPENAI_API_KEY",
+        }
+        _log(f"Using system OPENAI_API_KEY (model={provider['model']})")
+        return provider
+
+    fallback = (
+        db.query(Integration)
+        .filter(Integration.type == IntegrationType.LLM, Integration.status == IntegrationStatus.ACTIVE)
+        .order_by(Integration.created_at.asc())
+        .first()
+    )
+    if fallback:
+        icfg = fallback.config or {}
+        api_key = icfg.get("apiKey")
+        if api_key:
+            provider = {
+                "provider": "openai_compatible",
+                "apiKey": api_key,
+                "baseUrl": icfg.get("baseUrl") or None,
+                "model": requested_model or icfg.get("model") or "gpt-4o-mini",
+                "source": "fallback_llm_integration",
+                "name": fallback.name,
+            }
+            _log(f"Using fallback LLM integration '{fallback.name}' (model={provider['model']})")
+            return provider
+
+    raise NodeExecutionError("ยังไม่ได้ตั้งค่า LLM — ตั้งค่า Setting AI > Agent Provider หรือ Default AI provider ก่อน")
+
+
+def _call_openai_compatible(provider: Dict[str, Any], messages: List[Dict[str, str]]) -> str:
+    from openai import OpenAI
+
+    client_kwargs: Dict[str, Any] = {"api_key": provider["apiKey"]}
+    base_url = _normalize_openai_base_url(provider.get("baseUrl"))
     if base_url:
-        normalized = base_url.strip().rstrip("/")
-        if normalized.lower().endswith("/chat/completions"):
-            normalized = normalized[: -len("/chat/completions")]
-        client_kwargs["base_url"] = normalized
-    return OpenAI(**client_kwargs), resolved_model
+        client_kwargs["base_url"] = base_url
+    client = OpenAI(**client_kwargs)
+    try:
+        response = client.chat.completions.create(model=provider["model"], messages=messages, temperature=0.2)
+    except Exception as exc:  # noqa: BLE001 - some providers reject temperature
+        if "temperature" not in str(exc).lower():
+            raise
+        response = client.chat.completions.create(model=provider["model"], messages=messages)
+    return response.choices[0].message.content or "" if response.choices else ""
 
+
+def _call_completion_messages(provider: Dict[str, Any], prompt: str, system_prompt: str) -> str:
+    payload = {
+        "inputs": {
+            "ocr_content": prompt,
+            "document_type": "workflow",
+            "workflow_prompt": prompt,
+            "agent_prompt": prompt,
+            "system_prompt": system_prompt,
+            "model": provider.get("model"),
+        },
+        "user": "workflow",
+        "citation": False,
+        "response_mode": "blocking",
+    }
+    response = http_requests.post(
+        provider["apiUrl"],
+        json=payload,
+        headers={
+            "Authorization": f"Bearer {provider['apiKey']}",
+            "Content-Type": "application/json",
+        },
+        timeout=120,
+    )
+    response.raise_for_status()
+    try:
+        data = response.json()
+    except ValueError:
+        return response.text
+    return str(data.get("answer") or data.get("text") or data.get("output") or data.get("result") or "")
+
+
+def call_llm_provider(provider: Dict[str, Any], prompt: str, system_prompt: Optional[str] = None) -> str:
+    system_text = (system_prompt or "").strip()
+    if provider.get("provider") == "completion_messages":
+        return _call_completion_messages(provider, prompt, system_text)
+
+    messages: List[Dict[str, str]] = []
+    if system_text:
+        messages.append({"role": "system", "content": system_text})
+    messages.append({"role": "user", "content": prompt})
+    return _call_openai_compatible(provider, messages)
+
+
+# Backward-compatible helper for callers that still expect an OpenAI client.
+def resolve_llm_client(
+    db: Session,
+    integration_id: Optional[str] = None,
+    model: Optional[str] = None,
+    log: Optional[Callable[[str], None]] = None,
+):
+    from openai import OpenAI
+
+    provider = resolve_llm_provider(db, integration_id, model, log)
+    if provider.get("provider") != "openai_compatible":
+        raise NodeExecutionError("Selected AI provider is not OpenAI-compatible")
+    client_kwargs: Dict[str, Any] = {"api_key": provider["apiKey"]}
+    base_url = _normalize_openai_base_url(provider.get("baseUrl"))
+    if base_url:
+        client_kwargs["base_url"] = base_url
+    return OpenAI(**client_kwargs), provider["model"]
 
 def _exec_llm(db: Session, config: dict, context: dict, log: Callable[[str], None]) -> Any:
     prompt = config.get("prompt")
     if not prompt:
         raise NodeExecutionError("LLM node: prompt is required")
 
-    client, model = resolve_llm_client(db, config.get("integration_id"), config.get("model"), log)
-
-    messages: List[Dict[str, str]] = []
-    system_prompt = config.get("system_prompt")
-    if system_prompt and str(system_prompt).strip():
-        messages.append({"role": "system", "content": str(system_prompt).strip()})
-    messages.append({"role": "user", "content": _stringify(prompt)})
-
-    response = client.chat.completions.create(model=model, messages=messages)
-    text = response.choices[0].message.content or "" if response.choices else ""
-    log(f"LLM responded ({len(text)} chars)")
+    provider = resolve_llm_provider(
+        db,
+        config.get("integration_id"),
+        config.get("model"),
+        log,
+        config.get("ai_provider_id"),
+    )
+    text = call_llm_provider(provider, _stringify(prompt), config.get("system_prompt"))
+    log(f"LLM responded via {provider.get('source')} ({len(text)} chars)")
 
     if config.get("json_output"):
         cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip())
@@ -626,20 +794,8 @@ def suggest_variables(
     )
     user = f"คำขอของผู้ใช้: {query}\n\nรายการตัวแปรที่มี (catalog):\n{catalog}"
 
-    client, model = resolve_llm_client(db, integration_id, None, None)
-    messages = [
-        {"role": "system", "content": system},
-        {"role": "user", "content": user},
-    ]
-    try:
-        response = client.chat.completions.create(model=model, messages=messages, temperature=0)
-    except Exception as exc:  # noqa: BLE001
-        # Some models (e.g. gpt-5-*) reject a non-default temperature — retry plainly.
-        if "temperature" in str(exc).lower():
-            response = client.chat.completions.create(model=model, messages=messages)
-        else:
-            raise
-    text = response.choices[0].message.content or "" if response.choices else ""
+    provider = resolve_llm_provider(db, integration_id, None, None)
+    text = call_llm_provider(provider, user, system)
     cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip())
 
     try:

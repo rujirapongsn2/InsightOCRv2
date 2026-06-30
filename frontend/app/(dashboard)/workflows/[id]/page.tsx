@@ -36,6 +36,7 @@ import {
     suggestVariables, type VariableCandidate, type VariableSuggestion,
 } from "@/lib/workflows-api"
 import { Integration, getActiveIntegrations } from "@/lib/integrations-api"
+import { listAIProviders, type AIProviderSetting } from "@/lib/ai-settings-api"
 
 // ── AI variable finder context (provides workflowId + token to the picker) ──
 const AiFinderContext = createContext<{ workflowId: string; token: string | null; defaultIntegrationId?: string | null } | null>(null)
@@ -778,8 +779,8 @@ function InsertVariableButton({ upstream, onInsert }: { upstream: UpstreamNode[]
 
 // ── Config panel field renderer ──────────────────────────────────────
 function ConfigField({
-    field, value, onChange, jobs, upstream, integrations,
-}: { field: NodeTypeDef["config_fields"][0]; value: any; onChange: (v: any) => void; jobs: JobSummary[]; upstream: UpstreamNode[]; integrations: Integration[] }) {
+    field, value, onChange, jobs, upstream, integrations, aiProviders,
+}: { field: NodeTypeDef["config_fields"][0]; value: any; onChange: (v: any) => void; jobs: JobSummary[]; upstream: UpstreamNode[]; integrations: Integration[]; aiProviders: AIProviderSetting[] }) {
     const base = "w-full border border-[#E2E8F0] rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-[#2786C2]/30"
     const inputRef = useRef<HTMLInputElement | HTMLTextAreaElement | null>(null)
     const supportsTemplate = ["text", "textarea", "code"].includes(field.type)
@@ -799,6 +800,31 @@ function ConfigField({
         } else {
             onChange(cur + token)
         }
+    }
+    if (field.type === "ai_provider_select") {
+        const activeProviders = aiProviders.filter((p) => p.is_active)
+        const known = activeProviders.some((p) => p.id === value)
+        return (
+            <div>
+                <select className={base} value={value ?? ""} onChange={(e) => onChange(e.target.value)}>
+                    <option value="">ใช้ Agent Provider กลางของระบบ</option>
+                    {activeProviders.map((p) => {
+                        const badges = [p.is_agent_provider ? "Agent" : null, p.is_default ? "Default" : null, p.provider_type].filter(Boolean).join(" · ")
+                        return (
+                            <option key={p.id} value={p.id}>
+                                {p.display_name || p.name}{badges ? ` · ${badges}` : ""}
+                            </option>
+                        )
+                    })}
+                    {value && !known && <option value={value}>{`${value} (ไม่พบในรายการ)`}</option>}
+                </select>
+                {activeProviders.length === 0 && (
+                    <p className="text-[10px] text-amber-600 mt-1">
+                        ยังไม่มี AI provider — ไปตั้งค่าที่ <a href="/settings" className="underline">Setting AI</a> ก่อน
+                    </p>
+                )}
+            </div>
+        )
     }
     if (field.type === "integration_select") {
         const matches = integrations.filter((i) => !field.provider || i.type === field.provider)
@@ -1085,6 +1111,7 @@ function Builder() {
     const [nodeDefs, setNodeDefs] = useState<NodeTypeDef[]>([])
     const [jobs, setJobs] = useState<JobSummary[]>([])
     const [integrations, setIntegrations] = useState<Integration[]>([])
+    const [aiProviders, setAiProviders] = useState<AIProviderSetting[]>([])
     const [nodes, setNodes, onNodesChange] = useNodesState<Node>([])
     const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([])
     const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -1121,6 +1148,7 @@ function Builder() {
             .catch((e) => setNotice(e.message))
         getJobs(token).then(setJobs).catch(() => { /* picker falls back to manual id */ })
         getActiveIntegrations(token).then(setIntegrations).catch(() => { /* select shows empty hint */ })
+        listAIProviders(token).then(setAiProviders).catch(() => { /* select shows empty hint */ })
         loadLatestOutputs()
         return () => { if (pollRef.current) clearInterval(pollRef.current) }
         // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1405,7 +1433,7 @@ function Builder() {
     }
 
     return (
-        <AiFinderContext.Provider value={{ workflowId, token, defaultIntegrationId: (selectedNode?.data as WfNodeData | undefined)?.config?.integration_id ?? null }}>
+        <AiFinderContext.Provider value={{ workflowId, token, defaultIntegrationId: null }}>
         <div className="flex flex-col h-full">
             {/* ── Top bar ── */}
             <div className="flex items-center gap-3 px-4 py-2.5 bg-white border-b border-[#E2E8F0]">
@@ -1689,6 +1717,7 @@ function Builder() {
                                         jobs={jobs}
                                         upstream={upstreamVars}
                                         integrations={integrations}
+                                        aiProviders={aiProviders}
                                     />
                                     {f.hint && <p className="text-[10px] text-[#94A3B8] mt-1 leading-snug">{f.hint}</p>}
                                 </div>

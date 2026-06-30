@@ -54,8 +54,8 @@ services:
       - ./backend/.env
     environment:
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
-      - SANDBOX_IMAGE=insightocr-sandbox:py312
-      - SANDBOX_AUTO_BUILD=true
+      - SANDBOX_IMAGE=python:3.12-slim
+      - SANDBOX_AUTO_BUILD=false
       - SANDBOX_DOCKER_NETWORK=auto
       - SANDBOX_MEMORY_MB=512
       - SANDBOX_TMPFS_MB=512
@@ -71,7 +71,8 @@ services:
     security_opt:
       - no-new-privileges:true
     group_add:
-      - "0" # GID 0 (root) matches Docker Desktop socket group on macOS (srw-rw---- root root)
+      - "0" # Docker Desktop often exposes docker.sock as root:root
+      - "${DOCKER_GID:-988}" # Linux hosts commonly expose docker.sock with a docker-group GID
     cap_drop:
       - ALL
     cap_add:
@@ -101,8 +102,8 @@ services:
       - ./backend/.env
     environment:
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
-      - SANDBOX_IMAGE=insightocr-sandbox:py312
-      - SANDBOX_AUTO_BUILD=true
+      - SANDBOX_IMAGE=python:3.12-slim
+      - SANDBOX_AUTO_BUILD=false
       - SANDBOX_DOCKER_NETWORK=auto
       - SANDBOX_MEMORY_MB=512
       - SANDBOX_TMPFS_MB=512
@@ -118,7 +119,8 @@ services:
     security_opt:
       - no-new-privileges:true
     group_add:
-      - "0" # GID 0 (root) matches Docker Desktop socket group on macOS (srw-rw---- root root)
+      - "0" # Docker Desktop often exposes docker.sock as root:root
+      - "${DOCKER_GID:-988}" # Linux hosts commonly expose docker.sock with a docker-group GID
     cap_drop:
       - ALL
     read_only: true

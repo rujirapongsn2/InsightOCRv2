@@ -1,5 +1,81 @@
 # QUICKWIN TEST
 
+
+Date: 2026-06-30
+
+## Manual Verification - Workflow LLM Agent Provider Dropdown
+
+1. Provider resolution
+   - Confirmed Workflow LLM/Agent node previously resolved `integration_id` / `OPENAI_API_KEY` / LLM Integration fallback, not AI Settings Agent Provider.
+   - Updated Workflow LLM provider priority to use: selected AI Agent Provider, legacy LLM Integration ID, Setting AI Agent Provider, system Agent Provider, default AI Setting, then LLM Integration fallback.
+   - Confirmed resolver uses the system Agent Provider when no DB AI Setting is marked as Agent Provider.
+
+2. Form alignment
+   - Replaced the free-text provider/model override fields with a single `AI Agent Provider` dropdown.
+   - Dropdown options load active providers from Setting AI and show Agent/Default/provider type badges.
+   - Leaving the dropdown blank uses the central Agent Provider configured for the system.
+   - Changed new sample LLM nodes to store `ai_provider_id` and rely on the provider's configured model.
+   - Synced existing sample workflow definitions on startup so the demo forms match the updated behavior.
+
+3. Runtime verification
+   - Confirmed direct LLM node execution returns a response through the system Agent Provider.
+   - Ran sample Workflow 2 through Celery; all nodes succeeded and LLM logs show `Using system Agent Provider (model=gpt-5.4-mini)`.
+   - Confirmed backend node catalog exposes LLM fields: `ai_provider_id`, `system_prompt`, `prompt`, and `json_output`.
+   - Confirmed sample Workflow 2 LLM config contains `ai_provider_id` and no `integration_id` / `model` override.
+   - Ran `PYTHONPYCACHEPREFIX=/tmp/insightocr-pycache python3 -m py_compile backend/app/services/workflow_engine.py backend/app/initial_workflows.py backend/app/main.py`.
+   - Ran `docker compose build frontend`; Next.js production build and TypeScript checks passed.
+   - Ran `docker compose up -d --build --no-deps backend celery_worker celery_beat frontend`.
+   - Confirmed backend, celery worker, celery beat, and frontend containers are running; backend and frontend are healthy.
+   - Ran `git diff --check`.
+
+---
+
+
+Date: 2026-06-30
+
+## Manual Verification - Workflow Python Sandbox Permission
+
+1. Docker socket access
+   - Added the Docker socket group to backend and celery worker via `DOCKER_GID` fallback in `docker-compose.yml`.
+   - Confirmed backend and celery worker include group `988` and can read/write `/var/run/docker.sock`.
+
+2. Sandbox runtime
+   - Switched the workflow Python sandbox to `python:3.12-slim` with `SANDBOX_AUTO_BUILD=false` to avoid first-run custom image build delays.
+   - Confirmed direct `execute_python()` returns `{'ok': True, 'total': 6}` without sandbox errors.
+
+3. Workflow verification
+   - Ran sample Workflow 1 through `execute_workflow_run`; all nodes succeeded.
+   - Enqueued sample Workflow 1 through Celery `run_workflow_task`; all nodes succeeded, including Python Code and Write Output.
+
+---
+
+Date: 2026-06-30
+
+## Manual Verification - Workflow Sample Seeds
+
+1. Sample data
+   - Added startup seeding for the demo Job `ใบเสร็จรับเงิน review`.
+   - Added three reviewed receipt documents so Jobs and Document Source nodes have data to apply.
+
+2. Sample workflows
+   - Added Workflow 1: Manual Trigger -> Jobs -> Condition -> Transform -> Python Code -> Write Output.
+   - Added Workflow 2: Webhook Trigger -> Jobs -> Condition -> LLM -> Transform -> Write Output.
+   - Added Workflow 3: Schedule Trigger -> Document Source -> Condition -> LLM -> Transform -> Write Output.
+
+3. Static checks
+   - Ran `PYTHONPYCACHEPREFIX=/tmp/insightocr-pycache python3 -m py_compile backend/app/initial_workflows.py backend/app/main.py`.
+   - Ran `git diff --check`.
+   - Validated the generated definitions include the required node types for all 3 sample workflows.
+
+4. Runtime verification
+   - Ran `docker compose up -d --build --no-deps backend celery_worker celery_beat`.
+   - Confirmed backend, celery worker, and celery beat are running; backend health is `healthy`.
+   - Confirmed the database contains Job `ใบเสร็จรับเงิน review` with 3 demo documents.
+   - Confirmed the database contains all 3 sample workflows, each with 6 nodes and 5 edges.
+
+---
+
+
 Date: 2026-06-25
 
 ## Manual Verification - Agent Job Access Permission
