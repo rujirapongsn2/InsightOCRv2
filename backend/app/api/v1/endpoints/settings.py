@@ -9,6 +9,7 @@ from app.api import deps
 from app.models.user import User
 from app.models.setting import Setting
 from app.schemas.setting import Setting as SettingSchema, SettingUpdate
+from app.services.tls import warn_ssl_verification_disabled
 from app.utils.activity_logger import log_activity, Actions
 
 router = APIRouter()
@@ -149,6 +150,7 @@ def test_endpoint(
         headers["Authorization"] = f"Bearer {payload.token}"
 
     try:
+        warn_ssl_verification_disabled("settings endpoint test request")
         resp = requests.get(str(payload.url), headers=headers, timeout=10, verify=False)
         return {
             "status_code": resp.status_code,

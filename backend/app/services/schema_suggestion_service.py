@@ -6,6 +6,7 @@ import requests
 from sqlalchemy.orm import Session
 
 from app.models.setting import Setting
+from app.services.tls import get_verify_ssl
 
 
 class SchemaSuggestionService:
@@ -26,7 +27,7 @@ class SchemaSuggestionService:
 
         endpoint = setting.schema_suggestion_endpoint
         token = setting.api_token
-        verify_ssl = setting.verify_ssl if setting.verify_ssl is not None else False
+        verify_ssl = get_verify_ssl(setting, "schema suggestion provider requests")
 
         if not endpoint or not token:
             raise ValueError("Schema Suggestion Endpoint and Bearer Token are required in Settings")

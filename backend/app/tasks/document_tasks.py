@@ -13,6 +13,7 @@ from app.celery_app import celery_app
 from app.db.session import SessionLocal
 from app.models import Document, DocumentSchema as SchemaModel, Setting
 from app.services.storage import get_storage_service
+from app.services.tls import get_verify_ssl
 from app.utils.activity_logger import log_activity, Actions
 from app.utils.job_logger import get_job_logger
 import requests
@@ -701,7 +702,7 @@ def process_document_task(self, document_id: str, schema_id: str | None = None):
         if not ocr_endpoint or not setting.api_token:
             raise ValueError("OCR Processing Endpoint and API token are required in Settings.")
 
-        verify_ssl = setting.verify_ssl if setting.verify_ssl is not None else False
+        verify_ssl = get_verify_ssl(setting, "document processing provider requests")
         ocr_engine = setting.ocr_engine if setting.ocr_engine and setting.ocr_engine != "default" else "tesseract"
         model = "" if not setting.model or setting.model == "default" else setting.model
 

@@ -1,13 +1,10 @@
 import requests
-import urllib3
 import os
 from sqlalchemy.orm import Session
 from app.models.setting import Setting
+from app.services.tls import get_verify_ssl
 from pypdf import PdfReader
 from datetime import datetime
-
-# Disable SSL warnings
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 def count_pdf_pages(file_path: str) -> int:
     """
@@ -68,7 +65,7 @@ def process_ocr(file_path: str, db: Session, page_number: int = 1, filename: str
             "OCR Endpoint and API Token are required. Please configure them in /settings page."
         )
     api_key = setting.api_token
-    verify_ssl = setting.verify_ssl if setting.verify_ssl is not None else False
+    verify_ssl = get_verify_ssl(setting, "OCR provider requests")
 
     # If 'default', send empty string to let External API use its own default
     ocr_engine = '' if not setting.ocr_engine or setting.ocr_engine == 'default' else setting.ocr_engine

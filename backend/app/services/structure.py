@@ -1,11 +1,8 @@
 import requests
-import urllib3
 import json
 from sqlalchemy.orm import Session
 from app.models.setting import Setting
-
-# Disable SSL warnings
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+from app.services.tls import get_verify_ssl
 
 def extract_structure(context: str, schema_json: str, db: Session, prompt: str = "Please return the extracted information in JSON format that matches the schema.") -> dict:
     """
@@ -35,7 +32,7 @@ def extract_structure(context: str, schema_json: str, db: Session, prompt: str =
     
     base_api_url = setting.api_endpoint
     api_key = setting.api_token
-    verify_ssl = setting.verify_ssl if setting.verify_ssl is not None else False
+    verify_ssl = get_verify_ssl(setting, "structured extraction provider requests")
     
     # Replace /ai-process-file with /structured-output
     structure_api_url = base_api_url.replace('/ai-process-file', '/structured-output')

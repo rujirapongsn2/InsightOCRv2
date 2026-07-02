@@ -1,6 +1,40 @@
 # QUICKWIN TEST
 
 
+Date: 2026-07-02
+
+## Manual Verification - Nginx Real IP, Streaming Timeouts, and Probe Blocking
+
+1. Nginx rate/connection limit remediation
+   - Added trusted real-client IP handling for Docker/internal proxy traffic using `real_ip_header X-Forwarded-For`, `real_ip_recursive on`, and conservative `set_real_ip_from` ranges.
+   - Split API, login, upload/process, and SSE stream rate-limit zones.
+   - Increased general API connection capacity from 10 to 50 per real client IP and moved long-lived streams to a separate connection zone.
+
+2. Long-running and streaming routes
+   - Added dedicated Nginx locations for document progress streams, Agent/Chat message streams, and integration streaming with 900s read/send timeouts and buffering disabled.
+   - Kept long-running schema suggestion and integration dispatch routes on extended API timeouts.
+
+3. Bot/probe fallback blocking
+   - Added Nginx map-based fallback blocking for obvious exploit probes such as `/adfa`, suspicious shell payloads in URI/query, scanner user agents, and abnormal POSTs to `/`, `/_next`, and `/api`.
+   - Confirmed `GET /adfa` and `POST /` are closed by Nginx with 444 behavior (`curl` reports `000`/empty reply), without proxying to frontend.
+
+4. TLS warning noise
+   - Replaced scattered global `urllib3.disable_warnings(...)` calls with a shared TLS helper that keeps warnings visible once and logs a single config decision when `verify_ssl=false` is used.
+
+5. Verification commands
+   - Ran `PYTHONPYCACHEPREFIX=/tmp/insightocr-pycache python3 -m py_compile backend/app/services/tls.py backend/app/services/ocr.py backend/app/services/structure.py backend/app/services/schema_suggestion_service.py backend/app/tasks/document_tasks.py backend/app/api/v1/endpoints/settings.py`.
+   - Generated ignored local self-signed dev cert files with `bash nginx/ssl/generate-certs.sh` so the mounted HTTPS config can be validated locally.
+   - Ran `docker compose exec nginx nginx -t`; config syntax passed.
+   - Ran `docker compose exec nginx nginx -s reload`; reload succeeded.
+   - Confirmed `GET http://127.0.0.1/health` returns `200`.
+   - Confirmed `GET /api/v1/users/me` without auth still returns `401`, not a 5xx.
+   - Confirmed `POST /api/v1/login/access-token` without form data returns FastAPI validation status `422`, not a 5xx.
+   - Confirmed access log records `203.0.113.10` as `$remote_addr` when `X-Forwarded-For: 203.0.113.10` is sent through the trusted local proxy path.
+   - Sent 30 concurrent unauthenticated API requests with distinct `X-Forwarded-For` values; all returned `401`, with no 503/connection-limit response.
+   - Ran `git diff --check`.
+
+---
+
 Date: 2026-06-30
 
 ## Manual Verification - Workflow LLM Agent Provider Dropdown
