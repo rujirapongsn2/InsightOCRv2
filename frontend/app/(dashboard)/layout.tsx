@@ -89,10 +89,10 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                             <Link
                                 key={item.href}
                                 href={item.href}
-                                className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors ${
+                                className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${
                                     active
                                         ? "bg-[#EBF4FB] text-[#2786C2] font-semibold"
-                                        : "text-[#778DA9] hover:bg-[#F8F9FA] hover:text-[#0D1B2A]"
+                                        : "text-[#64748B] hover:bg-[#F8F9FA] hover:text-[#0D1B2A]"
                                 }`}
                             >
                                 <Icon className={`h-5 w-5 shrink-0 ${active ? "text-[#2786C2]" : ""}`} />
@@ -220,10 +220,10 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                                 <Link
                                     key={item.href}
                                     href={item.href}
-                                    className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors ${
+                                    className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${
                                         active
                                             ? "bg-[#EBF4FB] text-[#2786C2] font-semibold"
-                                            : "text-[#778DA9] hover:bg-[#F8F9FA] hover:text-[#0D1B2A]"
+                                            : "text-[#64748B] hover:bg-[#F8F9FA] hover:text-[#0D1B2A]"
                                     }`}
                                     onClick={() => setMobileMenuOpen(false)}
                                 >

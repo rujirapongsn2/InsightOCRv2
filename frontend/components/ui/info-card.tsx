@@ -1,5 +1,9 @@
 import { AlertCircle, CheckCircle, Info, AlertTriangle, X } from "lucide-react"
 import { ReactNode, useState } from "react"
+import { Card } from "@/components/ui/card"
+import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
+import { cn } from "@/lib/utils"
 
 type InfoCardType = "info" | "success" | "warning" | "error" | "tip"
 
@@ -12,40 +16,46 @@ interface InfoCardProps {
 }
 
 const typeStyles: Record<InfoCardType, {
-  bg: string
-  border: string
+  card: string
+  badgeVariant: React.ComponentProps<typeof Badge>["variant"]
+  badgeLabel: string
   icon: ReactNode
   iconColor: string
 }> = {
   info: {
-    bg: "bg-blue-50",
-    border: "border-blue-200",
+    card: "border-[#B8DCEB] bg-[#F4FBFE]",
+    badgeVariant: "info",
+    badgeLabel: "Info",
     icon: <Info className="h-5 w-5" />,
-    iconColor: "text-blue-600"
+    iconColor: "text-[#2786C2]"
   },
   success: {
-    bg: "bg-green-50",
-    border: "border-green-200",
+    card: "border-emerald-200 bg-emerald-50",
+    badgeVariant: "success",
+    badgeLabel: "Success",
     icon: <CheckCircle className="h-5 w-5" />,
-    iconColor: "text-green-600"
+    iconColor: "text-emerald-600"
   },
   warning: {
-    bg: "bg-yellow-50",
-    border: "border-yellow-200",
+    card: "border-amber-200 bg-amber-50",
+    badgeVariant: "warning",
+    badgeLabel: "Warning",
     icon: <AlertTriangle className="h-5 w-5" />,
-    iconColor: "text-yellow-600"
+    iconColor: "text-amber-600"
   },
   error: {
-    bg: "bg-red-50",
-    border: "border-red-200",
+    card: "border-red-200 bg-red-50",
+    badgeVariant: "destructive",
+    badgeLabel: "Error",
     icon: <AlertCircle className="h-5 w-5" />,
     iconColor: "text-red-600"
   },
   tip: {
-    bg: "bg-purple-50",
-    border: "border-purple-200",
+    card: "border-violet-200 bg-violet-50",
+    badgeVariant: "info",
+    badgeLabel: "Tip",
     icon: <Info className="h-5 w-5" />,
-    iconColor: "text-purple-600"
+    iconColor: "text-violet-600"
   }
 }
 
@@ -62,29 +72,34 @@ export function InfoCard({
   if (!isVisible) return null
 
   return (
-    <div className={`${style.bg} ${style.border} border rounded-lg p-4 ${className}`}>
+    <Card className={cn("border p-4", style.card, className)}>
       <div className="flex items-start gap-3">
         <div className={`${style.iconColor} flex-shrink-0 mt-0.5`}>
           {style.icon}
         </div>
         <div className="flex-1">
           {title && (
-            <h3 className="font-medium text-slate-900 mb-1">{title}</h3>
+            <div className="mb-2 flex items-center gap-2">
+              <Badge variant={style.badgeVariant}>{style.badgeLabel}</Badge>
+              <h3 className="font-medium text-[#0D1B2A]">{title}</h3>
+            </div>
           )}
-          <div className="text-sm text-slate-700">
+          <div className="text-sm text-[#415A77]">
             {children}
           </div>
         </div>
         {dismissible && (
-          <button
+          <Button
+            variant="ghost"
+            size="icon"
             onClick={() => setIsVisible(false)}
-            className="text-slate-400 hover:text-slate-600 flex-shrink-0"
+            className="h-8 w-8 flex-shrink-0"
             aria-label="Dismiss"
           >
             <X className="h-4 w-4" />
-          </button>
+          </Button>
         )}
       </div>
-    </div>
+    </Card>
   )
 }

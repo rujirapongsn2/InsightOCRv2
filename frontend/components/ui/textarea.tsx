@@ -1,19 +1,33 @@
 import * as React from "react"
+import { TextArea } from "@astryxdesign/core/TextArea"
 
 import { cn } from "@/lib/utils"
 
 export interface TextareaProps
-    extends React.TextareaHTMLAttributes<HTMLTextAreaElement> { }
+    extends Omit<React.TextareaHTMLAttributes<HTMLTextAreaElement>, "onChange"> {
+    onChange?: React.ChangeEventHandler<HTMLTextAreaElement>
+}
 
 const Textarea = React.forwardRef<HTMLTextAreaElement, TextareaProps>(
-    ({ className, ...props }, ref) => {
+    ({ className, disabled, required, value, name, autoFocus, placeholder, onChange, "aria-label": ariaLabel, ...props }, ref) => {
+        const label = ariaLabel || placeholder || name || "Textarea"
+
         return (
-            <textarea
+            <TextArea
+                ref={ref}
+                label={label}
+                isLabelHidden
+                isDisabled={disabled}
+                isRequired={required}
+                hasAutoFocus={autoFocus}
+                htmlName={name}
+                placeholder={placeholder}
+                value={value == null ? "" : String(value)}
+                onChange={(_, event) => onChange?.(event)}
                 className={cn(
-                    "flex min-h-[80px] w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm ring-offset-white placeholder:text-slate-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-950 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50",
+                    "w-full",
                     className
                 )}
-                ref={ref}
                 {...props}
             />
         )

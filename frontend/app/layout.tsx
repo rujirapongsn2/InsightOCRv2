@@ -1,12 +1,12 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import { AstryxProvider } from "@/components/astryx-provider";
+import { AuthProvider } from "@/components/auth-provider";
 
 export const metadata: Metadata = {
   title: "InsightDOC — Softnix AI Document Platform",
   description: "AI-powered document extraction and processing by Softnix",
 };
-
-import { AuthProvider } from "@/components/auth-provider";
 
 export default function RootLayout({
   children,
@@ -14,10 +14,12 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en">
+    <html lang="en" data-theme="light" data-astryx-theme="neutral">
       <body className="antialiased font-sans">
         <AuthProvider>
-          {children}
+          <AstryxProvider>
+            {children}
+          </AstryxProvider>
         </AuthProvider>
       </body>
     </html>

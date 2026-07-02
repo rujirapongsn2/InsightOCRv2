@@ -1,5 +1,7 @@
 import { HelpCircle } from "lucide-react"
 import { ReactNode } from "react"
+import { Tooltip } from "@astryxdesign/core/Tooltip"
+import { Button } from "@/components/ui/button"
 
 interface HelpTooltipProps {
   content: string | ReactNode
@@ -7,28 +9,33 @@ interface HelpTooltipProps {
 }
 
 export function HelpTooltip({ content, learnMoreUrl }: HelpTooltipProps) {
-  return (
-    <div className="group relative inline-block">
-      <HelpCircle className="h-4 w-4 text-slate-400 hover:text-slate-600 cursor-help" />
-      <div className="invisible group-hover:visible absolute z-50 w-64 p-3 mt-1 text-sm bg-slate-900 text-white rounded-lg shadow-lg -left-28">
-        <div className="space-y-2">
-          <div>{content}</div>
-          {learnMoreUrl && (
-            <a
-              href={learnMoreUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-blue-300 hover:text-blue-200 underline text-xs"
-            >
-              Learn more →
-            </a>
-          )}
-        </div>
-        {/* Arrow */}
-        <div className="absolute -top-1 left-1/2 transform -translate-x-1/2">
-          <div className="w-2 h-2 bg-slate-900 rotate-45"></div>
-        </div>
-      </div>
+  const tooltipContent = (
+    <div className="max-w-64 space-y-2 text-sm">
+      <div>{content}</div>
+      {learnMoreUrl && (
+        <a
+          href={learnMoreUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-[#B8DCEB] underline underline-offset-2"
+        >
+          Learn more
+        </a>
+      )}
     </div>
+  )
+
+  return (
+    <Tooltip content={tooltipContent} placement="above" alignment="center" hasHoverIndication={false}>
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon"
+        className="h-6 w-6 text-[#778DA9]"
+        aria-label="Help"
+      >
+        <HelpCircle className="h-4 w-4" />
+      </Button>
+    </Tooltip>
   )
 }

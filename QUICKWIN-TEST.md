@@ -823,3 +823,173 @@ Date: 2026-06-15
      - API prompt test against the original failing conversation with `content="ช่วยสร้างเป้น pdf"` returned one tool call: `create_pdf`, `ok=true`, `verified=true`, `path=outputs/risk_comparison_table.pdf`, `size=16639`, `mime_type=application/pdf`, followed by `done`.
      - Stored PDF verification passed with `verify_saved_file(...)=ok`; `pypdf.PdfReader` opened the generated file and reported 3 pages.
      - `docker compose build frontend` passed, including Next.js production build + TypeScript, then frontend was restarted.
+
+---
+
+Date: 2026-06-30
+
+## Manual Verification - Astryx Design System Initial Adoption
+
+1. Scope
+   - Installed Astryx packages in `frontend`: `@astryxdesign/core`, `@astryxdesign/theme-neutral`, and `@astryxdesign/cli`.
+   - Added Astryx CSS reset, core styles, neutral theme CSS, and Tailwind v4 token bridge while keeping existing Softnix tokens.
+   - Added a root Astryx theme provider and SSR theme attributes.
+   - Converted shared `Button`, `Card`, `Input`, and `Textarea` wrappers into Astryx adapters while preserving the existing local import paths and event signatures.
+   - Generated `frontend/ASTRYX.md` for local Astryx agent guidance.
+
+2. Verification performed
+   - `npm run build` passed for the frontend, including Next.js production build and TypeScript.
+   - `npx eslint app/layout.tsx components/astryx-provider.tsx components/ui/button.tsx components/ui/card.tsx components/ui/input.tsx components/ui/textarea.tsx` passed.
+   - `npm run dev` started successfully on `http://localhost:3002` because port 3000 was already in use.
+   - `curl -I http://localhost:3002` returned `HTTP/1.1 200 OK`.
+
+3. Notes
+   - Full `npm run lint` still fails due to existing repo-wide lint debt such as `any` usage, hook dependency warnings, and unrelated source warnings.
+   - Next/Turbopack reports CSS optimizer warnings for Astryx-generated `@property` rules, but the production build completes successfully.
+
+4. Follow-up fix for Cloudflare Tunnel login API
+   - Root cause: `https://insightdoc-mini.softnix.ai/` was serving a host `next dev` origin on port 3002. In that mode, `next.config.ts` rewrote `/api/v1/*` to `http://backend:8000`, which only resolves inside Docker, so login requests through the tunnel returned `500 Internal Server Error`.
+   - Updated frontend rewrites to use `NEXT_API_REWRITE_ORIGIN` when set, `http://127.0.0.1:3000` in development, and `http://backend:8000` in production Docker.
+   - Restarted the host dev server on port 3002 so Cloudflare Tunnel traffic uses the corrected rewrite config.
+   - Verification:
+     - `npm run build` passed after the rewrite change.
+     - `npx eslint next.config.ts` passed.
+     - `curl -I https://insightdoc-mini.softnix.ai/login` returned `HTTP/2 200`.
+     - Diagnostic public login request with a fake user now returns `HTTP/2 400` and `{"detail":"Incorrect email or password"}` instead of `HTTP/2 500`.
+
+5. Follow-up migration for shared UI primitives
+   - Added a local `Badge` adapter backed by Astryx `Badge` while preserving the existing `components/ui/*` import pattern.
+   - Converted `Modal` to Astryx `Dialog` and `DialogHeader`, keeping the existing `isOpen`, `onClose`, `title`, and `children` API.
+   - Converted `FileUpload` to Astryx `FileInput` dropzone mode while preserving `onFileSelect`, `accept`, `maxSize`, `description`, and `className`.
+   - Converted `HelpTooltip` to Astryx `Tooltip` with the existing icon-button trigger.
+   - Updated `InfoCard` to compose the local Astryx-backed `Card`, `Badge`, and `Button` adapters.
+   - Tuned `Stepper` to use the Softnix/Astryx token palette with stable dimensions and fewer ad-hoc class branches.
+   - Verification:
+     - `npm run build` passed for the frontend, including Next.js production build and TypeScript.
+     - `npx eslint components/ui/badge.tsx components/ui/modal.tsx components/ui/file-upload.tsx components/ui/info-card.tsx components/ui/help-tooltip.tsx components/ui/stepper.tsx` passed.
+   - Notes:
+     - Next/Turbopack still reports the existing Astryx CSS optimizer warnings for generated `@property` rules, but the production build completes successfully.
+
+6. Follow-up fix for Astryx visual regressions and slash-redirect API loops
+   - Root cause: the Astryx-backed local `Button` adapter rendered Astryx button structure into call sites that already passed custom icon/content classes, causing several existing buttons to size incorrectly.
+   - Restored the local `Button` wrapper to a native button with Softnix token classes, preserving existing `variant`, `size`, `className`, icon, and children behavior.
+   - Root cause: Tailwind v4 plus Astryx reset made bare `border` utilities render too dark in existing panels/cards.
+   - Added a base border color fallback using the Softnix hairline token.
+   - Root cause: FastAPI redirects `/api/v1/ai-settings` and `/api/v1/users` to trailing-slash paths, while the host Next dev rewrite proxied them back without the slash, producing a 307 loop that Safari surfaced as a 503.
+   - Added explicit Next rewrite entries for both slash and non-slash `ai-settings` and `users` collection paths.
+   - Restarted the host Next dev server on port 3002 so Cloudflare Tunnel uses the updated config.
+   - Verification:
+     - `npm run build` passed for the frontend, including Next.js production build and TypeScript.
+     - `npx eslint components/ui/button.tsx next.config.ts` passed.
+     - `curl -i https://insightdoc-mini.softnix.ai/api/v1/ai-settings -H 'Authorization: Bearer invalid-token'` now returns `HTTP/2 403` with `{"detail":"Could not validate credentials"}`, confirming it reaches backend instead of redirect-looping/503.
+     - `curl -i https://insightdoc-mini.softnix.ai/api/v1/users -H 'Authorization: Bearer invalid-token'` now returns `HTTP/2 403` with `{"detail":"Could not validate credentials"}`.
+     - `curl -I https://insightdoc-mini.softnix.ai/jobs/69b4ccdf-3330-4aa1-a3d5-13d7e0799e3f` returned `HTTP/2 200`.
+
+7. Follow-up fix for Integration page assets and API redirect loop
+   - Root cause: the Integration catalog referenced remote GitHub raw SVG URLs for OpenAI, n8n, Google Drive, and OneDrive logos; those filenames were unavailable and Safari logged 404s.
+   - Added local SVG assets under `frontend/public/integrations/` and updated the Integration catalog to reference those local paths.
+   - Root cause: FastAPI redirects `/api/v1/integrations` to `/api/v1/integrations/`, and the host Next dev rewrite could loop that collection endpoint like the earlier `ai-settings` issue.
+   - Added explicit Next rewrite entries for both slash and non-slash `/api/v1/integrations` collection paths.
+   - Restarted the host Next dev server on port 3002 so Cloudflare Tunnel uses the updated assets and config.
+   - Verification:
+     - `npm run build` passed for the frontend, including Next.js production build and TypeScript.
+     - `npx eslint next.config.ts` passed.
+     - `curl -I https://insightdoc-mini.softnix.ai/integrations/openai.svg` returned `HTTP/2 200`.
+     - `curl -I https://insightdoc-mini.softnix.ai/integrations/n8n.svg` returned `HTTP/2 200`.
+     - `curl -i https://insightdoc-mini.softnix.ai/api/v1/integrations -H 'Authorization: Bearer invalid-token'` now returns `HTTP/2 403` with `{"detail":"Could not validate credentials"}`, confirming it reaches backend instead of redirect-looping/503.
+     - `curl -I https://insightdoc-mini.softnix.ai/integrations` returned `HTTP/2 200`.
+   - Notes:
+     - Targeted lint on `app/(dashboard)/integrations/page.tsx` still reports pre-existing warnings/errors (`any`, hook dependency, no-img-element, and unescaped quotes). These were not introduced by this fix; the production build passes.
+
+8. Follow-up fix for Workflow page API redirect loop
+   - Root cause: FastAPI redirects `/api/v1/workflows` to `/api/v1/workflows/`, and the host Next dev rewrite could loop the workflow collection endpoint, causing the Workflow page to show `Load failed`.
+   - Added explicit Next rewrite entries for both slash and non-slash `/api/v1/workflows` collection paths.
+   - Restarted the host Next dev server on port 3002 so Cloudflare Tunnel uses the updated workflow rewrite.
+   - Verification:
+     - `npm run build` passed for the frontend, including Next.js production build and TypeScript.
+     - `npx eslint next.config.ts` passed.
+     - `curl -i https://insightdoc-mini.softnix.ai/api/v1/workflows -H 'Authorization: Bearer invalid-token'` now returns `HTTP/2 403` with `{"detail":"Could not validate credentials"}`, confirming it reaches backend instead of redirect-looping/503.
+     - `curl -i https://insightdoc-mini.softnix.ai/api/v1/workflows/node-types -H 'Authorization: Bearer invalid-token'` returned `HTTP/2 403`, confirming non-collection workflow endpoints still proxy correctly.
+     - `curl -I https://insightdoc-mini.softnix.ai/workflows` returned `HTTP/2 200`.
+
+9. Follow-up migration for AI Agent tool calls
+   - Added `AgentToolCalls`, a local adapter around Astryx `ChatToolCalls`.
+   - Replaced the custom live and persisted Agent tool-call card rendering in `AgentPanel` with grouped `ChatToolCalls` rendering.
+   - Mapped InsightDOC agent data to Astryx fields:
+     - `status`: `running`, `complete`, or `error`
+     - `target`: output path, file path, query, command, endpoint, document id, or Python code fallback
+     - `node`: tool category such as document, filesystem, code, memory, skill, or integration
+     - `stats`: auto-confirm badge when applicable
+     - `errorMessage`: normalized tool error text
+     - `resultDetail`: arguments/code, result JSON, errors, and download action for generated files
+   - Verification:
+     - `npm run build` passed for the frontend, including Next.js production build and TypeScript.
+     - `npx eslint components/agent/AgentToolCalls.tsx` passed.
+     - Restarted the host Next dev server on port 3002 so Cloudflare Tunnel loads the updated AI Agent UI.
+     - `curl -I https://insightdoc-mini.softnix.ai/jobs/69b4ccdf-3330-4aa1-a3d5-13d7e0799e3f` returned `HTTP/2 200`.
+   - Notes:
+     - Targeted lint on `AgentPanel.tsx` still reports pre-existing `any` usage. The production build passes.
+
+10. Follow-up fix for AI Agent activity visibility during streaming
+   - Root cause: Safari/tunnel streaming can leave the panel on the generic thinking indicator while plan/tool activity is already persisted in backend message history.
+   - Added a lightweight refresh loop while an Agent response is streaming so persisted `plan`, assistant `tool_calls`, and `tool` results are pulled into the panel every 1.2 seconds.
+   - This keeps Astryx `ChatToolCalls` visible during processing even if live SSE chunks are delayed or missed, and still reconciles with authoritative history after `done`.
+   - Verification:
+     - `npm run build` passed for the frontend, including Next.js production build and TypeScript.
+     - `npx eslint components/agent/AgentToolCalls.tsx` passed.
+     - Restarted the host Next dev server on port 3002 so Cloudflare Tunnel loads the updated activity refresh behavior.
+     - `curl -I https://insightdoc-mini.softnix.ai/jobs/543fba80-fdf9-4a46-aba0-77bf9d584d50` returned `HTTP/2 200`.
+
+11. Follow-up fix for Profile API token redirect loop
+   - Root cause: the profile page calls `/api/v1/users/me/api-tokens`, while FastAPI redirects that collection route to `/api/v1/users/me/api-tokens/`; the host Next dev rewrite could loop the redirect and surface as `503` or `too many HTTP redirects`.
+   - Added explicit Next rewrite entries for both slash and non-slash `/api/v1/users/me/api-tokens` collection paths.
+   - Restarted the host Next dev server on port 3002 so Cloudflare Tunnel uses the updated rewrite.
+   - Verification:
+     - `npm run build` passed for the frontend, including Next.js production build and TypeScript.
+     - `npx eslint next.config.ts` passed.
+     - `curl -i https://insightdoc-mini.softnix.ai/api/v1/users/me/api-tokens -H 'Authorization: Bearer invalid-token'` now returns `HTTP/2 403` with `{"detail":"Could not validate credentials"}`, confirming it reaches backend instead of redirect-looping/503.
+     - `curl -I https://insightdoc-mini.softnix.ai/profile` returned `HTTP/2 200`.
+
+12. UX typography pass for Integration page
+   - Increased the Integration page heading and subtitle scale for clearer page hierarchy.
+   - Increased catalog card labels, subtitles, status labels, and Add button text so each integration type is readable at dashboard distance.
+   - Increased Connected list titles, descriptions, type chips, and empty-state text; descriptions now use a two-line clamp instead of single-line truncation.
+   - Slightly improved sidebar nav contrast and weight for better scanability without increasing sidebar width.
+   - Verification:
+     - `npm run build` passed for the frontend, including Next.js production build and TypeScript.
+     - Targeted `npx eslint app/(dashboard)/integrations/page.tsx app/(dashboard)/layout.tsx` still reports pre-existing issues in the Integration file (`any`, hook dependency, no-img-element, and one existing layout eslint-disable warning). The production build passes.
+
+13. AI Agent start screen mission composer
+   - Replaced the small empty-state prompt cards with a centered mission composer for Agent DOC.
+   - Added a larger textarea, welcome copy, send control, Skill/Act/Thinking action row, and document-aware prompt suggestions.
+   - Connected the first message flow so typing in the start composer creates a conversation automatically before sending.
+   - Reused the existing "ยืนยันอัตโนมัติ" confirmation logic for the new Act control.
+   - Added an in-context warning when Act is enabled, clarifying that destructive actions such as deleting files, approving documents, editing fields, and sending APIs are auto-approved for the current session.
+   - Verification:
+     - `npm run build` passed for the frontend, including Next.js production build and TypeScript.
+     - Targeted `npx eslint components/agent/AgentPanel.tsx` still reports pre-existing `any` usage in the file. The production build passes.
+
+14. Job Send to Integration modal UX pass
+   - Added optional `width` and `bodyClassName` props to the shared `Modal` component while preserving existing defaults.
+   - Reworked the job detail "Select Integration" modal with a wider layout, stronger header summary, scroll-bounded integration list, clearer selected state, integration type icons, empty state, status message styling, and a structured footer.
+   - The footer now shows the selected destination and action context before sending reviewed document data.
+   - Verification:
+     - `npm run build` passed for the frontend, including Next.js production build and TypeScript.
+     - Targeted `npx eslint app/(dashboard)/jobs/[id]/page.tsx components/ui/modal.tsx` still reports pre-existing issues in the job detail file (`any`, hook dependencies, no-img-element, and unused variables). The production build passes.
+
+15. AI Agent start composer affordance cleanup
+   - Replaced the ambiguous plus button in the start composer with an explicit `Skill` action using the Sparkles icon.
+   - Changed the Skill Library action to use the Library icon instead of a generic settings icon.
+   - Removed the non-functional `Thinking` control from the start composer action row.
+   - Shortened the welcome helper text, textarea placeholder, and prompt suggestion descriptions to reduce visual noise.
+   - Verification:
+     - `npm run build` passed for the frontend, including Next.js production build and TypeScript.
+     - Targeted `npx eslint components/agent/AgentPanel.tsx` still reports pre-existing `any` usage in the file. The production build passes.
+
+16. AI Agent start composer Skill picker
+   - Changed the start composer `Skill` action from inserting only `/` to opening a selectable skill picker.
+   - The picker shows existing skills, supports `/`-based filtering from the textarea, and fills `ใช้ skill <name>` when a skill is selected.
+   - Added empty and no-match states, including a shortcut to open Skill Library when no skills are available.
+   - Verification:
+     - `npm run build` passed for the frontend, including Next.js production build and TypeScript.
+     - Targeted `npx eslint components/agent/AgentPanel.tsx` still reports pre-existing `any` usage in the file. The production build passes.

@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Workflow">
+  <rect width="64" height="64" rx="14" fill="#fef2f2"/>
+  <circle cx="18" cy="32" r="8" fill="#ef4444"/>
+  <circle cx="46" cy="18" r="8" fill="#ef4444"/>
+  <circle cx="46" cy="46" r="8" fill="#ef4444"/>
+  <path d="M25 29l14-8M25 35l14 8" stroke="#ef4444" stroke-width="5" stroke-linecap="round"/>
+</svg>

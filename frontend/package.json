@@ -9,6 +9,9 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@astryxdesign/cli": "^0.1.2",
+    "@astryxdesign/core": "^0.1.2",
+    "@astryxdesign/theme-neutral": "^0.1.2",
     "@xyflow/react": "^12.11.0",
     "clsx": "^2.1.1",
     "lucide-react": "^0.555.0",

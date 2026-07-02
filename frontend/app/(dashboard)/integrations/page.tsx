@@ -141,7 +141,7 @@ const CATALOG: {
         type: "workflow",
         label: "Workflow",
         sublabel: "N8N / Webhook",
-        logoUrl: "https://raw.githubusercontent.com/ComposioHQ/open-logos/master/n8n.svg",
+        logoUrl: "/integrations/n8n.svg",
         FallbackIcon: Zap,
         iconBg: "bg-red-50",
         iconColor: "text-red-500",
@@ -151,7 +151,7 @@ const CATALOG: {
         type: "llm",
         label: "LLM Provider",
         sublabel: "OpenAI / Compatible",
-        logoUrl: "https://raw.githubusercontent.com/ComposioHQ/open-logos/master/openai.svg",
+        logoUrl: "/integrations/openai.svg",
         FallbackIcon: Bot,
         iconBg: "bg-emerald-50",
         iconColor: "text-emerald-600",
@@ -161,7 +161,7 @@ const CATALOG: {
         type: "gdrive",
         label: "Google Drive",
         sublabel: "Service Account",
-        logoUrl: "https://raw.githubusercontent.com/ComposioHQ/open-logos/master/googledrive.svg",
+        logoUrl: "/integrations/googledrive.svg",
         FallbackIcon: Cloud,
         iconBg: "bg-blue-50",
         iconColor: "text-blue-500",
@@ -171,7 +171,7 @@ const CATALOG: {
         type: "onedrive",
         label: "OneDrive",
         sublabel: "SharePoint / Azure",
-        logoUrl: "https://raw.githubusercontent.com/ComposioHQ/open-logos/master/onedrive.svg",
+        logoUrl: "/integrations/onedrive.svg",
         FallbackIcon: Cloud,
         iconBg: "bg-sky-50",
         iconColor: "text-sky-500",
@@ -932,8 +932,8 @@ export default function IntegrationsPage() {
             {/* ─── Page header ─── */}
             <div className="flex items-start justify-between gap-4">
                 <div>
-                    <h2 className="text-2xl font-bold tracking-tight">Integrations</h2>
-                    <p className="text-slate-500 text-sm mt-1">Connect outbound channels for the OCR pipeline</p>
+                    <h2 className="text-[1.625rem] font-bold leading-tight text-slate-950">Integrations</h2>
+                    <p className="mt-1.5 text-[0.9375rem] leading-6 text-slate-600">Connect outbound channels for the OCR pipeline</p>
                 </div>
                 {(isAdmin || isManager) && (
                     <Button variant="outline" size="sm" onClick={() => setShowTemplateModal(true)} className="shrink-0">
@@ -957,21 +957,21 @@ export default function IntegrationsPage() {
                             </div>
                             {/* Name */}
                             <div>
-                                <div className="font-semibold text-slate-900 text-sm leading-tight">{cat.label}</div>
-                                <div className="text-xs text-slate-400 mt-0.5">{cat.sublabel}</div>
+                                <div className="text-[0.9375rem] font-semibold leading-snug text-slate-950">{cat.label}</div>
+                                <div className="mt-1 text-[0.8125rem] font-medium leading-5 text-slate-500">{cat.sublabel}</div>
                             </div>
                             {/* Status */}
                             {count > 0 ? (
-                                <span className="inline-flex items-center gap-1 text-xs font-medium bg-green-50 text-green-700 border border-green-200 rounded-full px-2 py-0.5">
+                                <span className="inline-flex items-center gap-1 rounded-full border border-green-200 bg-green-50 px-2.5 py-1 text-[0.8125rem] font-semibold leading-none text-green-700">
                                     <span className="w-1.5 h-1.5 rounded-full bg-green-500 inline-block" />
                                     {activeCount > 0 ? `${activeCount} active` : `${count} paused`}
                                 </span>
                             ) : (
-                                <span className="text-xs text-slate-400">Not connected</span>
+                                <span className="text-[0.8125rem] font-medium leading-none text-slate-500">Not connected</span>
                             )}
                             {/* Add button */}
                             {(isAdmin || isManager) && (
-                                <Button size="sm" variant="outline" className="w-full text-xs h-8" onClick={() => openCreate(cat.type)}>
+                                <Button size="sm" variant="outline" className="h-9 w-full text-[0.8125rem]" onClick={() => openCreate(cat.type)}>
                                     <Plus className="h-3 w-3 mr-1" />
                                     Add
                                 </Button>
@@ -984,12 +984,12 @@ export default function IntegrationsPage() {
             {/* ─── Connected integrations list ─── */}
             {integrations.length > 0 && (
                 <div className="space-y-3">
-                    <h3 className="text-sm font-semibold text-slate-500 uppercase tracking-wide">Connected ({integrations.length})</h3>
+                    <h3 className="text-[0.8125rem] font-bold uppercase tracking-[0.08em] text-slate-600">Connected ({integrations.length})</h3>
                     {integrations.map((integration) => {
                         const cat = CATALOG.find(c => c.type === integration.type)
                         return (
                             <div key={integration.id} className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
-                                <div className="flex items-center gap-4 p-4">
+                                <div className="flex items-center gap-4 p-4 md:p-5">
                                     {/* Small logo */}
                                     <div className={`w-10 h-10 rounded-xl ${cat?.iconBg || "bg-slate-100"} flex items-center justify-center shrink-0`}>
                                         <LogoImage src={cat?.logoUrl || null} alt={cat?.label || integration.type}
@@ -998,23 +998,23 @@ export default function IntegrationsPage() {
                                     {/* Info */}
                                     <button type="button" className="flex-1 text-left min-w-0" onClick={() => toggleIntegrationDetails(integration.id)}>
                                         <div className="flex items-center gap-2 flex-wrap">
-                                            <span className="font-semibold text-slate-900 text-sm">{integration.name}</span>
-                                            <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${integration.status === "active" ? "bg-green-100 text-green-700" : "bg-amber-100 text-amber-700"}`}>
+                                            <span className="text-[0.9375rem] font-semibold leading-5 text-slate-950">{integration.name}</span>
+                                            <span className={`rounded-full px-2.5 py-1 text-[0.75rem] font-semibold leading-none ${integration.status === "active" ? "bg-green-100 text-green-700" : "bg-amber-100 text-amber-700"}`}>
                                                 {integration.status === "active" ? "Active" : "Paused"}
                                             </span>
                                         </div>
                                         {integration.description && (
-                                            <p className="text-xs text-slate-500 mt-0.5 truncate">{integration.description}</p>
+                                            <p className="mt-1 text-[0.8125rem] font-medium leading-5 text-slate-600 line-clamp-2">{integration.description}</p>
                                         )}
                                     </button>
                                     {/* Type chip */}
-                                    <span className="hidden sm:inline-flex text-xs text-slate-500 bg-slate-100 px-2 py-1 rounded-lg shrink-0">
+                                    <span className="hidden sm:inline-flex shrink-0 rounded-lg bg-slate-100 px-2.5 py-1 text-[0.8125rem] font-semibold leading-none text-slate-600">
                                         {cat?.label || integration.type}
                                     </span>
                                     {/* Actions */}
                                     <div className="flex items-center gap-1 shrink-0">
                                         {isUser ? (
-                                            <span className="flex items-center gap-1 text-slate-400 text-xs"><Eye className="h-3.5 w-3.5" />View only</span>
+                                            <span className="flex items-center gap-1 text-[0.8125rem] font-medium text-slate-500"><Eye className="h-3.5 w-3.5" />View only</span>
                                         ) : (isAdmin || (isManager && integration.user_id === user?.id)) ? (
                                             <>
                                                 <Button variant="ghost" size="sm" className="h-8 w-8 p-0" onClick={() => openEdit(integration)}>
@@ -1045,8 +1045,8 @@ export default function IntegrationsPage() {
             {integrations.length === 0 && !loading && (
                 <div className="text-center py-16 text-slate-400">
                     <Plug className="h-10 w-10 mx-auto mb-3 opacity-30" />
-                    <p className="text-sm">No integrations connected yet</p>
-                    {(isAdmin || isManager) && <p className="text-xs mt-1">Click "+ Add" on any card above to get started</p>}
+                    <p className="text-[0.9375rem] font-semibold text-slate-500">No integrations connected yet</p>
+                    {(isAdmin || isManager) && <p className="mt-1 text-[0.8125rem] text-slate-500">Click &quot;+ Add&quot; on any card above to get started</p>}
                 </div>
             )}
 

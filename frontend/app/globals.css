@@ -1,4 +1,14 @@
-@import "tailwindcss";
+@layer reset, theme, base, astryx-base, astryx-theme, components, utilities;
+
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/preflight.css" layer(reset);
+
+@import "@astryxdesign/core/reset.css";
+@import "@astryxdesign/core/astryx.css";
+@import "@astryxdesign/theme-neutral/theme.css";
+@import "@astryxdesign/core/tailwind-theme.css";
+
+@import "tailwindcss/utilities.css" layer(utilities);
 
 /* ─── Softnix Design System Tokens ──────────────────────────────────────── */
 
@@ -75,6 +85,10 @@ body {
   font-weight: 500;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+}
+
+*, ::before, ::after {
+  border-color: var(--hairline-gray);
 }
 
 /* Override browser default 400-weight paragraphs/spans */

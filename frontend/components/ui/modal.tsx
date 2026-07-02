@@ -1,36 +1,49 @@
 import * as React from "react"
 import { X } from "lucide-react"
-import { Button } from "@/components/ui/button"
+import { Dialog } from "@astryxdesign/core/Dialog"
 
 interface ModalProps {
     isOpen: boolean
     onClose: () => void
     title: string
     children: React.ReactNode
+    width?: string
+    bodyClassName?: string
 }
 
-export function Modal({ isOpen, onClose, title, children }: ModalProps) {
-    if (!isOpen) return null
-
+export function Modal({
+    isOpen,
+    onClose,
+    title,
+    children,
+    width = "min(42rem, calc(100vw - 2rem))",
+    bodyClassName = "p-6",
+}: ModalProps) {
     return (
-        <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/50 backdrop-blur-sm overflow-y-auto">
-            <div className="relative w-full max-w-2xl rounded-lg border bg-white p-6 shadow-lg sm:rounded-xl my-8 max-h-[calc(100vh-4rem)] overflow-y-auto">
-                <div className="sticky top-0 flex items-center justify-between mb-4 bg-white">
-                    <h3 className="text-lg font-semibold leading-none tracking-tight">
-                        {title}
-                    </h3>
-                    <Button
-                        variant="ghost"
-                        size="icon"
-                        className="h-6 w-6 rounded-full p-0"
+        <Dialog
+            isOpen={isOpen}
+            onOpenChange={(open) => {
+                if (!open) onClose()
+            }}
+            purpose="info"
+            width={width}
+            maxHeight="calc(100vh - 4rem)"
+            padding={0}
+        >
+            <div className="max-h-[calc(100vh-4rem)] overflow-y-auto bg-white text-[#0D1B2A]">
+                <div className="flex items-start justify-between gap-4 border-b border-[#E2E8F0] px-6 py-5">
+                    <h2 className="text-[1.125rem] font-semibold leading-6 text-[#0D1B2A]">{title}</h2>
+                    <button
+                        type="button"
                         onClick={onClose}
+                        className="-mr-2 -mt-1 flex h-9 w-9 items-center justify-center rounded-full text-[#778DA9] transition-colors hover:bg-[#F8F9FA] hover:text-[#0D1B2A] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2786C2]"
+                        aria-label="Close"
                     >
-                        <X className="h-4 w-4" />
-                        <span className="sr-only">Close</span>
-                    </Button>
+                        <X className="h-5 w-5" />
+                    </button>
                 </div>
-                <div>{children}</div>
+                <div className={bodyClassName}>{children}</div>
             </div>
-        </div>
+        </Dialog>
     )
 }

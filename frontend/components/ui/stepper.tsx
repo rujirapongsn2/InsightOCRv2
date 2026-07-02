@@ -1,5 +1,6 @@
 import { Check } from "lucide-react"
 import { WizardStep } from "@/types/schema"
+import { cn } from "@/lib/utils"
 
 interface Step {
   number: WizardStep
@@ -24,51 +25,52 @@ export function Stepper({ steps, currentStep, completedSteps = [] }: StepperProp
 
           return (
             <li key={step.number} className="relative flex-1">
-              {/* Connecting line */}
               {index < steps.length - 1 && (
                 <div
-                  className={`absolute top-5 left-1/2 w-full h-0.5 ${
-                    isPast || isCompleted ? "bg-blue-600" : "bg-slate-200"
-                  }`}
+                  className={cn(
+                    "absolute left-1/2 top-5 h-0.5 w-full",
+                    isPast || isCompleted ? "bg-[#2786C2]" : "bg-[#E0E1DD]"
+                  )}
                   style={{ transform: "translateX(50%)" }}
                 />
               )}
 
-              {/* Step indicator */}
               <div className="relative flex flex-col items-center group">
                 <div
-                  className={`relative z-10 flex items-center justify-center w-10 h-10 rounded-full border-2 ${
+                  className={cn(
+                    "relative z-10 flex h-10 w-10 items-center justify-center rounded-full border-2 bg-white transition-colors",
                     isCompleted || isPast
-                      ? "bg-blue-600 border-blue-600"
+                      ? "border-[#2786C2] bg-[#2786C2]"
                       : isCurrent
-                      ? "bg-white border-blue-600"
-                      : "bg-white border-slate-300"
-                  }`}
+                        ? "border-[#2786C2]"
+                        : "border-[#E0E1DD]"
+                  )}
                 >
                   {isCompleted || isPast ? (
                     <Check className="h-5 w-5 text-white" />
                   ) : (
                     <span
-                      className={`text-sm font-semibold ${
-                        isCurrent ? "text-blue-600" : "text-slate-500"
-                      }`}
+                      className={cn(
+                        "text-sm font-semibold",
+                        isCurrent ? "text-[#2786C2]" : "text-[#778DA9]"
+                      )}
                     >
                       {step.number}
                     </span>
                   )}
                 </div>
 
-                {/* Step label */}
                 <div className="mt-2 text-center">
                   <span
-                    className={`text-sm font-medium ${
-                      isCurrent ? "text-blue-600" : "text-slate-700"
-                    }`}
+                    className={cn(
+                      "text-sm font-medium",
+                      isCurrent ? "text-[#2786C2]" : "text-[#415A77]"
+                    )}
                   >
                     {step.title}
                   </span>
                   {step.description && (
-                    <p className="text-xs text-slate-500 mt-0.5 max-w-[120px]">
+                    <p className="mt-0.5 max-w-[120px] text-xs text-[#778DA9]">
                       {step.description}
                     </p>
                   )}

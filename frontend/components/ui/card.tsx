@@ -1,13 +1,15 @@
 import * as React from "react"
+import { Card as AstryxCard } from "@astryxdesign/core/Card"
 import { cn } from "@/lib/utils"
 
 // Softnix: Canvas White bg, Hairline Gray border, no default shadow (shadow via className override)
 const Card = React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement>>(
     ({ className, ...props }, ref) => (
-        <div
+        <AstryxCard
             ref={ref}
+            padding={0}
             className={cn(
-                "rounded-[14px] border border-[#E2E8F0] bg-white text-[#0D1B2A]",
+                "text-[#0D1B2A]",
                 className
             )}
             {...props}

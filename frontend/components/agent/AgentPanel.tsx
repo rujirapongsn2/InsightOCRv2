@@ -1,10 +1,10 @@
 "use client"
 
-import { useState, useEffect, useRef, useCallback } from "react"
-import { X, Plus, Trash2, Bot, ChevronDown, AlertTriangle, Loader2, Brain, Library, Sparkles, ListChecks, Check, Circle, ShieldCheck, ShieldAlert, FileText, GitCompare, CheckCircle2 } from "lucide-react"
+import { useState, useEffect, useRef, useCallback, type KeyboardEvent } from "react"
+import { X, Plus, Trash2, Bot, ChevronDown, AlertTriangle, Loader2, Brain, Library, Sparkles, ListChecks, Check, Circle, ShieldCheck, ShieldAlert, FileText, GitCompare, CheckCircle2, Send } from "lucide-react"
 import { getApiBaseUrl } from "@/lib/api"
 import AgentMessage from "./AgentMessage"
-import ToolCallCard from "./ToolCallCard"
+import AgentToolCalls from "./AgentToolCalls"
 import ConfirmationDialog from "./ConfirmationDialog"
 import ThinkingIndicator from "./ThinkingIndicator"
 import SkillLibrary from "./SkillLibrary"
@@ -110,11 +110,13 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
     const [showConvList, setShowConvList] = useState(false)
     const [showMemories, setShowMemories] = useState(false)
     const [showSkillLibrary, setShowSkillLibrary] = useState(false)
+    const [showStartSkillPicker, setShowStartSkillPicker] = useState(false)
     const [memoryScope, setMemoryScope] = useState<"user" | "job">("user")
     const [memories, setMemories] = useState<AgentMemory[]>([])
     const [loadingMemories, setLoadingMemories] = useState(false)
     const [skills, setSkills] = useState<AgentSkill[]>([])
     const messagesEndRef = useRef<HTMLDivElement>(null)
+    const startInputRef = useRef<HTMLTextAreaElement>(null)
     const apiBase = getApiBaseUrl()
 
     const getToken = () => typeof window !== "undefined" ? localStorage.getItem("token") : null
@@ -156,6 +158,14 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
         reloadActiveMessages()
     }, [activeConversation, reloadActiveMessages])
 
+    useEffect(() => {
+        if (!streaming || !activeConversation) return
+        const interval = window.setInterval(() => {
+            reloadActiveMessages()
+        }, 1200)
+        return () => window.clearInterval(interval)
+    }, [activeConversation, reloadActiveMessages, streaming])
+
     const loadMemories = useCallback(async (scope: "user" | "job" = memoryScope) => {
         setLoadingMemories(true)
         try {
@@ -180,7 +190,21 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
 
     useEffect(() => { loadSkills() }, [loadSkills])
 
-    const createConversation = async () => {
+    const enableAutoConfirm = () => {
+        if (autoConfirm) {
+            setAutoConfirm(false)
+            return
+        }
+        const ok = window.confirm(
+            "เปิด 'ยืนยันอัตโนมัติ' แล้ว Agent จะอนุมัติการกระทำที่รุนแรงทั้งหมด\n" +
+            "(ลบไฟล์, อนุมัติเอกสาร, แก้ไข field, ส่ง API) โดยอัตโนมัติ\n" +
+            "ใน session นี้โดยไม่ถามซ้ำอีก\n\n" +
+            "คุณแน่ใจหรือไม่?"
+        )
+        if (ok) setAutoConfirm(true)
+    }
+
+    const createConversation = async (): Promise<Conversation | null> => {
         setError(null)
         try {
             const res = await fetch(`${apiBase}/agent/conversations`, {
@@ -195,11 +219,13 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
                 setEvents([])
                 setShowConvList(false)
                 setError(null)
+                return conv
             } else {
                 const data = await res.json().catch(() => null)
                 setError(data?.detail || `Failed to create conversation (${res.status})`)
             }
         } catch { setError("Failed to create conversation") }
+        return null
     }
 
 
@@ -224,11 +250,21 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
 
     const selectSkill = (skill: AgentSkill) => {
         setInputValue(`ใช้ skill ${skill.name} `)
+        setShowStartSkillPicker(false)
+        window.setTimeout(() => startInputRef.current?.focus(), 0)
     }
 
-    const sendMessage = async () => {
-        if (!inputValue.trim() || !activeConversation || streaming) return
-        const userMsg = resolveOutgoingMessage(inputValue)
+    const sendMessage = async (override?: string) => {
+        const rawInput = override ?? inputValue
+        if (!rawInput.trim() || streaming) return
+        setShowStartSkillPicker(false)
+        let conversationId = activeConversation
+        if (!conversationId) {
+            const conv = await createConversation()
+            if (!conv) return
+            conversationId = conv.id
+        }
+        const userMsg = resolveOutgoingMessage(rawInput)
         setInputValue("")
         setStreaming(true)
         setStreamText("")
@@ -243,7 +279,7 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
         setMessages(prev => [...prev, userMsgObj])
 
         try {
-            const res = await fetch(`${apiBase}/agent/conversations/${activeConversation}/messages`, {
+            const res = await fetch(`${apiBase}/agent/conversations/${conversationId}/messages`, {
                 method: "POST", headers: headers(), body: JSON.stringify({ content: userMsg }),
             })
             if (!res.ok) {
@@ -434,21 +470,19 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
             return renderPlanCard(tr.steps || [], tr.reflection || null, false, msg.id)
         }
         if (msg.role === "assistant" && Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) {
-            return msg.tool_calls.map((toolCall: any, index: number) => {
-                const call = {
+            const calls = msg.tool_calls.map((toolCall: any, index: number) => ({
                     id: toolCall.id || `${msg.id}-${index}`,
                     name: toolCall.function?.name || toolCall.name,
                     arguments: parseToolArguments(toolCall.function?.arguments || toolCall.arguments),
-                }
-                return (
-                    <ToolCallCard
-                        key={`${msg.id}-${call.id}`}
-                        call={call}
-                        result={persistedToolResultsMap[call.id]}
-                        conversationId={activeConversation || undefined}
-                    />
-                )
-            })
+            }))
+            return (
+                <AgentToolCalls
+                    key={msg.id}
+                    calls={calls}
+                    results={persistedToolResultsMap}
+                    conversationId={activeConversation || undefined}
+                />
+            )
         }
         return (
             <AgentMessage
@@ -463,6 +497,50 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
             />
         )
     }
+
+    const showStartComposer = !loading && messages.length === 0 && !streaming
+    const suggestionPrompts = [
+        {
+            icon: FileText,
+            label: "สรุปเอกสารใน job",
+            description: "ประเด็นสำคัญและสถานะ",
+            prompt: "ช่วยสรุปเอกสารทั้งหมดใน job นี้ พร้อมระบุเอกสารที่ review แล้วและประเด็นสำคัญที่ควรตรวจต่อ",
+        },
+        {
+            icon: GitCompare,
+            label: "เปรียบเทียบข้อมูล",
+            description: "หาความไม่สอดคล้อง",
+            prompt: "ช่วยเปรียบเทียบข้อมูลระหว่างเอกสารใน job นี้ และสรุปความแตกต่างหรือข้อมูลที่ไม่สอดคล้องกัน",
+        },
+        {
+            icon: CheckCircle2,
+            label: "ตรวจความถูกต้องก่อนส่ง",
+            description: "เช็ก field ก่อนส่ง",
+            prompt: "ช่วยตรวจสอบความถูกต้องของ field ที่ดึงจากเอกสารใน job นี้ก่อนส่งไป integration พร้อมแนะนำรายการที่ควรแก้ไข",
+        },
+        {
+            icon: Sparkles,
+            label: "เตรียม workflow/API",
+            description: "เตรียมข้อมูลปลายทาง",
+            prompt: "ช่วยวางแผนส่งข้อมูลจาก job นี้ไป integration โดยตรวจความพร้อมก่อน และระบุ action ที่ต้องทำทีละขั้น",
+        },
+    ]
+
+    const applySuggestion = (prompt: string) => {
+        setInputValue(prompt)
+        setShowStartSkillPicker(false)
+        window.setTimeout(() => startInputRef.current?.focus(), 0)
+    }
+
+    const handleStartKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+        if (e.key === "Enter" && !e.shiftKey) {
+            e.preventDefault()
+            sendMessage()
+        }
+    }
+
+    const startSkillPickerVisible = showStartComposer && (showStartSkillPicker || slashCommand)
+    const startSkillOptions = slashCommand ? filteredSkills : skills.slice(0, 8)
 
     return (
         <div className={
@@ -488,19 +566,7 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
                     </button>
                     <div className="w-px h-4 bg-white/20 mx-0.5" />
                     <button
-                        onClick={() => {
-                            if (autoConfirm) {
-                                setAutoConfirm(false)
-                                return
-                            }
-                            const ok = window.confirm(
-                                "เปิด 'ยืนยันอัตโนมัติ' แล้ว Agent จะอนุมัติการกระทำที่รุนแรงทั้งหมด\n" +
-                                "(ลบไฟล์, อนุมัติเอกสาร, แก้ไข field, ส่ง API) โดยอัตโนมัติ\n" +
-                                "ใน session นี้โดยไม่ถามซ้ำอีก\n\n" +
-                                "คุณแน่ใจหรือไม่?"
-                            )
-                            if (ok) setAutoConfirm(true)
-                        }}
+                        onClick={enableAutoConfirm}
                         className={`text-xs px-2 py-1 rounded flex items-center gap-1 transition-colors ${
                             autoConfirm
                                 ? "bg-amber-500/30 text-amber-200 ring-1 ring-amber-400/50"
@@ -592,68 +658,179 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
             {/* Messages */}
             <div className="flex-1 overflow-y-auto py-4 space-y-3">
                 {loading && <div className="flex justify-center py-8"><Loader2 className="h-5 w-5 animate-spin text-mute-gray" /></div>}
-                {!activeConversation && !loading && (
-                    <div className="text-center py-12 px-6 text-slate-gray">
-                        <Bot className="h-10 w-10 mx-auto mb-3 text-mute-gray" />
-                        <p className="text-sm font-medium">Agent DOC</p>
-                        <p className="text-xs mt-1">Create a conversation to start</p>
-                        <button onClick={createConversation} className="mt-4 px-4 py-2 bg-softnix-blue text-white text-sm rounded-lg hover:bg-softnix-deep">
-                            <Plus className="h-4 w-4 inline mr-1" />New Conversation
-                        </button>
-                    </div>
-                )}
-                {messages.length === 0 && !streaming && (
-                    <div className="flex-1 min-h-[50vh] flex flex-col items-center justify-center px-4 text-center">
-                        <div className="h-12 w-12 rounded-full bg-gradient-to-br from-softnix-blue to-softnix-deep flex items-center justify-center mb-3">
-                            <Bot className="h-6 w-6 text-white" />
-                        </div>
-                        <h3 className="text-sm font-semibold text-charcoal mb-1">สวัสดีครับ ผมพร้อมช่วยคุณ</h3>
-                        <p className="text-xs text-mute-gray mb-4">เลือกคำสั่งด้านล่าง หรือพิมพ์คำถามของคุณได้เลย</p>
-                        <div className="w-full max-w-md space-y-2">
-                            <button
-                                onClick={() => { setInputValue("ช่วยสรุปเอกสาร"); document.getElementById("agent-input")?.focus() }}
-                                className="w-full flex items-center gap-3 rounded-lg border border-hairline bg-white px-3 py-2.5 text-left text-xs hover:border-softnix-blue hover:bg-blue-50/30 transition-colors"
-                            >
-                                <FileText className="h-4 w-4 text-softnix-blue flex-shrink-0" />
-                                <div>
-                                    <div className="font-medium text-charcoal">ช่วยสรุปเอกสาร</div>
-                                    <div className="text-mute-gray text-[11px]">สรุปเนื้อหาและจุดสำคัญของเอกสาร</div>
+                {showStartComposer && (
+                    <div className="flex min-h-[58vh] items-center justify-center px-5 py-8">
+                        <div className="w-full max-w-3xl">
+                            <div className="mb-7">
+                                <div className="mb-3 flex items-center justify-center gap-2 text-[0.9375rem] font-semibold text-softnix-deep">
+                                    <Sparkles className="h-4 w-4" />
+                                    Softnix Agent DOC
                                 </div>
-                            </button>
-                            <button
-                                onClick={() => { setInputValue("ช่วยเปรียบเทียบ"); document.getElementById("agent-input")?.focus() }}
-                                className="w-full flex items-center gap-3 rounded-lg border border-hairline bg-white px-3 py-2.5 text-left text-xs hover:border-softnix-blue hover:bg-blue-50/30 transition-colors"
-                            >
-                                <GitCompare className="h-4 w-4 text-softnix-blue flex-shrink-0" />
-                                <div>
-                                    <div className="font-medium text-charcoal">ช่วยเปรียบเทียบ</div>
-                                    <div className="text-mute-gray text-[11px]">เปรียบเทียบข้อมูลระหว่างเอกสารใน job</div>
+                                <h3 className="text-center text-[2rem] font-semibold leading-tight text-ink-navy">
+                                    วันนี้ให้ Agent ช่วยจัดการอะไรดี?
+                                </h3>
+                                <p className="mx-auto mt-3 max-w-xl text-center text-[0.9375rem] leading-6 text-slate-gray">
+                                    พิมพ์ภารกิจหรือเลือกตัวอย่างด้านล่าง
+                                </p>
+                            </div>
+
+                            <div className="rounded-[24px] border border-hairline bg-white shadow-[0_18px_45px_rgba(13,27,42,0.10)]">
+                                <textarea
+                                    ref={startInputRef}
+                                    value={inputValue}
+                                    onChange={(e) => {
+                                        const next = e.target.value
+                                        setInputValue(next)
+                                        if (next.trimStart().startsWith("/")) setShowStartSkillPicker(true)
+                                    }}
+                                    onKeyDown={handleStartKeyDown}
+                                    placeholder="เช่น ตรวจใบเสร็จที่ review แล้ว และเตรียมข้อมูลสำหรับส่ง integration"
+                                    disabled={streaming}
+                                    maxLength={10000}
+                                    rows={5}
+                                    className="min-h-[148px] w-full resize-none rounded-t-[24px] px-6 py-5 text-[1rem] leading-7 text-ink-navy placeholder:text-slate-400 focus:outline-none disabled:opacity-50"
+                                />
+                                {autoConfirm && (
+                                    <div className="mx-4 mb-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-left">
+                                        <div className="flex items-start gap-2">
+                                            <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
+                                            <p className="text-[0.8125rem] leading-5 text-amber-800">
+                                                Act เปิดอยู่: Agent จะอนุมัติการลบไฟล์ อนุมัติเอกสาร แก้ไข field และส่ง API ใน session นี้โดยไม่ถามซ้ำ
+                                            </p>
+                                        </div>
+                                    </div>
+                                )}
+                                <div className="flex flex-wrap items-center gap-2 border-t border-hairline px-4 py-3">
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            setShowStartSkillPicker(prev => !prev)
+                                            window.setTimeout(() => startInputRef.current?.focus(), 0)
+                                        }}
+                                        className="inline-flex h-9 items-center gap-2 rounded-full bg-off-white px-3 text-[0.875rem] font-semibold text-charcoal transition-colors hover:bg-[#EBF4FB] hover:text-softnix-deep"
+                                        title="เลือก Skill"
+                                    >
+                                        <Sparkles className="h-4 w-4" />
+                                        Skill
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => setShowSkillLibrary(true)}
+                                        className="flex h-9 w-9 items-center justify-center rounded-full text-charcoal transition-colors hover:bg-off-white"
+                                        title="Skill Library"
+                                    >
+                                        <Library className="h-4 w-4" />
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={enableAutoConfirm}
+                                        className={`inline-flex h-9 items-center gap-2 rounded-full px-3 text-[0.875rem] font-semibold transition-colors ${
+                                            autoConfirm
+                                                ? "bg-amber-100 text-amber-800 ring-1 ring-amber-300"
+                                                : "bg-off-white text-charcoal hover:bg-[#EBF4FB] hover:text-softnix-deep"
+                                        }`}
+                                    >
+                                        {autoConfirm ? <ShieldAlert className="h-4 w-4" /> : <ShieldCheck className="h-4 w-4" />}
+                                        Act
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => sendMessage()}
+                                        disabled={!inputValue.trim() || streaming}
+                                        className="ml-auto flex h-11 w-11 items-center justify-center rounded-full bg-softnix-blue text-white shadow-sm transition-colors hover:bg-softnix-deep disabled:cursor-not-allowed disabled:opacity-40"
+                                        title="ส่งข้อความ"
+                                    >
+                                        {streaming ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+                                    </button>
                                 </div>
-                            </button>
-                            <button
-                                onClick={() => { setInputValue("ช่วยตรวจสอบความถูกต้องตามเงื่อนไข"); document.getElementById("agent-input")?.focus() }}
-                                className="w-full flex items-center gap-3 rounded-lg border border-hairline bg-white px-3 py-2.5 text-left text-xs hover:border-softnix-blue hover:bg-blue-50/30 transition-colors"
-                            >
-                                <CheckCircle2 className="h-4 w-4 text-softnix-blue flex-shrink-0" />
-                                <div>
-                                    <div className="font-medium text-charcoal">ช่วยตรวจสอบความถูกต้องตามเงื่อนไข</div>
-                                    <div className="text-mute-gray text-[11px]">ตรวจสอบข้อมูลเอกสารว่าถูกต้องตามเงื่อนไขที่กำหนด</div>
-                                </div>
-                            </button>
+                                {startSkillPickerVisible && (
+                                    <div className="border-t border-hairline bg-[#F7FBFE] px-4 py-3">
+                                        <div className="mb-2 flex items-center justify-between gap-3">
+                                            <div className="flex items-center gap-2 text-[0.8125rem] font-semibold text-softnix-deep">
+                                                <Sparkles className="h-3.5 w-3.5" />
+                                                เลือก Skill
+                                            </div>
+                                            <button
+                                                type="button"
+                                                onClick={() => setShowStartSkillPicker(false)}
+                                                className="text-[0.75rem] font-medium text-slate-gray hover:text-ink-navy"
+                                            >
+                                                ปิด
+                                            </button>
+                                        </div>
+                                        {skills.length === 0 ? (
+                                            <div className="rounded-xl border border-dashed border-hairline bg-white px-4 py-4 text-center">
+                                                <p className="text-[0.8125rem] font-semibold text-charcoal">ยังไม่มี Skill ให้เลือก</p>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setShowSkillLibrary(true)}
+                                                    className="mt-2 text-[0.8125rem] font-semibold text-softnix-blue hover:text-softnix-deep"
+                                                >
+                                                    เปิด Skill Library
+                                                </button>
+                                            </div>
+                                        ) : startSkillOptions.length > 0 ? (
+                                            <div className="max-h-56 overflow-y-auto rounded-xl border border-softnix-blue/20 bg-white shadow-sm">
+                                                {startSkillOptions.map(skill => (
+                                                    <button
+                                                        key={skill.id}
+                                                        type="button"
+                                                        onClick={() => selectSkill(skill)}
+                                                        className="w-full border-b border-softnix-blue/10 px-3 py-2.5 text-left transition-colors last:border-b-0 hover:bg-[#F0F8FD]"
+                                                    >
+                                                        <div className="flex items-center justify-between gap-2">
+                                                            <code className="truncate text-[0.8125rem] font-semibold text-softnix-deep">/{skill.name}</code>
+                                                            <span className="shrink-0 rounded-full bg-slate-100 px-2 py-0.5 text-[0.625rem] font-bold uppercase tracking-wide text-slate-gray">{skill.scope}</span>
+                                                        </div>
+                                                        {skill.description && (
+                                                            <p className="mt-1 line-clamp-1 text-[0.75rem] leading-5 text-slate-gray">{skill.description}</p>
+                                                        )}
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        ) : (
+                                            <div className="rounded-xl border border-hairline bg-white px-4 py-3 text-[0.8125rem] text-slate-gray">
+                                                ไม่พบ Skill ที่ตรงกับคำค้น
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+                            </div>
+
+                            <div className="mt-7 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                                {suggestionPrompts.map(item => {
+                                    const Icon = item.icon
+                                    return (
+                                        <button
+                                            key={item.label}
+                                            type="button"
+                                            onClick={() => applySuggestion(item.prompt)}
+                                            className="group flex items-start gap-3 rounded-xl px-3 py-3 text-left transition-colors hover:bg-white hover:shadow-sm"
+                                        >
+                                            <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[#EBF4FB] text-softnix-blue transition-colors group-hover:bg-softnix-blue group-hover:text-white">
+                                                <Icon className="h-4 w-4" />
+                                            </span>
+                                            <span className="min-w-0">
+                                                <span className="block text-[0.9375rem] font-semibold leading-5 text-ink-navy">{item.label}</span>
+                                                <span className="mt-0.5 block text-[0.8125rem] leading-5 text-slate-gray">{item.description}</span>
+                                            </span>
+                                        </button>
+                                    )
+                                })}
+                            </div>
                         </div>
                     </div>
                 )}
                 {messages.map(msg => renderPersistedMessage(msg))}
                 {streaming && planSteps.length > 0 && renderPlanCard(planSteps, reflection, true, "live-plan")}
-                {events.filter(e => e.type === "tool_call").map(evt => (
-                    <ToolCallCard
-                        key={evt.id}
-                        call={evt}
-                        result={toolResultsMap[evt.id!]}
+                {events.filter(e => e.type === "tool_call").length > 0 && (
+                    <AgentToolCalls
+                        calls={events.filter(e => e.type === "tool_call")}
+                        results={toolResultsMap}
                         conversationId={activeConversation || undefined}
-                        autoConfirmed={evt.id ? autoConfirmedIds.has(evt.id) : false}
+                        autoConfirmedIds={autoConfirmedIds}
                     />
-                ))}
+                )}
                 {streaming && !streamText && events.filter(e => e.type === "tool_call").length === 0 && (
                     <ThinkingIndicator iteration={thinkingIteration} />
                 )}
@@ -691,7 +868,7 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
             {pendingAction && <ConfirmationDialog action={pendingAction} onConfirm={() => confirmAction(true)} onReject={() => confirmAction(false)} />}
 
             {/* Input */}
-            {activeConversation && slashCommand && (
+            {activeConversation && !showStartComposer && slashCommand && (
                 <div className="border-t border-hairline bg-white px-3 pt-3">
                     <div className="rounded-lg border border-softnix-blue/20 bg-[#F7FBFE] shadow-sm overflow-hidden">
                         <div className="flex items-center gap-2 px-3 py-2 text-xs font-medium text-softnix-deep border-b border-softnix-blue/10">
@@ -716,7 +893,7 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
                     </div>
                 </div>
             )}
-            {activeConversation && (
+            {activeConversation && !showStartComposer && (
                 <ChatInput
                     value={inputValue}
                     onChange={setInputValue}

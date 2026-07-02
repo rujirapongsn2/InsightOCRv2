@@ -3,7 +3,7 @@
 import { useEffect, useState, useRef, useMemo } from "react"
 import { useParams, useRouter } from "next/navigation"
 import Link from "next/link"
-import { ArrowLeft, Upload, FileText, Loader2, Eye, X, Trash2, AlertTriangle, Bot, ChevronDown, Pencil, Check } from "lucide-react"
+import { ArrowLeft, Upload, FileText, Loader2, Eye, X, Trash2, AlertTriangle, Bot, ChevronDown, Pencil, Check, Plug, Workflow, Cloud, Send } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Modal } from "@/components/ui/modal"
 import { Textarea } from "@/components/ui/textarea"
@@ -1003,6 +1003,14 @@ export default function JobDetailPage() {
         reviewed: documents.filter(d => d.status === 'reviewed').length
     }
     const allDocsReviewed = documents.length > 0 && documents.every(d => d.status === "reviewed")
+    const selectedIntegrationDetails = integrations.find(integration => integration.id === selectedIntegration)
+    const integrationTypeMeta: Record<IntegrationType, { label: string; icon: typeof Plug; className: string }> = {
+        api: { label: "Custom API", icon: Plug, className: "bg-slate-100 text-slate-600" },
+        workflow: { label: "Workflow", icon: Workflow, className: "bg-red-50 text-red-600" },
+        llm: { label: "LLM Provider", icon: Bot, className: "bg-emerald-50 text-emerald-700" },
+        gdrive: { label: "Google Drive", icon: Cloud, className: "bg-blue-50 text-blue-600" },
+        onedrive: { label: "OneDrive", icon: Cloud, className: "bg-sky-50 text-sky-600" },
+    }
 
     return (
         <div className="space-y-6">
@@ -1556,53 +1564,125 @@ export default function JobDetailPage() {
                 isOpen={showIntegrationModal}
                 onClose={() => { setShowIntegrationModal(false); setIntegrationMessage(null) }}
                 title="Select Integration"
+                width="min(52rem, calc(100vw - 2rem))"
+                bodyClassName="p-0"
             >
-                <div className="space-y-4">
-                    <p className="text-sm text-slate-600">Send reviewed documents to an integration endpoint.</p>
+                <div className="flex max-h-[calc(100vh-8rem)] flex-col">
+                    <div className="border-b border-slate-100 px-6 py-5">
+                        <p className="text-[0.9375rem] leading-6 text-slate-600">
+                            Send reviewed documents from this job to an active integration endpoint.
+                        </p>
+                        <div className="mt-3 flex flex-wrap gap-2 text-[0.8125rem]">
+                            <span className="rounded-full bg-slate-100 px-2.5 py-1 font-semibold text-slate-600">
+                                Docs: {documents.length}
+                            </span>
+                            <span className="rounded-full bg-purple-50 px-2.5 py-1 font-semibold text-purple-700">
+                                Reviewed: {docCounts.reviewed}
+                            </span>
+                        </div>
+                    </div>
 
-                    <div className="space-y-3 max-h-80 overflow-auto">
-                        {integrations.map((integration) => (
-                            <label
-                                key={integration.id}
-                                className={`border rounded-lg p-3 flex items-start gap-3 cursor-pointer ${selectedIntegration === integration.id ? "border-blue-500 bg-blue-50" : "border-slate-200"}`}
-                            >
-                                <input
-                                    type="radio"
-                                    className="mt-1"
-                                    checked={selectedIntegration === integration.id}
-                                    onChange={() => setSelectedIntegration(integration.id)}
-                                />
-                                <div>
-                                    <div className="flex items-center gap-2">
-                                        <span className="font-semibold">{integration.name}</span>
-                                        <span className="text-xs uppercase px-2 py-0.5 rounded-full bg-slate-100 text-slate-600">{integration.type}</span>
-                                    </div>
-                                    <p className="text-sm text-slate-600">{integration.description}</p>
-                                </div>
-                            </label>
-                        ))}
+                    <div className="min-h-[13rem] flex-1 overflow-y-auto px-6 py-5">
+                        {integrations.length === 0 ? (
+                            <div className="flex min-h-[12rem] flex-col items-center justify-center rounded-xl border border-dashed border-slate-200 bg-slate-50 text-center">
+                                <Plug className="h-8 w-8 text-slate-300" />
+                                <p className="mt-3 text-sm font-semibold text-slate-700">No active integrations</p>
+                                <p className="mt-1 max-w-sm text-xs leading-5 text-slate-500">
+                                    Add or activate an integration before sending reviewed documents.
+                                </p>
+                            </div>
+                        ) : (
+                            <div className="grid grid-cols-1 gap-3">
+                                {integrations.map((integration) => {
+                                    const meta = integrationTypeMeta[integration.type]
+                                    const Icon = meta.icon
+                                    const selected = selectedIntegration === integration.id
+                                    return (
+                                        <label
+                                            key={integration.id}
+                                            className={`group grid cursor-pointer grid-cols-[auto_auto_minmax(0,1fr)] items-start gap-4 rounded-2xl border p-4 transition-all ${
+                                                selected
+                                                    ? "border-softnix-blue bg-[#F0F8FD] shadow-sm ring-1 ring-softnix-blue/20"
+                                                    : "border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50"
+                                            }`}
+                                        >
+                                            <input
+                                                type="radio"
+                                                className="mt-3 h-4 w-4 accent-[#2786C2]"
+                                                checked={selected}
+                                                onChange={() => setSelectedIntegration(integration.id)}
+                                            />
+                                            <span className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl ${meta.className}`}>
+                                                <Icon className="h-5 w-5" />
+                                            </span>
+                                            <span className="min-w-0 flex-1">
+                                                <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                                                    <span className="text-[1rem] font-semibold leading-6 text-slate-950">{integration.name}</span>
+                                                    <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[0.6875rem] font-bold uppercase tracking-wide text-slate-600">
+                                                        {integration.type}
+                                                    </span>
+                                                </span>
+                                                <span className="mt-1.5 block max-w-[42rem] text-[0.875rem] leading-5 text-slate-600">
+                                                    {integration.description || meta.label}
+                                                </span>
+                                            </span>
+                                        </label>
+                                    )
+                                })}
+                            </div>
+                        )}
                     </div>
 
                     {integrationMessage && (
-                        <div className="text-sm text-slate-600">{integrationMessage}</div>
+                        <div className={`mx-6 mb-4 rounded-xl border px-4 py-3 text-sm ${
+                            integrationMessage === "Sent successfully" || integrationMessage === "LLM processing completed"
+                                ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+                                : "border-amber-200 bg-amber-50 text-amber-800"
+                        }`}>
+                            {integrationMessage}
+                        </div>
                     )}
 
-                    <div className="flex justify-end gap-2">
-                        <Button
-                            variant="outline"
-                            onClick={() => {
-                                setShowIntegrationModal(false)
-                                setIntegrationMessage(null)
-                            }}
-                        >
-                            {integrationMessage === "Sent successfully" ? "Close" : "Cancel"}
-                        </Button>
-                        <Button
-                            onClick={handleSendToIntegration}
-                            disabled={!selectedIntegration || sendingIntegration}
-                        >
-                            {sendingIntegration ? "Sending..." : integrationMessage === "Sent successfully" ? "Retry" : "Send"}
-                        </Button>
+                    <div className="flex flex-col gap-3 border-t border-slate-100 bg-slate-50 px-6 py-5 sm:flex-row sm:items-center sm:justify-between">
+                        <div className="min-w-0 text-sm">
+                            <p className="font-semibold text-slate-800">
+                                {selectedIntegrationDetails ? selectedIntegrationDetails.name : "Choose an integration"}
+                            </p>
+                            <p className="mt-0.5 text-xs text-slate-500">
+                                {selectedIntegrationDetails
+                                    ? `${integrationTypeMeta[selectedIntegrationDetails.type].label} will receive reviewed document data.`
+                                    : "Select one active destination before sending."}
+                            </p>
+                        </div>
+                        <div className="flex justify-end gap-2">
+                            <Button
+                                variant="outline"
+                                onClick={() => {
+                                    setShowIntegrationModal(false)
+                                    setIntegrationMessage(null)
+                                }}
+                                className="min-w-[5.5rem]"
+                            >
+                                {integrationMessage === "Sent successfully" ? "Close" : "Cancel"}
+                            </Button>
+                            <Button
+                                onClick={handleSendToIntegration}
+                                disabled={!selectedIntegration || sendingIntegration}
+                                className="min-w-[6.5rem]"
+                            >
+                                {sendingIntegration ? (
+                                    <>
+                                        <Loader2 className="h-4 w-4 animate-spin" />
+                                        Sending
+                                    </>
+                                ) : (
+                                    <>
+                                        <Send className="h-4 w-4" />
+                                        {integrationMessage === "Sent successfully" ? "Retry" : "Send"}
+                                    </>
+                                )}
+                            </Button>
+                        </div>
                     </div>
                 </div>
             </Modal>
