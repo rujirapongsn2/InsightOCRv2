@@ -156,8 +156,16 @@ from app.schemas.integration import (
 from app.crud.crud_integration import integration as crud_integration
 from app.crud.crud_integration_result import integration_result as crud_integration_result
 from app.utils.activity_logger import log_activity, Actions
+from app.utils.redact import redact_secrets, restore_masked_secrets
 
 router = APIRouter()
+
+
+def _masked_response(integration) -> IntegrationResponse:
+    """Serialize an integration without echoing stored credentials."""
+    data = IntegrationResponse.model_validate(integration)
+    data.config = redact_secrets(data.config or {})
+    return data
 
 
 # ============================================================================
@@ -189,13 +197,7 @@ async def get_integrations(
     total = crud_integration.count_all(db=db)
 
     return IntegrationListResponse(
-        integrations=integrations,
-        total=total
-    )
-    total = crud_integration.count_by_user(db=db, user_id=current_user.id)
-
-    return IntegrationListResponse(
-        integrations=integrations,
+        integrations=[_masked_response(i) for i in integrations],
         total=total
     )
 
@@ -207,7 +209,7 @@ async def get_active_integrations(
 ):
     """Get all active integrations (all users can view all integrations)."""
     integrations = crud_integration.get_all_active(db=db)
-    return integrations
+    return [_masked_response(i) for i in integrations]
 
 
 @router.get("/results")
@@ -294,7 +296,7 @@ async def get_integration(
     if not integration:
         raise HTTPException(status_code=404, detail="Integration not found")
 
-    return integration
+    return _masked_response(integration)
 
 
 @router.post("/", response_model=IntegrationResponse, status_code=201)
@@ -331,7 +333,7 @@ async def create_integration(
         }
     )
 
-    return integration
+    return _masked_response(integration)
 
 
 @router.put("/{integration_id}", response_model=IntegrationResponse)
@@ -355,6 +357,13 @@ async def update_integration(
     if not is_admin and existing.user_id != current_user.id:
         raise HTTPException(status_code=403, detail="You can only update your own integrations")
 
+    # A masked credential in the payload means the client echoed back the
+    # redacted GET response unchanged — restore the stored value.
+    if integration_data.config is not None:
+        integration_data.config = restore_masked_secrets(
+            integration_data.config, existing.config or {}
+        )
+
     # Update integration
     updated_integration = crud_integration.update(
         db=db,
@@ -376,7 +385,7 @@ async def update_integration(
         }
     )
 
-    return updated_integration
+    return _masked_response(updated_integration)
 
 
 @router.delete("/{integration_id}", status_code=204)

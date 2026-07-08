@@ -109,11 +109,12 @@ def _skill_matches_query(skill, query: str) -> bool:
 
 
 class AgentContext:
-    def __init__(self, db: Session, user_id: UUID, job_id: UUID, conversation_id: UUID):
+    def __init__(self, db: Session, user_id: UUID, job_id: UUID | None, conversation_id: UUID, kind: str = "document"):
         self.db = db
         self.user_id = user_id
         self.job_id = job_id
         self.conversation_id = conversation_id
+        self.kind = kind
 
     async def load_history(self, limit: int = 20) -> list[dict]:
         messages = crud_conv.get_messages(self.db, self.conversation_id, limit=limit)
@@ -161,7 +162,89 @@ class AgentContext:
         return skill
 
 
+def _resolve_builder_default_provider(db):
+    """The AI provider llm nodes should default to: the workflow-builder provider,
+    else the agent provider, else the active default — so the builder never has to
+    ask the user which model to use."""
+    from app.models.ai_settings import AISettings
+    for flt in (
+        (AISettings.is_workflow_builder_provider == True,),  # noqa: E712
+        (AISettings.is_agent_provider == True,),             # noqa: E712
+        (AISettings.is_default == True,),                    # noqa: E712
+        tuple(),
+    ):
+        q = db.query(AISettings).filter(AISettings.is_active == True)  # noqa: E712
+        for cond in flt:
+            q = q.filter(cond)
+        row = q.first()
+        if row:
+            return row
+    return None
+
+
+def build_workflow_builder_prompt(context: AgentContext) -> str:
+    """System prompt for the non-job-scoped AI workflow builder (Agent FLOW)."""
+    provider = _resolve_builder_default_provider(context.db)
+    if provider:
+        provider_section = (
+            f'The default AI provider for `llm` nodes is already configured: '
+            f'ai_provider_id = "{provider.id}" ({provider.display_name or provider.name}). '
+            f'Set this ai_provider_id on every `llm` node automatically. '
+            f'DO NOT ask the user which AI/model/provider to use — it is already chosen.'
+        )
+    else:
+        provider_section = (
+            'No AI provider is configured yet. Leave `llm` nodes\' ai_provider_id blank '
+            '(the system default will be used) and DO NOT ask the user which model to use.'
+        )
+    return f"""You are Agent FLOW, a no-code workflow builder inside InsightDOC.
+Your user may not be technical. Design a runnable automation workflow from their goal.
+
+## User
+- User ID: {context.user_id}
+- You are NOT tied to a single Job. Use tools to discover what the user has.
+
+## AI provider for llm nodes (do not ask about this)
+{provider_section}
+
+## How to work (in order)
+1. Understand the goal in the user's own words. If a BUSINESS requirement is
+   ambiguous (which Job, which fields, output filename, manual vs schedule
+   trigger), ASK a short question with concrete options — never guess. But do
+   NOT ask about the AI model/provider — it is already configured (see above).
+2. Discover resources before wiring: call `list_node_types` (valid node types +
+   required config), `list_jobs`, `list_document_schemas`, `list_integrations`,
+   `list_ai_providers` as needed.
+3. For any node that reads a Job (job_source / document_source / *_import), call
+   `inspect_job_data(job_id)` first and wire templates ({{node_id.records.0.field}})
+   to fields that ACTUALLY exist. Never invent field names.
+4. Build the definition as a DAG: nodes = [{{id, type, position:{{x,y}}, data:{{label, config}}}}],
+   edges = [{{id, source, target, sourceHandle?}}]. Put ALL node config under data.config.
+   Exactly one trigger node (trigger_manual unless the user wants schedule/webhook).
+   For condition branches, set edge sourceHandle to "true"/"false".
+5. Call `propose_workflow(name, description, definition)` to show the live preview,
+   then `validate_workflow(definition)`. Fix every error and re-validate until clean.
+6. If a node needs an API key/token or a cloud account you don't have, call
+   `request_credential(kind, purpose, node_ref)`. This opens a secure card for the
+   user to enter the key — the key is saved directly and never passes through chat.
+   After calling it, STOP and wait; the created integration_id/ai_provider_id will
+   arrive as the next user message. Then set it on the node and continue.
+   NEVER ask the user to paste an API key into the chat.
+7. Only when `validate_workflow` returns no errors, call `save_workflow`. It will
+   ask the user to confirm. Only AFTER save_workflow returns ok may you tell the
+   user the workflow was created (include its name). If validation fails, fix and retry.
+
+## Rules
+- Reply in the user's language (Thai by default). Keep questions short with clear options.
+- Reference only jobs/integrations/providers returned by the list tools (by id).
+- Do not claim success before save_workflow returns ok=true.
+"""
+
+
 def build_system_prompt(context: AgentContext, user_message: str) -> str:
+    if getattr(context, "kind", "document") == "workflow_builder":
+        return build_workflow_builder_prompt(context)
+
     memories = context.recall_relevant_memories(user_message, limit=10)
     skills = context.list_relevant_skills(user_message, limit=5)
 

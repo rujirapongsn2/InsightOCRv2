@@ -11,9 +11,18 @@ from app.models.setting import Setting
 from app.schemas.setting import Setting as SettingSchema, SettingUpdate
 from app.services.tls import warn_ssl_verification_disabled
 from app.utils.activity_logger import log_activity, Actions
+from app.utils.redact import is_masked, mask_secret
 
 router = APIRouter()
 BUILD_INFO_PATH = Path(__file__).resolve().parents[4] / ".build-info.json"
+
+
+def _setting_response(setting: Setting) -> SettingSchema:
+    """Serialize a Setting without echoing the plaintext api_token."""
+    data = SettingSchema.model_validate(setting)
+    if data.api_token:
+        data.api_token = mask_secret(data.api_token)
+    return data
 
 
 def get_app_commit_sha() -> str | None:
@@ -82,7 +91,7 @@ def get_settings(
         db.refresh(setting)
 
     setattr(setting, "app_commit_sha", get_app_commit_sha())
-    return setting
+    return _setting_response(setting)
 
 
 @router.put("/config", response_model=SettingSchema)
@@ -104,7 +113,10 @@ def update_settings(
     setting.structured_output_endpoint = payload.structured_output_endpoint
     setting.schema_suggestion_endpoint = payload.schema_suggestion_endpoint
     setting.test_endpoint = payload.test_endpoint
-    setting.api_token = payload.api_token
+    # A masked token means the client echoed back the redacted GET response
+    # without changing it — keep the stored token.
+    if not is_masked(payload.api_token):
+        setting.api_token = payload.api_token
     setting.verify_ssl = payload.verify_ssl
 
     # Keep legacy api_endpoint in sync with ocr_endpoint for backward compatibility
@@ -133,7 +145,7 @@ def update_settings(
         }
     )
 
-    return setting
+    return _setting_response(setting)
 
 
 @router.post("/test")

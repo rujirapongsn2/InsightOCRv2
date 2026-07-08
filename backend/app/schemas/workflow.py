@@ -71,6 +71,32 @@ class WorkflowListResponse(BaseModel):
     total: int
 
 
+# ── Export / Import ──────────────────────────────────────────────────
+class WorkflowExport(BaseModel):
+    schema_version: int = 1
+    name: str
+    description: Optional[str] = None
+    schedule_cron: Optional[str] = None
+    schedule_enabled: bool = False
+    definition: Dict[str, Any] = Field(default_factory=dict)
+
+
+class WorkflowImportRequest(WorkflowExport):
+    pass
+
+
+class WorkflowValidationIssue(BaseModel):
+    node_id: str = ""
+    level: str = "error"        # error | warning
+    field: Optional[str] = None
+    message: str
+
+
+class WorkflowImportResponse(BaseModel):
+    workflow: WorkflowResponse
+    warnings: List[WorkflowValidationIssue] = Field(default_factory=list)
+
+
 # ── Runs ─────────────────────────────────────────────────────────────
 class WorkflowRunRequest(BaseModel):
     input: Optional[Dict[str, Any]] = None

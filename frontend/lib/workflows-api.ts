@@ -253,3 +253,63 @@ export interface JobSummary {
 
 export const getJobs = (token: string) =>
   request<JobSummary[]>(token, "/jobs/")
+
+// ── Export / Import ──────────────────────────────────────────────────
+export interface WorkflowExport {
+  schema_version: number
+  name: string
+  description?: string | null
+  schedule_cron?: string | null
+  schedule_enabled: boolean
+  definition: WorkflowDefinition
+}
+
+export interface WorkflowValidationIssue {
+  node_id: string
+  level: "error" | "warning"
+  field?: string | null
+  message: string
+}
+
+export interface WorkflowImportResponse {
+  workflow: Workflow
+  warnings: WorkflowValidationIssue[]
+}
+
+export const exportWorkflow = (token: string, id: string) =>
+  request<WorkflowExport>(token, `/workflows/${id}/export`)
+
+export const importWorkflow = (token: string, payload: WorkflowExport) =>
+  request<WorkflowImportResponse>(token, "/workflows/import", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  })
+
+/** Client-side JSON download of a workflow export (no server round-trip needed). */
+export function downloadWorkflowJson(data: WorkflowExport): void {
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" })
+  const objectUrl = URL.createObjectURL(blob)
+  const link = document.createElement("a")
+  const safeName = (data.name || "workflow").replace(/[^\w\-]+/g, "_")
+  link.href = objectUrl
+  link.download = `${safeName}.workflow.json`
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  URL.revokeObjectURL(objectUrl)
+}
+
+// ── AI workflow builder (agent) ──────────────────────────────────────
+export const createWorkflowConversation = (token: string) =>
+  request<{ id: string; kind: string; max_iterations: number; created_at: string }>(
+    token, "/agent/workflow-conversations", { method: "POST" }
+  )
+
+export const resolveCredential = (
+  token: string,
+  pendingActionId: string,
+  payload: { integration_id?: string | null; ai_provider_id?: string | null; name?: string }
+) => request<{ ok: boolean; result: any }>(token, `/agent/credential/${pendingActionId}`, {
+  method: "POST",
+  body: JSON.stringify(payload),
+})

@@ -26,6 +26,7 @@ from app.schemas.agent import (
     AgentSkillResponse,
     AgentSkillImportRequest,
     ConfirmActionRequest,
+    ResolveCredentialRequest,
 )
 from app.services.storage import get_storage_service
 
@@ -68,7 +69,29 @@ def _get_default_agent_ai_settings(db: Session) -> AISettings:
     return setting
 
 
+def _ai_settings_to_config(setting: AISettings, source: str) -> dict:
+    """Build an llm_config from an AISettings row, honoring provider_type."""
+    provider_type = getattr(setting, "provider_type", None) or "openai_compatible"
+    model = getattr(setting, "model", None) or "gpt-4o-mini"
+    if provider_type == "openai_compatible":
+        return {"provider": "openai_compatible", "apiKey": setting.api_key,
+                "baseUrl": setting.api_url, "model": model, "source": source}
+    return {"provider": "completion_messages", "apiUrl": setting.api_url,
+            "apiKey": setting.api_key, "model": model, "source": source}
+
+
 def _build_agent_llm_config(db: Session, conv) -> dict:
+    # Workflow-builder conversations may use a dedicated (typically more capable)
+    # provider. If none is designated, fall through to the normal agent/default
+    # resolution below — same as the rest of the system.
+    if getattr(conv, "kind", "document") == "workflow_builder":
+        wb = db.query(AISettings).filter(
+            AISettings.is_workflow_builder_provider == True,  # noqa: E712
+            AISettings.is_active == True,  # noqa: E712
+        ).first()
+        if wb and wb.api_url and wb.api_key:
+            return _ai_settings_to_config(wb, "ai_settings_workflow_builder_provider")
+
     if conv.integration_id:
         integration = _ensure_llm_integration(db, conv.integration_id)
         return {
@@ -143,6 +166,20 @@ async def create_agent_conversation(
     }
 
 
+@router.post("/workflow-conversations", status_code=201)
+async def create_workflow_conversation(
+    db: Session = Depends(deps.get_db),
+    current_user=Depends(deps.get_current_user),
+):
+    """Start an AI workflow-builder conversation (not tied to a Job)."""
+    conv = crud_conv.create(db, job_id=None, user_id=current_user.id, kind="workflow_builder", max_iterations=20)
+    return {
+        "id": str(conv.id), "kind": conv.kind, "job_id": None,
+        "title": conv.title, "max_iterations": conv.max_iterations,
+        "created_at": conv.created_at.isoformat(), "message_count": 0,
+    }
+
+
 @router.get("/conversations")
 async def list_agent_conversations(
     job_id: UUID,
@@ -151,7 +188,16 @@ async def list_agent_conversations(
 ):
     _ensure_job_access(db, job_id, current_user)
     convs = crud_conv.get_by_job(db, job_id=job_id, user_id=current_user.id)
-    return [{"id": str(c.id), "job_id": str(c.job_id), "integration_id": str(c.integration_id) if c.integration_id else None, "title": c.title, "max_iterations": c.max_iterations, "created_at": c.created_at.isoformat(), "message_count": len(crud_conv.get_messages(db, c.id, limit=200))} for c in convs]
+    # Single grouped COUNT instead of loading every message per conversation
+    from app.models.agent_message import AgentMessage
+    from sqlalchemy import func as sa_func
+    counts = dict(
+        db.query(AgentMessage.conversation_id, sa_func.count(AgentMessage.id))
+        .filter(AgentMessage.conversation_id.in_([c.id for c in convs]))
+        .group_by(AgentMessage.conversation_id)
+        .all()
+    ) if convs else {}
+    return [{"id": str(c.id), "job_id": str(c.job_id), "integration_id": str(c.integration_id) if c.integration_id else None, "title": c.title, "max_iterations": c.max_iterations, "created_at": c.created_at.isoformat(), "message_count": counts.get(c.id, 0)} for c in convs]
 
 
 @router.get("/memories")
@@ -198,10 +244,11 @@ async def get_agent_conversation(
     conv = crud_conv.get(db, conversation_id)
     if not conv or conv.user_id != current_user.id:
         raise HTTPException(status_code=404)
-    _ensure_job_access(db, conv.job_id, current_user)
+    if conv.job_id is not None:
+        _ensure_job_access(db, conv.job_id, current_user)
     messages = crud_conv.get_messages(db, conversation_id)
     return {
-        "conversation": {"id": str(conv.id), "job_id": str(conv.job_id), "title": conv.title, "max_iterations": conv.max_iterations, "created_at": conv.created_at.isoformat()},
+        "conversation": {"id": str(conv.id), "kind": conv.kind, "job_id": str(conv.job_id) if conv.job_id else None, "title": conv.title, "max_iterations": conv.max_iterations, "created_at": conv.created_at.isoformat()},
         "messages": [{"id": str(m.id), "role": m.role, "content": m.content, "tool_calls": m.tool_calls, "tool_call_id": m.tool_call_id, "tool_name": m.tool_name, "tool_result": m.tool_result, "iteration": m.iteration, "model_used": m.model_used, "created_at": m.created_at.isoformat()} for m in messages],
     }
 
@@ -216,10 +263,11 @@ async def send_agent_message(
     conv = crud_conv.get(db, conversation_id)
     if not conv or conv.user_id != current_user.id:
         raise HTTPException(status_code=404)
-    _ensure_job_access(db, conv.job_id, current_user)
+    if conv.job_id is not None:
+        _ensure_job_access(db, conv.job_id, current_user)
     llm_config = _build_agent_llm_config(db, conv)
 
-    loop = AgentLoop(db=db, conversation_id=conversation_id, user_id=current_user.id, job_id=conv.job_id, llm_config=llm_config, max_iterations=conv.max_iterations)
+    loop = AgentLoop(db=db, conversation_id=conversation_id, user_id=current_user.id, job_id=conv.job_id, llm_config=llm_config, max_iterations=conv.max_iterations, kind=conv.kind or "document")
 
     return StreamingResponse(
         loop.run(data.content),
@@ -242,6 +290,33 @@ async def confirm_pending_action(
         raise HTTPException(status_code=400, detail=f"Action is {action.status}")
     crud_pending.resolve(db, pending_action_id, "confirmed" if data.approved else "rejected")
     return {"ok": True}
+
+
+@router.post("/credential/{pending_action_id}")
+async def resolve_credential_request(
+    pending_action_id: UUID,
+    data: ResolveCredentialRequest,
+    db: Session = Depends(deps.get_db),
+    current_user=Depends(deps.get_current_user),
+):
+    """Record that the user filled the credential card. The key was saved directly
+    to /integrations or /ai-settings by the frontend; only the resulting id arrives
+    here — never the secret. The frontend then sends a normal follow-up message so
+    the agent continues with the id."""
+    action = crud_pending.get(db, pending_action_id)
+    if not action or action.user_id != current_user.id:
+        raise HTTPException(status_code=404)
+    if action.kind != "credential_request":
+        raise HTTPException(status_code=400, detail="Not a credential request")
+    if action.status != "pending":
+        raise HTTPException(status_code=400, detail=f"Action is {action.status}")
+    result = {
+        "integration_id": str(data.integration_id) if data.integration_id else None,
+        "ai_provider_id": str(data.ai_provider_id) if data.ai_provider_id else None,
+        "name": data.name,
+    }
+    crud_pending.resolve_with_result(db, pending_action_id, "confirmed", result)
+    return {"ok": True, "result": result}
 
 
 @router.delete("/conversations/{conversation_id}", status_code=204)

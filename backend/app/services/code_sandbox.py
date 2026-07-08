@@ -353,18 +353,37 @@ print("__SANDBOX_OUTPUT__:" + json.dumps(__output__, ensure_ascii=False, default
             "tmpfs": {"/tmp": f"size={DEFAULT_TMPFS_MB}m,mode=1777,exec"},
             "working_dir": "/tmp",
             "environment": _sandbox_environment(),
-            "remove": True,
-            "stdout": True,
-            "stderr": True,
-            "detach": False,
+            "detach": True,  # detach + wait(timeout) so the timeout is real
         }
         network_name = _sandbox_network_name(client) if allow_network else None
         if network_name:
             run_kwargs["network"] = network_name
 
-        container_output = client.containers.run(**run_kwargs)
-
-        output = container_output.decode("utf-8", errors="replace")
+        # Run detached and enforce the timeout ourselves: a blocking
+        # containers.run() only times out the Docker HTTP client, leaving
+        # the container running (and never removed) on timeout.
+        container = client.containers.run(**run_kwargs)
+        try:
+            exit_info = container.wait(timeout=timeout)
+            output = container.logs(stdout=True, stderr=True).decode(
+                "utf-8", errors="replace"
+            )
+            if exit_info.get("StatusCode", 0) != 0:
+                return {
+                    "error": "Container exited with error",
+                    "stderr": output[-4000:],
+                }
+        except Exception:
+            try:
+                container.kill()
+            except Exception:
+                pass
+            return {"error": f"Sandbox timed out after {timeout}s and was killed"}
+        finally:
+            try:
+                container.remove(force=True)
+            except Exception:
+                pass
 
         result_data: dict[str, Any] = {
             "result": None, "error": None, "files": [], "stdout": output,

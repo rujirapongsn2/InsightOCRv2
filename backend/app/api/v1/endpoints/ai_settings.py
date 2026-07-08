@@ -203,6 +203,39 @@ def unset_agent_provider(
     return {"ok": True}
 
 
+@router.post("/{setting_id}/set-workflow-builder-provider", response_model=AISettingsSchema)
+def set_workflow_builder_provider(
+    setting_id: UUID,
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_active_superuser)
+):
+    """Set this AI provider as the AI workflow builder's LLM backend (admin only)."""
+    db_setting = db.query(AISettings).filter(AISettings.id == setting_id).first()
+    if not db_setting:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="AI setting not found")
+
+    db.query(AISettings).filter(AISettings.id != setting_id).update({"is_workflow_builder_provider": False})
+    db_setting.is_workflow_builder_provider = True
+    db.commit()
+    db.refresh(db_setting)
+    return db_setting
+
+
+@router.delete("/{setting_id}/set-workflow-builder-provider", status_code=status.HTTP_200_OK)
+def unset_workflow_builder_provider(
+    setting_id: UUID,
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_active_superuser)
+):
+    """Unset this provider as workflow builder backend — builder falls back to agent/active default."""
+    db_setting = db.query(AISettings).filter(AISettings.id == setting_id).first()
+    if not db_setting:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="AI setting not found")
+    db_setting.is_workflow_builder_provider = False
+    db.commit()
+    return {"ok": True}
+
+
 @router.post("/test-connection")
 async def test_ai_connection(
     provider_name: Optional[str] = None,

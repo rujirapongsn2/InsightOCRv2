@@ -19,7 +19,7 @@ class Workflow(Base):
     # Scheduling (cron expression, e.g. "*/15 * * * *"); null = manual only
     schedule_cron = Column(String(100), nullable=True)
     schedule_enabled = Column(Boolean, default=False)
-    next_run_at = Column(DateTime(timezone=True), nullable=True)
+    next_run_at = Column(DateTime(timezone=True), nullable=True, index=True)
     last_run_at = Column(DateTime(timezone=True), nullable=True)
 
     # Inbound webhook trigger (secret is only revealed once when generated)
@@ -28,7 +28,7 @@ class Workflow(Base):
     webhook_secret_created_at = Column(DateTime(timezone=True), nullable=True)
     webhook_last_triggered_at = Column(DateTime(timezone=True), nullable=True)
 
-    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True, index=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
@@ -41,8 +41,8 @@ class WorkflowRun(Base):
     __tablename__ = "workflow_runs"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
-    workflow_id = Column(UUID(as_uuid=True), ForeignKey("workflows.id"), nullable=False, index=True)
-    status = Column(String(20), default="queued")  # queued, running, succeeded, failed, cancelled
+    workflow_id = Column(UUID(as_uuid=True), ForeignKey("workflows.id", ondelete="CASCADE"), nullable=False, index=True)
+    status = Column(String(20), default="queued", index=True)  # queued, running, succeeded, failed, cancelled
     trigger_type = Column(String(20), default="manual")  # manual, schedule
     # Optional input payload provided at trigger time
     trigger_input = Column(JSONB, nullable=True)
@@ -55,7 +55,7 @@ class WorkflowRun(Base):
 
     started_at = Column(DateTime(timezone=True), nullable=True)
     finished_at = Column(DateTime(timezone=True), nullable=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
     triggered_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
 
     workflow = relationship("Workflow", back_populates="runs")
@@ -67,7 +67,7 @@ class WorkflowNodeRun(Base):
     __tablename__ = "workflow_node_runs"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
-    run_id = Column(UUID(as_uuid=True), ForeignKey("workflow_runs.id"), nullable=False, index=True)
+    run_id = Column(UUID(as_uuid=True), ForeignKey("workflow_runs.id", ondelete="CASCADE"), nullable=False, index=True)
     node_id = Column(String(100), nullable=False)
     node_type = Column(String(50), nullable=False)
     node_label = Column(String(255), nullable=True)

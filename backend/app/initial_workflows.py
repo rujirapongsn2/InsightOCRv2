@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.db.advisory_lock import advisory_lock
 from app.models.document import Document
 from app.models.job import Job
 from app.models.user import User
@@ -454,49 +454,35 @@ def _sample_workflows(job_id: str) -> List[Dict[str, Any]]:
 
 
 def ensure_sample_workflows(db: Session) -> None:
-    lock_id = 2026063001
-    locked = False
-    try:
-        db.execute(text("SELECT pg_advisory_lock(:lock_id)"), {"lock_id": lock_id})
-        locked = True
+    with advisory_lock(2026063001):
+        try:
+            owner = db.query(User).filter(User.is_superuser.is_(True)).order_by(User.created_at.asc()).first()
+            job = _ensure_receipt_review_job(db, owner)
+            job_id = str(job.id)
 
-        owner = db.query(User).filter(User.is_superuser.is_(True)).order_by(User.created_at.asc()).first()
-        job = _ensure_receipt_review_job(db, owner)
-        job_id = str(job.id)
-
-        for sample in _sample_workflows(job_id):
-            exists = (
-                db.query(Workflow)
-                .filter(Workflow.name == sample["name"], Workflow.user_id == (owner.id if owner else None))
-                .first()
-            )
-            if exists:
-                exists.description = sample["description"]
-                exists.definition = sample["definition"]
-                exists.schedule_cron = sample["schedule_cron"]
-                exists.schedule_enabled = sample["schedule_enabled"]
-                exists.is_active = True
-                continue
-            db.add(
-                Workflow(
-                    name=sample["name"],
-                    description=sample["description"],
-                    definition=sample["definition"],
-                    schedule_cron=sample["schedule_cron"],
-                    schedule_enabled=sample["schedule_enabled"],
-                    is_active=True,
-                    user_id=owner.id if owner else None,
+            for sample in _sample_workflows(job_id):
+                exists = (
+                    db.query(Workflow)
+                    .filter(Workflow.name == sample["name"], Workflow.user_id == (owner.id if owner else None))
+                    .first()
                 )
-            )
+                if exists:
+                    # Never overwrite an existing sample — the user may have
+                    # edited it. Seeding only creates what is missing.
+                    continue
+                db.add(
+                    Workflow(
+                        name=sample["name"],
+                        description=sample["description"],
+                        definition=sample["definition"],
+                        schedule_cron=sample["schedule_cron"],
+                        schedule_enabled=sample["schedule_enabled"],
+                        is_active=True,
+                        user_id=owner.id if owner else None,
+                    )
+                )
 
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise
-    finally:
-        if locked:
-            try:
-                db.execute(text("SELECT pg_advisory_unlock(:lock_id)"), {"lock_id": lock_id})
-                db.commit()
-            except Exception:
-                db.rollback()
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise

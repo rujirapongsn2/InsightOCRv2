@@ -6,8 +6,8 @@ from app.models.agent_pending_action import AgentPendingAction
 
 
 class CRUDAgentPending:
-    def create(self, db: Session, *, conversation_id: UUID, user_id: UUID, tool_name: str, tool_arguments: dict, description: Optional[str] = None) -> AgentPendingAction:
-        action = AgentPendingAction(conversation_id=conversation_id, user_id=user_id, tool_name=tool_name, tool_arguments=tool_arguments, description=description, status="pending", expires_at=datetime.now(timezone.utc) + timedelta(minutes=5))
+    def create(self, db: Session, *, conversation_id: UUID, user_id: UUID, tool_name: str, tool_arguments: dict, description: Optional[str] = None, kind: str = "confirmation", expires_minutes: int = 5) -> AgentPendingAction:
+        action = AgentPendingAction(conversation_id=conversation_id, user_id=user_id, tool_name=tool_name, tool_arguments=tool_arguments, description=description, status="pending", kind=kind, expires_at=datetime.now(timezone.utc) + timedelta(minutes=expires_minutes))
         db.add(action)
         db.commit()
         db.refresh(action)
@@ -21,6 +21,16 @@ class CRUDAgentPending:
         if not action:
             return False
         action.status = status
+        action.resolved_at = datetime.now(timezone.utc)
+        db.commit()
+        return True
+
+    def resolve_with_result(self, db: Session, pending_id: UUID, status: str, result: Optional[dict]) -> bool:
+        action = self.get(db, pending_id)
+        if not action:
+            return False
+        action.status = status
+        action.result = result
         action.resolved_at = datetime.now(timezone.utc)
         db.commit()
         return True

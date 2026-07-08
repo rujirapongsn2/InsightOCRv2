@@ -14,6 +14,7 @@ class AISettingsBase(BaseModel):
     is_default: bool = Field(default=False, description="Whether this is the default OCR provider")
     model: Optional[str] = Field(default="gpt-4o-mini", description="LLM model name used by Agent")
     is_agent_provider: bool = Field(default=False, description="Use this as the Agent's LLM backend")
+    is_workflow_builder_provider: bool = Field(default=False, description="Use this as the AI workflow builder's LLM backend")
     provider_type: str = Field(default="completion_messages", description="openai_compatible | completion_messages")
     description: Optional[str] = Field(None, description="Optional description")
 
@@ -33,6 +34,7 @@ class AISettingsUpdate(BaseModel):
     is_default: Optional[bool] = None
     model: Optional[str] = None
     is_agent_provider: Optional[bool] = None
+    is_workflow_builder_provider: Optional[bool] = None
     provider_type: Optional[str] = None
     description: Optional[str] = None
 
@@ -58,6 +60,7 @@ class AISettingsPublic(BaseModel):
     is_default: bool
     model: Optional[str]
     is_agent_provider: bool
+    is_workflow_builder_provider: bool = False
     provider_type: str
     description: Optional[str]
     created_at: datetime

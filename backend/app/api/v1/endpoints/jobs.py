@@ -28,10 +28,16 @@ def read_jobs(
     Retrieve jobs.
     """
     is_admin = is_admin_user(current_user)
-    if is_admin:
-        jobs = db.query(Job).offset(skip).limit(limit).all()
-    else:
-        jobs = db.query(Job).filter(Job.user_id == current_user.id).offset(skip).limit(limit).all()
+    query = db.query(Job)
+    if not is_admin:
+        query = query.filter(Job.user_id == current_user.id)
+    # Stable ordering so pagination pages don't overlap/skip rows
+    jobs = (
+        query.order_by(Job.created_at.desc(), Job.id.desc())
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
     return jobs
 
 @router.post("/", response_model=JobSchema)

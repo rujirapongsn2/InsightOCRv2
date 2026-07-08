@@ -192,7 +192,17 @@ async def trigger_external_workflow_webhook(
     db.refresh(run)
 
     from app.tasks.workflow_tasks import run_workflow_task
-    run_workflow_task.delay(str(run.id))
+    try:
+        run_workflow_task.delay(str(run.id))
+    except Exception:
+        run.status = "failed"
+        run.error = "Failed to enqueue workflow run (task broker unavailable)"
+        run.finished_at = datetime.now(timezone.utc)
+        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Task queue unavailable, please retry",
+        )
     return {
         "run_id": str(run.id),
         "status": run.status,
@@ -213,7 +223,13 @@ def get_external_workflow_webhook_result(
     workflow = _get_workflow_webhook_or_404(db, workflow_id, secret)
     run = (
         db.query(WorkflowRun)
-        .filter(WorkflowRun.id == run_id, WorkflowRun.workflow_id == workflow.id)
+        .filter(
+            WorkflowRun.id == run_id,
+            WorkflowRun.workflow_id == workflow.id,
+            # A webhook-secret holder may only read runs triggered via the
+            # webhook — not results of manual or scheduled runs.
+            WorkflowRun.trigger_type == "webhook",
+        )
         .first()
     )
     if not run:

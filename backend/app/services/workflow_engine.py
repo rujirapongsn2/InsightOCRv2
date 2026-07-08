@@ -27,15 +27,20 @@ import requests as http_requests
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.models.workflow import WorkflowRun, WorkflowNodeRun
+from app.models.workflow import Workflow, WorkflowRun, WorkflowNodeRun
 from app.models.document import Document
 from app.models.job import Job
 from app.models.integration import Integration, IntegrationType, IntegrationStatus
 from app.models.ai_settings import AISettings
+from app.utils.redact import redact_secrets
 
 logger = logging.getLogger(__name__)
 
-WORKFLOW_OUTPUT_DIR = os.environ.get("WORKFLOW_OUTPUT_DIR", "uploads/workflow_outputs")
+# Storage-service key prefix for write_output files. With local storage
+# (base /app/uploads) this resolves to /app/uploads/workflow_outputs — the
+# same shared-volume location the engine wrote to before; with MinIO/S3 the
+# files land in the bucket so any replica can serve them.
+WORKFLOW_OUTPUT_DIR = os.environ.get("WORKFLOW_OUTPUT_DIR", "workflow_outputs")
 
 # ── Node catalog (exposed to the frontend palette) ──────────────────
 NODE_TYPES: List[Dict[str, Any]] = [
@@ -210,12 +215,14 @@ NODE_TYPES: List[Dict[str, Any]] = [
         "type": "write_output",
         "category": "action",
         "label": "Write Output",
-        "description": "เขียนผลลัพธ์เป็นไฟล์ (JSON / Text / CSV) เพื่อนำไปใช้ต่อ",
+        "description": "เขียนผลลัพธ์เป็นไฟล์ (JSON / Text / CSV / Excel / Word) เพื่อนำไปใช้ต่อ",
         "config_fields": [
             {"name": "filename", "label": "ชื่อไฟล์", "type": "text", "default": "output.json",
-             "placeholder": "report.json"},
+             "placeholder": "report.json",
+             "hint": "นามสกุลไฟล์จะปรับให้ตรงกับรูปแบบที่เลือกโดยอัตโนมัติ"},
             {"name": "format", "label": "รูปแบบไฟล์", "type": "select",
-             "options": ["json", "text", "csv"], "default": "json"},
+             "options": ["json", "text", "csv", "xlsx", "docx"], "default": "json",
+             "hint": "xlsx/docx: ถ้าเนื้อหาเป็นรายการ object (เช่น records) จะสร้างเป็นตาราง"},
             {"name": "content", "label": "เนื้อหา", "type": "textarea", "required": True,
              "placeholder": "{{transform_xxx}}",
              "hint": "ใช้ปุ่มแทรกข้อมูลเลือกผลลัพธ์ที่ต้องการบันทึก"},
@@ -526,12 +533,23 @@ def _ai_setting_provider(setting: AISettings, model: Optional[str], source: str)
     }
 
 
+def _ensure_integration_owner(integration: Integration, owner_user_id: Optional[str]) -> None:
+    """Block a workflow from using another user's Integration credentials."""
+    if owner_user_id is None:
+        return  # legacy workflow without an owner — nothing to enforce
+    if integration.user_id is not None and str(integration.user_id) != str(owner_user_id):
+        raise NodeExecutionError(
+            f"Integration '{integration.name}' belongs to another user"
+        )
+
+
 def resolve_llm_provider(
     db: Session,
     integration_id: Optional[str] = None,
     model: Optional[str] = None,
     log: Optional[Callable[[str], None]] = None,
     ai_provider_id: Optional[str] = None,
+    owner_user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Resolve the provider for Workflow LLM nodes.
 
@@ -564,6 +582,7 @@ def resolve_llm_provider(
         integration = db.query(Integration).filter(Integration.id == integration_id).first()
         if not integration:
             raise NodeExecutionError(f"Integration not found: {integration_id}")
+        _ensure_integration_owner(integration, owner_user_id)
         icfg = integration.config or {}
         api_key = icfg.get("apiKey")
         if not api_key:
@@ -736,6 +755,7 @@ def _exec_llm(db: Session, config: dict, context: dict, log: Callable[[str], Non
         config.get("model"),
         log,
         config.get("ai_provider_id"),
+        owner_user_id=context.get("_owner_user_id"),
     )
     text = call_llm_provider(provider, _stringify(prompt), config.get("system_prompt"))
     log(f"LLM responded via {provider.get('source')} ({len(text)} chars)")
@@ -755,6 +775,7 @@ def suggest_variables(
     query: str,
     candidates: List[Dict[str, Any]],
     integration_id: Optional[str] = None,
+    owner_user_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """AI variable finder. Given a natural-language description and a catalog
     of available variables (token/label/sample), ask the LLM to rank the best
@@ -794,7 +815,7 @@ def suggest_variables(
     )
     user = f"คำขอของผู้ใช้: {query}\n\nรายการตัวแปรที่มี (catalog):\n{catalog}"
 
-    provider = resolve_llm_provider(db, integration_id, None, None)
+    provider = resolve_llm_provider(db, integration_id, None, None, owner_user_id=owner_user_id)
     text = call_llm_provider(provider, user, system)
     cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip())
 
@@ -911,10 +932,41 @@ def _exec_python_code(db: Session, config: dict, context: dict, log: Callable[[s
     return {"result": result.get("result"), "stdout": stdout}
 
 
+def _validate_outbound_url(url: str) -> None:
+    """SSRF guard for user-configurable HTTP nodes: only http(s), and no
+    private/loopback/link-local/metadata targets unless explicitly allowed
+    via WORKFLOW_HTTP_ALLOW_PRIVATE=true (e.g. for on-prem internal APIs)."""
+    import ipaddress
+    import socket
+    from urllib.parse import urlparse
+
+    if os.environ.get("WORKFLOW_HTTP_ALLOW_PRIVATE", "").lower() in ("1", "true", "yes"):
+        return
+
+    parsed = urlparse(str(url))
+    if parsed.scheme not in ("http", "https"):
+        raise NodeExecutionError(f"HTTP node: unsupported URL scheme '{parsed.scheme}'")
+    host = parsed.hostname
+    if not host:
+        raise NodeExecutionError("HTTP node: URL has no host")
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror as exc:
+        raise NodeExecutionError(f"HTTP node: cannot resolve host '{host}': {exc}")
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0])
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+            raise NodeExecutionError(
+                f"HTTP node: target '{host}' resolves to a private address ({ip}) — blocked. "
+                "Set WORKFLOW_HTTP_ALLOW_PRIVATE=true to allow internal targets."
+            )
+
+
 def _exec_http_request(db: Session, config: dict, context: dict, log: Callable[[str], None]) -> Any:
     url = config.get("url")
     if not url:
         raise NodeExecutionError("HTTP node: url is required")
+    _validate_outbound_url(url)
     method = (config.get("method") or "POST").upper()
 
     headers: Dict[str, str] = {}
@@ -950,34 +1002,58 @@ def _exec_http_request(db: Session, config: dict, context: dict, log: Callable[[
     return {"status_code": resp.status_code, "body": payload}
 
 
+_WRITE_OUTPUT_CONTENT_TYPES = {
+    "json": "application/json",
+    "csv": "text/csv",
+    "text": "text/plain",
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+}
+
+
 def _exec_write_output(db: Session, config: dict, context: dict, log: Callable[[str], None]) -> Any:
     content = config.get("content")
     fmt = (config.get("format") or "json").lower()
-    filename = config.get("filename") or f"output.{fmt}"
-    filename = os.path.basename(str(filename))  # no path traversal
+    filename = os.path.basename(str(config.get("filename") or f"output.{fmt}"))  # no path traversal
+    # Ensure the extension matches the format so the file opens correctly.
+    if not filename.lower().endswith(f".{fmt}"):
+        filename = f"{os.path.splitext(filename)[0] or 'output'}.{fmt}"
 
     run_id = context.get("_run_id", "unknown")
-    out_dir = os.path.join(WORKFLOW_OUTPUT_DIR, str(run_id))
-    os.makedirs(out_dir, exist_ok=True)
-    path = os.path.join(out_dir, filename)
 
-    if fmt == "json":
-        if isinstance(content, str):
-            try:
-                content = json.loads(content)
-            except json.JSONDecodeError:
-                pass
-        text = json.dumps(content, ensure_ascii=False, indent=2)
-    elif fmt == "csv":
-        text = _to_csv(content)
+    text_preview: str
+    if fmt in ("xlsx", "docx"):
+        data = _to_xlsx_bytes(content) if fmt == "xlsx" else _to_docx_bytes(content)
+        text_preview = f"({fmt.upper()} binary, {len(data)} bytes)"
     else:
-        text = _stringify(content)
+        if fmt == "json":
+            if isinstance(content, str):
+                try:
+                    content = json.loads(content)
+                except json.JSONDecodeError:
+                    pass
+            text = json.dumps(content, ensure_ascii=False, indent=2)
+        elif fmt == "csv":
+            text = _to_csv(content)
+        else:
+            text = _stringify(content)
+        data = text.encode("utf-8")
+        text_preview = text[:2000]
 
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(text)
-    log(f"Wrote {len(text)} chars to {path}")
-    return {"file_path": path, "filename": filename, "size": len(text),
-            "preview": text[:2000], "run_id": str(run_id)}
+    # Store via the storage service (shared volume / MinIO / S3) so the API
+    # container can serve the file no matter which worker wrote it.
+    from io import BytesIO
+    from app.services.storage import get_storage_service
+
+    storage_key = f"{WORKFLOW_OUTPUT_DIR}/{run_id}/{filename}"
+    get_storage_service().upload_file(
+        BytesIO(data),
+        storage_key,
+        content_type=_WRITE_OUTPUT_CONTENT_TYPES.get(fmt, "application/octet-stream"),
+    )
+    log(f"Wrote {len(data)} bytes to {storage_key}")
+    return {"file_path": storage_key, "filename": filename, "size": len(data),
+            "preview": text_preview, "run_id": str(run_id)}
 
 
 def _exec_webhook_response(db: Session, config: dict, context: dict, log: Callable[[str], None]) -> Any:
@@ -999,7 +1075,7 @@ def _exec_webhook_response(db: Session, config: dict, context: dict, log: Callab
 
 
 # ── Cloud storage (Google Drive / OneDrive) ──────────────────────────
-def _load_drive_integration(db: Session, config: dict, expected_type: str):
+def _load_drive_integration(db: Session, config: dict, expected_type: str, context: Optional[dict] = None):
     from app.services.cloud_drive import get_drive_client
 
     integration_id = config.get("integration_id")
@@ -1008,6 +1084,7 @@ def _load_drive_integration(db: Session, config: dict, expected_type: str):
     integration = db.query(Integration).filter(Integration.id == integration_id).first()
     if not integration:
         raise NodeExecutionError(f"ไม่พบ integration: {integration_id}")
+    _ensure_integration_owner(integration, (context or {}).get("_owner_user_id"))
     if integration.type != expected_type:
         raise NodeExecutionError(
             f"integration '{integration.name}' เป็นชนิด {integration.type} ไม่ใช่ {expected_type}"
@@ -1028,7 +1105,7 @@ def _content_to_bytes(content: Any, mime_type: str) -> bytes:
 
 
 def _exec_cloud_upload(db: Session, config: dict, context: dict, log, provider: str) -> Any:
-    integration, client = _load_drive_integration(db, config, provider)
+    integration, client = _load_drive_integration(db, config, provider, context)
     filename = os.path.basename(str(config.get("filename") or "result.json"))
     mime_type = config.get("mime_type") or "application/json"
     folder_id = config.get("folder_id") or ""
@@ -1041,9 +1118,14 @@ def _exec_cloud_upload(db: Session, config: dict, context: dict, log, provider: 
 
 
 def _exec_cloud_import(db: Session, config: dict, context: dict, log, provider: str) -> Any:
-    from app.services.ingestion import ingest_file_into_job
+    from app.services.ingestion import (
+        ingest_file_into_job,
+        validate_import_file,
+        DuplicateSourceFile,
+        UnsupportedFile,
+    )
 
-    integration, client = _load_drive_integration(db, config, provider)
+    integration, client = _load_drive_integration(db, config, provider, context)
     folder_id = config.get("folder_id") or ""
     job_id = config.get("job_id")
     if not job_id:
@@ -1058,20 +1140,65 @@ def _exec_cloud_import(db: Session, config: dict, context: dict, log, provider: 
     files = client.list_folder(folder_id)
     if name_filter:
         files = [f for f in files if name_filter in (f.get("name") or "").lower()]
-    files = files[:limit]
-    log(f"พบ {len(files)} ไฟล์ในโฟลเดอร์ — เริ่มนำเข้า Job '{job.name or job_id}'")
+
+    # Dedup against files already imported into this job so a repeated /
+    # scheduled import doesn't re-ingest (and re-pay for OCR of) the same files.
+    already = {
+        row[0]
+        for row in db.query(Document.source_file_id)
+        .filter(Document.job_id == job_id, Document.source_file_id.isnot(None))
+        .all()
+    }
+    pending = [f for f in files if f.get("id") not in already]
+    skipped_existing = len(files) - len(pending)
+    pending = pending[:limit]
+    log(
+        f"พบ {len(files)} ไฟล์ในโฟลเดอร์ (นำเข้าแล้ว {skipped_existing}) — "
+        f"เริ่มนำเข้า {len(pending)} ไฟล์ใหม่เข้า Job '{job.name or job_id}'"
+    )
 
     imported: List[Dict[str, Any]] = []
-    for f in files:
+    skipped: List[Dict[str, Any]] = []
+    failed: List[Dict[str, Any]] = []
+    for f in pending:
         fid, fname = f.get("id"), f.get("name") or f.get("id")
         try:
+            # Pre-download guard using source metadata size: reject an oversize
+            # or unsupported file BEFORE pulling its bytes into memory, so a
+            # stray huge file in the folder can't OOM the worker.
+            raw_size = f.get("size")
+            try:
+                meta_size = int(raw_size) if raw_size is not None else None
+            except (TypeError, ValueError):
+                meta_size = None
+            validate_import_file(fname, meta_size)
+
             data = client.download(fid)
-            res = ingest_file_into_job(db, str(job_id), data, fname, f.get("mimeType"))
+            res = ingest_file_into_job(
+                db, str(job_id), data, fname, f.get("mimeType"), source_file_id=fid
+            )
             imported.append({"document_id": res["document_id"], "filename": fname, "drive_file_id": fid})
             log(f"นำเข้า '{fname}' → document {res['document_id']}")
-        except Exception as exc:  # noqa: BLE001 — skip a bad file, keep importing
+        except UnsupportedFile as exc:
+            failed.append({"filename": fname, "drive_file_id": fid, "error": str(exc)})
             log(f"ข้าม '{fname}': {exc}")
-    return {"job_id": str(job_id), "count": len(imported), "imported": imported}
+        except DuplicateSourceFile:
+            # Won a concurrent race; another run already imported this file.
+            skipped.append({"filename": fname, "drive_file_id": fid})
+            log(f"ข้าม '{fname}': นำเข้าแล้ว (ซ้ำ)")
+        except Exception as exc:  # noqa: BLE001 — record a bad file, keep importing
+            db.rollback()
+            failed.append({"filename": fname, "drive_file_id": fid, "error": str(exc)[:500]})
+            log(f"ข้าม '{fname}': {exc}")
+    return {
+        "job_id": str(job_id),
+        "count": len(imported),
+        "imported": imported,
+        "skipped_count": skipped_existing + len(skipped),
+        "skipped": skipped,
+        "failed_count": len(failed),
+        "failed": failed,
+    }
 
 
 def _exec_gdrive_upload(db, config, context, log):
@@ -1090,33 +1217,104 @@ def _exec_onedrive_import(db, config, context, log):
     return _exec_cloud_import(db, config, context, log, "onedrive")
 
 
-def _to_csv(content: Any) -> str:
-    import csv
-    import io
+def _tabular_rows(content: Any) -> Optional[List[dict]]:
+    """Normalise content to a list-of-dicts table, or None if not tabular.
 
+    Accepts a JSON string, a single dict (→ one row), or a list of dicts.
+    Shared by the csv / xlsx / docx writers.
+    """
     if isinstance(content, str):
         try:
             content = json.loads(content)
         except json.JSONDecodeError:
-            return content
-    rows: List[dict]
+            return None
     if isinstance(content, dict):
-        rows = [content]
-    elif isinstance(content, list) and content and all(isinstance(r, dict) for r in content):
-        rows = content
-    else:
-        return _stringify(content)
+        return [content]
+    if isinstance(content, list) and content and all(isinstance(r, dict) for r in content):
+        return content
+    return None
 
-    fieldnames: List[str] = []
+
+def _fieldnames(rows: List[dict]) -> List[str]:
+    names: List[str] = []
     for r in rows:
         for k in r.keys():
-            if k not in fieldnames:
-                fieldnames.append(k)
+            if k not in names:
+                names.append(k)
+    return names
+
+
+def _cell(value: Any) -> str:
+    return _stringify(value) if isinstance(value, (dict, list)) else ("" if value is None else str(value))
+
+
+def _to_csv(content: Any) -> str:
+    import csv
+    import io
+
+    rows = _tabular_rows(content)
+    if rows is None:
+        return content if isinstance(content, str) else _stringify(content)
+
+    fieldnames = _fieldnames(rows)
     buf = io.StringIO()
     writer = csv.DictWriter(buf, fieldnames=fieldnames, extrasaction="ignore")
     writer.writeheader()
     for r in rows:
-        writer.writerow({k: _stringify(v) if isinstance(v, (dict, list)) else v for k, v in r.items()})
+        writer.writerow({k: _cell(v) for k, v in r.items()})
+    return buf.getvalue()
+
+
+def _to_xlsx_bytes(content: Any) -> bytes:
+    """Render content as an .xlsx workbook. Tabular content → header + rows;
+    non-tabular → the stringified value in a single cell."""
+    import io
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Output"
+    rows = _tabular_rows(content)
+    if rows is not None:
+        fieldnames = _fieldnames(rows)
+        ws.append(fieldnames)
+        for r in rows:
+            ws.append([_cell(r.get(k)) for k in fieldnames])
+    else:
+        ws["A1"] = content if isinstance(content, str) else _stringify(content)
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _to_docx_bytes(content: Any) -> bytes:
+    """Render content as a .docx document. Tabular content → a table; otherwise
+    the stringified value as paragraphs (one per line)."""
+    import io
+    from docx import Document as DocxDocument
+
+    doc = DocxDocument()
+    rows = _tabular_rows(content)
+    if rows is not None:
+        fieldnames = _fieldnames(rows)
+        table = doc.add_table(rows=1, cols=len(fieldnames) or 1)
+        try:
+            table.style = "Table Grid"
+        except Exception:  # style may be unavailable in a minimal template
+            pass
+        hdr = table.rows[0].cells
+        for i, name in enumerate(fieldnames):
+            hdr[i].text = str(name)
+        for r in rows:
+            cells = table.add_row().cells
+            for i, name in enumerate(fieldnames):
+                cells[i].text = _cell(r.get(name))
+    else:
+        text = content if isinstance(content, str) else _stringify(content)
+        for line in text.split("\n"):
+            doc.add_paragraph(line)
+    buf = io.BytesIO()
+    doc.save(buf)
     return buf.getvalue()
 
 
@@ -1169,6 +1367,21 @@ def _topological_order(nodes: List[dict], edges: List[dict]) -> List[dict]:
     return ordered
 
 
+def _workflow_owner_id(db: Session, workflow_id) -> Optional[str]:
+    # Best-effort: on any failure (orphaned run, non-query session), return
+    # None, which disables cross-tenant enforcement rather than killing the
+    # run. Real runs use a full Session and resolve the owner normally.
+    try:
+        owner = (
+            db.query(Workflow.user_id)
+            .filter(Workflow.id == workflow_id)
+            .scalar()
+        )
+    except Exception:
+        return None
+    return str(owner) if owner else None
+
+
 def execute_workflow_run(db: Session, run: WorkflowRun) -> None:
     """Execute one workflow run synchronously, persisting node activity."""
     definition = run.definition_snapshot or {}
@@ -1196,6 +1409,7 @@ def execute_workflow_run(db: Session, run: WorkflowRun) -> None:
     context: Dict[str, Any] = {
         "trigger": run.trigger_input or {},
         "_run_id": str(run.id),
+        "_owner_user_id": _workflow_owner_id(db, run.workflow_id),
     }
 
     incoming: Dict[str, List[dict]] = {}
@@ -1267,7 +1481,7 @@ def execute_workflow_run(db: Session, run: WorkflowRun) -> None:
 
         try:
             resolved_config = resolve_template(raw_config, context)
-            nr.input = _safe_json(resolved_config)
+            nr.input = _safe_json(redact_secrets(resolved_config))
             executor = EXECUTORS.get(node_type)
             if not executor:
                 raise NodeExecutionError(f"Unknown node type: {node_type}")
@@ -1376,6 +1590,7 @@ def execute_single_node(db: Session, run: WorkflowRun, node_id: str) -> None:
     if context is None:
         context = {"trigger": {}}
     context["_run_id"] = str(run.id)
+    context["_owner_user_id"] = _workflow_owner_id(db, run.workflow_id)
 
     logs: List[str] = []
 
@@ -1391,7 +1606,7 @@ def execute_single_node(db: Session, run: WorkflowRun, node_id: str) -> None:
     error: Optional[str] = None
     try:
         resolved_config = resolve_template(raw_config, context)
-        nr.input = _safe_json(resolved_config)
+        nr.input = _safe_json(redact_secrets(resolved_config))
         executor = EXECUTORS.get(node_type)
         if not executor:
             raise NodeExecutionError(f"Unknown node type: {node_type}")

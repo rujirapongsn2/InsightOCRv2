@@ -6,7 +6,7 @@ import json
 import logging
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timezone as dt_timezone
 from celery import shared_task
 from celery.exceptions import SoftTimeLimitExceeded
 from app.celery_app import celery_app
@@ -676,18 +676,39 @@ def process_document_task(self, document_id: str, schema_id: str | None = None):
         schema_id: UUID of selected schema, or None for Auto mode
     """
     db = SessionLocal()
-    
+
     try:
-        # Get document
+        # Atomic claim: only a "queued" document may start processing. A
+        # duplicate delivery (double click, broker redelivery with acks_late)
+        # finds the status already changed and skips instead of re-running
+        # the paid external OCR call. Celery retries re-enter with the
+        # document still in "processing", which is allowed.
+        claimed = (
+            db.query(Document)
+            .filter(Document.id == document_id, Document.status == "queued")
+            .update(
+                {
+                    "status": "processing",
+                    "processing_started_at": datetime.now(dt_timezone.utc),
+                },
+                synchronize_session=False,
+            )
+        )
+        db.commit()
         document = db.query(Document).filter(Document.id == document_id).first()
         if not document:
             logger.error(f"Document {document_id} not found")
             return {"status": "failed", "error": "Document not found"}
-
-        # Update status to processing
-        document.status = "processing"
-        db.add(document)
-        db.commit()
+        if not claimed:
+            if self.request.retries == 0:
+                logger.info(
+                    f"Document {document_id} not claimable (status={document.status}) — skipping duplicate task"
+                )
+                return {"status": "skipped", "document_id": document_id}
+            # Retry attempt: keep going, refresh the started timestamp
+            document.processing_started_at = datetime.now(dt_timezone.utc)
+            db.add(document)
+            db.commit()
 
         # Initialize job logger if we have a job
         job_logger = get_job_logger(str(document.job_id)) if document.job_id else logger
@@ -1086,6 +1107,24 @@ def process_document_task(self, document_id: str, schema_id: str | None = None):
         return {"status": "failed", "error": "SoftTimeLimitExceeded"}
 
     except Exception as e:
+        # Transient network/server errors from the external OCR API get a
+        # real Celery retry with backoff instead of failing permanently.
+        transient = isinstance(
+            e,
+            (requests.exceptions.ConnectionError, requests.exceptions.Timeout),
+        ) or (
+            isinstance(e, requests.HTTPError)
+            and getattr(e, "response", None) is not None
+            and e.response.status_code >= 500
+        )
+        if transient and self.request.retries < self.max_retries:
+            countdown = 30 * (2 ** self.request.retries)
+            logger.warning(
+                f"Transient error for document {document_id}; retry "
+                f"{self.request.retries + 1}/{self.max_retries} in {countdown}s: {e}"
+            )
+            raise self.retry(exc=e, countdown=countdown)
+
         logger.exception(f"Processing failed for document {document_id}: {e}")
         try:
             db_doc = db.query(Document).filter(Document.id == document_id).first()

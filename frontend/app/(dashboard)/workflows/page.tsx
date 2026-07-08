@@ -1,13 +1,14 @@
 "use client"
 
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { useRouter } from "next/navigation"
 import {
     Plus, Play, Trash2, Pencil, CalendarClock, Loader2, Workflow as WorkflowIcon,
-    CheckCircle2, XCircle, Clock,
+    CheckCircle2, XCircle, Clock, Sparkles, PencilRuler, Download, Upload,
 } from "lucide-react"
 import {
     Workflow, getWorkflows, createWorkflow, deleteWorkflow, runWorkflow, updateWorkflow,
+    exportWorkflow, importWorkflow, downloadWorkflowJson, WorkflowExport,
 } from "@/lib/workflows-api"
 
 const statusBadge = (wf: Workflow) => {
@@ -23,11 +24,14 @@ export default function WorkflowsPage() {
     const [loading, setLoading] = useState(true)
     const [error, setError] = useState<string | null>(null)
     const [showCreate, setShowCreate] = useState(false)
+    const [createMode, setCreateMode] = useState<"manual" | "ai">("ai")
     const [newName, setNewName] = useState("")
     const [newDescription, setNewDescription] = useState("")
     const [creating, setCreating] = useState(false)
     const [runningId, setRunningId] = useState<string | null>(null)
     const [notice, setNotice] = useState<string | null>(null)
+    const [importing, setImporting] = useState(false)
+    const importInputRef = useRef<HTMLInputElement>(null)
 
     const load = useCallback(async () => {
         if (!token) return
@@ -46,6 +50,11 @@ export default function WorkflowsPage() {
     useEffect(() => { load() }, [load])
 
     const handleCreate = async () => {
+        if (createMode === "ai") {
+            // AI builder collects the name/goal in a chat — go straight there.
+            router.push("/workflows/new/ai")
+            return
+        }
         if (!token || !newName.trim()) return
         try {
             setCreating(true)
@@ -66,6 +75,41 @@ export default function WorkflowsPage() {
         } catch (e: any) {
             setError(e.message)
             setCreating(false)
+        }
+    }
+
+    const handleExport = async (wf: Workflow) => {
+        if (!token) return
+        try {
+            const data = await exportWorkflow(token, wf.id)
+            downloadWorkflowJson(data)
+        } catch (e: any) {
+            setNotice(`Export failed: ${e.message}`)
+        }
+    }
+
+    const handleImportFile = async (file: File) => {
+        if (!token) return
+        try {
+            setImporting(true)
+            const text = await file.text()
+            const parsed = JSON.parse(text) as WorkflowExport
+            if (!parsed.name || !parsed.definition) {
+                throw new Error("ไฟล์ไม่ถูกต้อง: ต้องมี name และ definition")
+            }
+            const res = await importWorkflow(token, {
+                schema_version: parsed.schema_version ?? 1,
+                name: parsed.name,
+                description: parsed.description ?? null,
+                schedule_cron: parsed.schedule_cron ?? null,
+                schedule_enabled: !!parsed.schedule_enabled,
+                definition: parsed.definition,
+            })
+            const warnCount = res.warnings?.length || 0
+            router.push(`/workflows/${res.workflow.id}${warnCount ? "?warnings=1" : ""}`)
+        } catch (e: any) {
+            setNotice(`Import failed: ${e.message}`)
+            setImporting(false)
         }
     }
 
@@ -113,12 +157,32 @@ export default function WorkflowsPage() {
                         สร้าง automation process สำหรับเอกสารแบบ drag & drop — รันเองหรือตั้งเวลาอัตโนมัติ
                     </p>
                 </div>
-                <button
-                    onClick={() => setShowCreate(true)}
-                    className="flex items-center gap-2 px-4 py-2 rounded-lg bg-[#2786C2] text-white text-sm font-medium hover:bg-[#1F6FA3] transition-colors"
-                >
-                    <Plus className="h-4 w-4" /> New Workflow
-                </button>
+                <div className="flex items-center gap-2">
+                    <input
+                        ref={importInputRef}
+                        type="file"
+                        accept=".json,application/json"
+                        className="hidden"
+                        onChange={(e) => {
+                            const f = e.target.files?.[0]
+                            if (f) handleImportFile(f)
+                            e.target.value = ""
+                        }}
+                    />
+                    <button
+                        onClick={() => importInputRef.current?.click()}
+                        disabled={importing}
+                        className="flex items-center gap-2 px-4 py-2 rounded-lg border border-[#CBD5E1] text-[#0D1B2A] text-sm font-medium hover:bg-gray-50 disabled:opacity-50"
+                    >
+                        {importing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />} Import
+                    </button>
+                    <button
+                        onClick={() => setShowCreate(true)}
+                        className="flex items-center gap-2 px-4 py-2 rounded-lg bg-[#2786C2] text-white text-sm font-medium hover:bg-[#1F6FA3] transition-colors"
+                    >
+                        <Plus className="h-4 w-4" /> New Workflow
+                    </button>
+                </div>
             </div>
 
             {notice && (
@@ -189,6 +253,13 @@ export default function WorkflowsPage() {
                                     <Pencil className="h-4 w-4" />
                                 </button>
                                 <button
+                                    onClick={() => handleExport(wf)}
+                                    title="Export JSON"
+                                    className="p-2 rounded-lg text-[#778DA9] hover:bg-gray-50"
+                                >
+                                    <Download className="h-4 w-4" />
+                                </button>
+                                <button
                                     onClick={() => toggleActive(wf)}
                                     title={wf.is_active ? "Deactivate" : "Activate"}
                                     className="p-2 rounded-lg hover:bg-gray-50"
@@ -215,31 +286,65 @@ export default function WorkflowsPage() {
                 <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => setShowCreate(false)}>
                     <div className="bg-white rounded-xl p-6 w-full max-w-md mx-4" onClick={(e) => e.stopPropagation()}>
                         <h2 className="text-lg font-semibold text-[#0D1B2A] mb-4">สร้าง Workflow ใหม่</h2>
-                        <label className="block text-sm text-[#0D1B2A] mb-1">ชื่อ Workflow *</label>
-                        <input
-                            autoFocus
-                            value={newName}
-                            onChange={(e) => setNewName(e.target.value)}
-                            placeholder="เช่น สรุปใบเสนอราคารายวัน"
-                            className="w-full border border-[#E2E8F0] rounded-lg px-3 py-2 text-sm mb-3 focus:outline-none focus:ring-2 focus:ring-[#2786C2]/30"
-                        />
-                        <label className="block text-sm text-[#0D1B2A] mb-1">คำอธิบาย</label>
-                        <textarea
-                            value={newDescription}
-                            onChange={(e) => setNewDescription(e.target.value)}
-                            rows={2}
-                            className="w-full border border-[#E2E8F0] rounded-lg px-3 py-2 text-sm mb-4 focus:outline-none focus:ring-2 focus:ring-[#2786C2]/30"
-                        />
+
+                        {/* Mode selector: AI Agent (new) vs Manual (existing builder) */}
+                        <div className="grid grid-cols-2 gap-2 mb-4">
+                            <button
+                                onClick={() => setCreateMode("ai")}
+                                className={`flex flex-col items-start gap-1 p-3 rounded-lg border text-left transition-colors ${createMode === "ai" ? "border-[#2786C2] bg-[#EBF4FB]" : "border-[#E2E8F0] hover:bg-gray-50"}`}
+                            >
+                                <span className="flex items-center gap-1.5 font-medium text-sm text-[#0D1B2A]">
+                                    <Sparkles className="h-4 w-4 text-[#2786C2]" /> AI Agent
+                                </span>
+                                <span className="text-xs text-[#778DA9]">บอกเป้าหมาย ให้ AI ออกแบบให้</span>
+                            </button>
+                            <button
+                                onClick={() => setCreateMode("manual")}
+                                className={`flex flex-col items-start gap-1 p-3 rounded-lg border text-left transition-colors ${createMode === "manual" ? "border-[#2786C2] bg-[#EBF4FB]" : "border-[#E2E8F0] hover:bg-gray-50"}`}
+                            >
+                                <span className="flex items-center gap-1.5 font-medium text-sm text-[#0D1B2A]">
+                                    <PencilRuler className="h-4 w-4 text-[#2786C2]" /> Manual
+                                </span>
+                                <span className="text-xs text-[#778DA9]">ลาก & วางโหนดเอง</span>
+                            </button>
+                        </div>
+
+                        {createMode === "manual" && (
+                            <>
+                                <label className="block text-sm text-[#0D1B2A] mb-1">ชื่อ Workflow *</label>
+                                <input
+                                    autoFocus
+                                    value={newName}
+                                    onChange={(e) => setNewName(e.target.value)}
+                                    placeholder="เช่น สรุปใบเสนอราคารายวัน"
+                                    className="w-full border border-[#E2E8F0] rounded-lg px-3 py-2 text-sm mb-3 focus:outline-none focus:ring-2 focus:ring-[#2786C2]/30"
+                                />
+                                <label className="block text-sm text-[#0D1B2A] mb-1">คำอธิบาย</label>
+                                <textarea
+                                    value={newDescription}
+                                    onChange={(e) => setNewDescription(e.target.value)}
+                                    rows={2}
+                                    className="w-full border border-[#E2E8F0] rounded-lg px-3 py-2 text-sm mb-4 focus:outline-none focus:ring-2 focus:ring-[#2786C2]/30"
+                                />
+                            </>
+                        )}
+                        {createMode === "ai" && (
+                            <p className="text-sm text-[#778DA9] mb-4">
+                                จะเปิดหน้าแชทกับ AI — พิมพ์เป้าหมาย เช่น “ทุกเช้าดึงใบเสร็จจาก Job แล้วสรุปด้วย AI ส่งเข้า Google Drive” แล้ว AI จะออกแบบ workflow ให้ พร้อมถามข้อมูลที่จำเป็น
+                            </p>
+                        )}
+
                         <div className="flex justify-end gap-2">
                             <button onClick={() => setShowCreate(false)} className="px-4 py-2 rounded-lg text-sm text-[#778DA9] hover:bg-gray-50">
                                 ยกเลิก
                             </button>
                             <button
                                 onClick={handleCreate}
-                                disabled={creating || !newName.trim()}
+                                disabled={creating || (createMode === "manual" && !newName.trim())}
                                 className="px-4 py-2 rounded-lg bg-[#2786C2] text-white text-sm hover:bg-[#1F6FA3] disabled:opacity-50 flex items-center gap-2"
                             >
-                                {creating && <Loader2 className="h-4 w-4 animate-spin" />} สร้างและเปิด Builder
+                                {creating && <Loader2 className="h-4 w-4 animate-spin" />}
+                                {createMode === "ai" ? "เริ่มกับ AI Agent" : "สร้างและเปิด Builder"}
                             </button>
                         </div>
                     </div>

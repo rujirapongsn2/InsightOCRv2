@@ -120,9 +120,17 @@ async def test_code_sandbox_jsondecode_surfaces_error(monkeypatch):
     """Malformed __SANDBOX_OUTPUT__ must surface as an error, not silent success."""
     fake_output = "__SANDBOX_OUTPUT__: {not valid json\n"
 
+    # Sandbox now runs detached: containers.run() returns a Container the
+    # code drives via wait()/logs()/remove().
     class _FakeContainer:
-        def decode(self, *a, **k):
-            return fake_output  # str — mirrors what bytes.decode() returns
+        def wait(self, *a, **k):
+            return {"StatusCode": 0}
+
+        def logs(self, *a, **k):
+            return fake_output.encode("utf-8")
+
+        def remove(self, *a, **k):
+            pass
 
     fake_client = MagicMock()
     fake_client.containers.run.return_value = _FakeContainer()
