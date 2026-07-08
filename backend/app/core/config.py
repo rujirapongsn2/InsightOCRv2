@@ -19,6 +19,13 @@ class Settings(BaseSettings):
 
     # Storage
     STORAGE_TYPE: str = "local" # local, minio, s3
+
+    # Upload validation
+    MAX_UPLOAD_SIZE_MB: int = 50
+    ALLOWED_UPLOAD_EXTENSIONS: str = ".pdf,.png,.jpg,.jpeg,.tif,.tiff,.bmp,.webp,.heic"
+
+    # Data retention (workflow run history, output files, job logs)
+    RETENTION_DAYS: int = 30
     
     # MinIO / S3 Common
     MINIO_ENDPOINT: str = "localhost:9000"

@@ -79,20 +79,32 @@ class GoogleDriveClient:
     def list_folder(self, folder_id: str) -> List[Dict[str, Any]]:
         if not folder_id:
             raise CloudDriveError("Google Drive: ต้องระบุ folder_id")
-        params = {
-            "q": f"'{folder_id}' in parents and trashed=false",
-            "fields": "files(id,name,mimeType,size)",
-            "pageSize": 1000,
-            "supportsAllDrives": "true",
-            "includeItemsFromAllDrives": "true",
-        }
-        resp = requests.get(
-            "https://www.googleapis.com/drive/v3/files",
-            headers=self._headers(), params=params, timeout=DEFAULT_TIMEOUT,
-        )
-        if resp.status_code != 200:
-            raise CloudDriveError(f"Google Drive list ล้มเหลว: HTTP {resp.status_code} {resp.text[:300]}")
-        return resp.json().get("files", [])
+        # Follow nextPageToken so folders with more than one page (>1000 files)
+        # are fully listed instead of silently truncated.
+        headers = self._headers()  # reuse one token across all pages
+        files: List[Dict[str, Any]] = []
+        page_token: str | None = None
+        while True:
+            params: Dict[str, Any] = {
+                "q": f"'{folder_id}' in parents and trashed=false",
+                "fields": "nextPageToken,files(id,name,mimeType,size)",
+                "pageSize": 1000,
+                "supportsAllDrives": "true",
+                "includeItemsFromAllDrives": "true",
+            }
+            if page_token:
+                params["pageToken"] = page_token
+            resp = requests.get(
+                "https://www.googleapis.com/drive/v3/files",
+                headers=headers, params=params, timeout=DEFAULT_TIMEOUT,
+            )
+            if resp.status_code != 200:
+                raise CloudDriveError(f"Google Drive list ล้มเหลว: HTTP {resp.status_code} {resp.text[:300]}")
+            body = resp.json()
+            files.extend(body.get("files", []))
+            page_token = body.get("nextPageToken")
+            if not page_token:
+                return files
 
     def download(self, file_id: str) -> bytes:
         resp = requests.get(
@@ -123,7 +135,15 @@ class GoogleDriveClient:
             timeout=DEFAULT_TIMEOUT,
         )
         if resp.status_code not in (200, 201):
-            raise CloudDriveError(f"Google Drive upload ล้มเหลว: HTTP {resp.status_code} {resp.text[:300]}")
+            detail = resp.text[:300]
+            if resp.status_code == 403 and "storage quota" in resp.text.lower():
+                raise CloudDriveError(
+                    "Google Drive upload ล้มเหลว: service account ไม่มีพื้นที่เก็บไฟล์ของตัวเอง — "
+                    "ต้องอัปโหลดไปยังโฟลเดอร์ที่อยู่ใน Shared Drive (Team Drive) แล้วแชร์ Shared Drive "
+                    "นั้นให้อีเมล service account เป็นสมาชิก (สิทธิ์ Content manager ขึ้นไป). "
+                    "โฟลเดอร์ใน My Drive ที่แชร์แบบธรรมดาจะอัปโหลดไม่ได้"
+                )
+            raise CloudDriveError(f"Google Drive upload ล้มเหลว: HTTP {resp.status_code} {detail}")
         body = resp.json()
         return {"file_id": body.get("id"), "name": body.get("name"), "link": body.get("webViewLink")}
 
@@ -168,15 +188,21 @@ class OneDriveClient:
     def list_folder(self, folder_id: str) -> List[Dict[str, Any]]:
         # folder_id "root" or empty → drive root; otherwise an item id
         seg = "root" if not folder_id or folder_id == "root" else f"items/{folder_id}"
-        url = f"{GRAPH_BASE}/drives/{self.drive_id}/{seg}/children"
-        resp = requests.get(
-            url, headers=self._headers(),
-            params={"$select": "id,name,size,file", "$top": 999},
-            timeout=DEFAULT_TIMEOUT,
-        )
-        if resp.status_code != 200:
-            raise CloudDriveError(f"OneDrive list ล้มเหลว: HTTP {resp.status_code} {resp.text[:300]}")
-        items = resp.json().get("value", [])
+        # Follow @odata.nextLink so folders with more than one page (>999
+        # items) are fully listed instead of silently truncated.
+        headers = self._headers()  # reuse one token across all pages
+        url: str | None = f"{GRAPH_BASE}/drives/{self.drive_id}/{seg}/children"
+        params: Dict[str, Any] | None = {"$select": "id,name,size,file", "$top": 999}
+        items: List[Dict[str, Any]] = []
+        while url:
+            resp = requests.get(url, headers=headers, params=params, timeout=DEFAULT_TIMEOUT)
+            if resp.status_code != 200:
+                raise CloudDriveError(f"OneDrive list ล้มเหลว: HTTP {resp.status_code} {resp.text[:300]}")
+            body = resp.json()
+            items.extend(body.get("value", []))
+            # nextLink already carries the query string; don't re-send params.
+            url = body.get("@odata.nextLink")
+            params = None
         # keep files only (skip subfolders)
         return [{"id": it["id"], "name": it["name"], "size": it.get("size"),
                  "mimeType": (it.get("file") or {}).get("mimeType")}

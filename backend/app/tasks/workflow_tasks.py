@@ -27,15 +27,23 @@ def run_workflow_task(self, run_id: str):
 
     db = SessionLocal()
     try:
-        run = db.query(WorkflowRun).filter(WorkflowRun.id == run_id).first()
-        if not run:
-            logger.error("WorkflowRun not found: %s", run_id)
-            return
-        if run.status not in ("queued", "running"):
-            logger.info("WorkflowRun %s already in status %s — skipping", run_id, run.status)
-            return
-        run.task_id = self.request.id
+        # Atomic claim: only a "queued" run may start. A redelivered task
+        # (worker killed mid-run, acks_late) finds status "running" and is
+        # skipped instead of re-executing side-effectful nodes.
+        claimed = (
+            db.query(WorkflowRun)
+            .filter(WorkflowRun.id == run_id, WorkflowRun.status == "queued")
+            .update({"task_id": self.request.id}, synchronize_session=False)
+        )
         db.commit()
+        if not claimed:
+            run = db.query(WorkflowRun).filter(WorkflowRun.id == run_id).first()
+            logger.info(
+                "WorkflowRun %s not claimable (status=%s) — skipping",
+                run_id, run.status if run else "missing",
+            )
+            return
+        run = db.query(WorkflowRun).filter(WorkflowRun.id == run_id).first()
         execute_workflow_run(db, run)
 
         workflow = db.query(Workflow).filter(Workflow.id == run.workflow_id).first()
@@ -62,15 +70,20 @@ def test_node_task(self, run_id: str, node_id: str):
 
     db = SessionLocal()
     try:
-        run = db.query(WorkflowRun).filter(WorkflowRun.id == run_id).first()
-        if not run:
-            logger.error("WorkflowRun not found: %s", run_id)
-            return
-        if run.status not in ("queued", "running"):
-            logger.info("WorkflowRun %s already in status %s — skipping", run_id, run.status)
-            return
-        run.task_id = self.request.id
+        claimed = (
+            db.query(WorkflowRun)
+            .filter(WorkflowRun.id == run_id, WorkflowRun.status == "queued")
+            .update({"task_id": self.request.id}, synchronize_session=False)
+        )
         db.commit()
+        if not claimed:
+            run = db.query(WorkflowRun).filter(WorkflowRun.id == run_id).first()
+            logger.info(
+                "WorkflowRun %s not claimable (status=%s) — skipping",
+                run_id, run.status if run else "missing",
+            )
+            return
+        run = db.query(WorkflowRun).filter(WorkflowRun.id == run_id).first()
         execute_single_node(db, run, node_id)
     except Exception:
         logger.exception("Node test %s/%s crashed", run_id, node_id)
@@ -91,22 +104,64 @@ def dispatch_scheduled_workflows():
     now = datetime.now(timezone.utc)
     db = SessionLocal()
     try:
-        workflows = (
-            db.query(Workflow)
+        candidate_ids = [
+            row[0]
+            for row in db.query(Workflow.id)
             .filter(
                 Workflow.is_active.is_(True),
                 Workflow.schedule_enabled.is_(True),
                 Workflow.schedule_cron.isnot(None),
             )
             .all()
-        )
-        for wf in workflows:
+        ]
+        db.rollback()  # end the read transaction before per-row locking
+
+        for wf_id in candidate_ids:
             try:
+                # Lock one workflow per transaction and re-check its schedule
+                # under the lock, so overlapping dispatch tasks (beat backlog,
+                # multiple workers) cannot double-enqueue the same tick.
+                wf = (
+                    db.query(Workflow)
+                    .filter(
+                        Workflow.id == wf_id,
+                        Workflow.is_active.is_(True),
+                        Workflow.schedule_enabled.is_(True),
+                        Workflow.schedule_cron.isnot(None),
+                    )
+                    .with_for_update(skip_locked=True)
+                    .first()
+                )
+                if wf is None:  # locked by a concurrent dispatcher or changed
+                    db.rollback()
+                    continue
                 if wf.next_run_at is None:
                     wf.next_run_at = compute_next_run(wf.schedule_cron, now)
                     db.commit()
                     continue
                 if wf.next_run_at > now:
+                    db.rollback()
+                    continue
+
+                # Overlap guard: if the previous scheduled/manual run is still
+                # in flight, skip this tick (advance the schedule) instead of
+                # stacking a second concurrent run — critical for imports, where
+                # two overlapping runs would process the same folder in parallel.
+                active = (
+                    db.query(WorkflowRun.id)
+                    .filter(
+                        WorkflowRun.workflow_id == wf.id,
+                        WorkflowRun.status.in_(["queued", "running"]),
+                    )
+                    .first()
+                )
+                if active is not None:
+                    wf.next_run_at = compute_next_run(wf.schedule_cron, now)
+                    db.commit()
+                    logger.info(
+                        "Skipping scheduled workflow %s — previous run still active",
+                        wf.id,
+                    )
                     continue
 
                 run = WorkflowRun(
@@ -122,7 +177,7 @@ def dispatch_scheduled_workflows():
                 run_workflow_task.delay(str(run.id))
                 logger.info("Scheduled workflow %s → run %s", wf.id, run.id)
             except Exception:
-                logger.exception("Failed to dispatch scheduled workflow %s", wf.id)
+                logger.exception("Failed to dispatch scheduled workflow %s", wf_id)
                 db.rollback()
     finally:
         db.close()

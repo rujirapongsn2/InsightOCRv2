@@ -21,6 +21,9 @@ class AISettings(Base):
     # Agent-specific fields
     model = Column(String, default="gpt-4o-mini")
     is_agent_provider = Column(Boolean, default=False)  # Use as Agent's LLM backend
+    # Dedicated backend for the AI workflow builder. When unset, the builder
+    # falls back to the agent provider / active default (same as the rest of the system).
+    is_workflow_builder_provider = Column(Boolean, default=False)
     provider_type = Column(String, default="completion_messages")  # "openai_compatible" | "completion_messages"
 
     # Additional settings (JSON-like format in description)

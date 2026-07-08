@@ -3,6 +3,7 @@ def requires_confirmation(tool_name: str, args: dict) -> bool:
         "approve_document", "reject_document", "bulk_approve",
         "update_document_field", "delete_file", "forget_memory",
         "delete_skill", "send_to_workflow",
+        "save_workflow",  # final commit of an AI-designed workflow
     }
     if tool_name in DESTRUCTIVE_TOOLS:
         return True
@@ -29,6 +30,8 @@ def describe_action(tool_name: str, args: dict) -> str:
         return f"ลบไฟล์ '{args.get('path')}' จาก job storage"
     if tool_name == "send_to_workflow":
         return f"ส่งข้อมูลไปยัง Workflow '{args.get('integration_name')}'"
+    if tool_name == "save_workflow":
+        return f"บันทึก workflow '{args.get('name') or '(ใช้ draft ล่าสุด)'}'"
     if tool_name == "call_api_integration":
         method = args.get("method", "GET")
         path = args.get("path", "")

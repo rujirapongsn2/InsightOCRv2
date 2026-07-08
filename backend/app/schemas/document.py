@@ -19,7 +19,10 @@ class DocumentUpdate(BaseModel):
     reviewed_data: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]] = None
     review_decision: Optional[str] = None
 
-class Document(DocumentBase):
+class DocumentListItem(DocumentBase):
+    """List-view document: everything except ocr_pages, the per-page OCR
+    payload that can reach hundreds of KB per document. Fetch a single
+    document to get it."""
     id: UUID
     job_id: UUID
     status: str
@@ -33,8 +36,11 @@ class Document(DocumentBase):
     reviewed_by: Optional[UUID] = None
     uploaded_at: datetime
     page_count: Optional[int] = None
-    ocr_pages: Optional[List[Dict[str, Any]]] = None
     processing_error: Optional[str] = None
 
     class Config:
         from_attributes = True
+
+
+class Document(DocumentListItem):
+    ocr_pages: Optional[List[Dict[str, Any]]] = None

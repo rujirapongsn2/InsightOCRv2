@@ -9,7 +9,10 @@ class AgentConversation(Base):
     __tablename__ = "agent_conversations"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
-    job_id = Column(UUID(as_uuid=True), ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False, index=True)
+    # "document" (job-scoped assistant) | "workflow_builder" (not job-scoped)
+    kind = Column(String(32), nullable=False, default="document")
+    # Nullable: workflow-builder conversations are not tied to a Job.
+    job_id = Column(UUID(as_uuid=True), ForeignKey("jobs.id", ondelete="CASCADE"), nullable=True, index=True)
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     integration_id = Column(UUID(as_uuid=True), ForeignKey("integrations.id", ondelete="SET NULL"), nullable=True)
     title = Column(String(255), nullable=True)

@@ -9,6 +9,7 @@ export interface AIProviderSetting {
   is_default: boolean
   model: string | null
   is_agent_provider: boolean
+  is_workflow_builder_provider: boolean
   provider_type: string
   description: string | null
   created_at: string
@@ -102,6 +103,27 @@ export async function unsetAgentProvider(token: string, id: string): Promise<voi
   if (!res.ok) {
     const body = await res.json().catch(() => ({}))
     throw new Error(body.detail || "Failed to unset agent provider")
+  }
+}
+
+export async function setWorkflowBuilderProvider(token: string, id: string): Promise<AIProviderSetting> {
+  const res = await fetch(`${getApiBaseUrl()}/ai-settings/${id}/set-workflow-builder-provider`, {
+    method: "POST",
+    headers: authHeaders(token),
+  })
+  const body = await res.json()
+  if (!res.ok) throw new Error(body.detail || "Failed to set workflow builder provider")
+  return body
+}
+
+export async function unsetWorkflowBuilderProvider(token: string, id: string): Promise<void> {
+  const res = await fetch(`${getApiBaseUrl()}/ai-settings/${id}/set-workflow-builder-provider`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${token}` },
+  })
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}))
+    throw new Error(body.detail || "Failed to unset workflow builder provider")
   }
 }
 

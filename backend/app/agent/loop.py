@@ -8,6 +8,7 @@ Optimizations (Phase 6):
 import json
 import asyncio
 import logging
+import os
 import re
 from typing import AsyncGenerator, Any
 from uuid import UUID, uuid4
@@ -23,7 +24,7 @@ from app.agent.context import AgentContext, build_system_prompt, tool_content_fo
 from app.agent.events import sse_event, SSEEventType
 from app.agent.confirmations import requires_confirmation, describe_action
 from app.agent.tools.registry import tool_registry
-from app.agent.tools import document_tools, integration_tools, memory_tools, code_tools, skill_tools, filesystem_tools, web_search_tools  # noqa: F401 — side-effect: registers tools
+from app.agent.tools import document_tools, integration_tools, memory_tools, code_tools, skill_tools, filesystem_tools, web_search_tools, workflow_tools  # noqa: F401 — side-effect: registers tools
 from app.crud.crud_agent_message import agent_message as crud_msg
 from app.crud.crud_agent_pending import agent_pending as crud_pending
 from app.crud.crud_agent_conversation import agent_conversation as crud_conv
@@ -39,6 +40,11 @@ LLM_REQUEST_TIMEOUT_S = 120.0
 LLM_MAX_ATTEMPTS = 3
 LLM_RETRY_BASE_DELAY_S = 2.0
 
+# Hard cap for one agent run. The run lives inside the HTTP request, so
+# without a cap a hung tool or provider keeps the connection (and its DB
+# session) open until the proxy kills it.
+AGENT_MAX_RUNTIME_S = int(os.environ.get("AGENT_MAX_RUNTIME_S", "900"))
+
 
 async def _chat_with_retry(client: AsyncOpenAI, **kwargs):
     """chat.completions.create with retries and a temperature fallback.
@@ -52,8 +58,15 @@ async def _chat_with_retry(client: AsyncOpenAI, **kwargs):
             return await client.chat.completions.create(**kwargs)
         except Exception as e:
             last_exc = e
-            if "temperature" in str(e).lower() and "temperature" in kwargs:
+            msg = str(e).lower()
+            if "temperature" in msg and "temperature" in kwargs:
                 kwargs.pop("temperature")
+                continue
+            # Some providers don't support function calling — drop tools and retry
+            # immediately so callers can fall back to parsing JSON from content.
+            if ("tool" in msg or "function" in msg) and "tools" in kwargs:
+                kwargs.pop("tools", None)
+                kwargs.pop("tool_choice", None)
                 continue
             if attempt < LLM_MAX_ATTEMPTS:
                 await asyncio.sleep(LLM_RETRY_BASE_DELAY_S * (2 ** (attempt - 1)))
@@ -110,6 +123,49 @@ def _extract_json_object(text: str) -> dict[str, Any] | None:
     except Exception:
         return None
     return parsed if isinstance(parsed, dict) else None
+
+
+def _extract_json_objects(text: str) -> list[dict[str, Any]]:
+    """Extract every top-level JSON object from text via balanced-brace scanning.
+
+    Robust to a model that returns several action objects in one response
+    (e.g. three concatenated {"type":"tool_call",...} lines) or wraps them in
+    prose / markdown fences. String contents (with escapes) are skipped so
+    braces inside string values don't confuse the scan.
+    """
+    if not text:
+        return []
+    objs: list[dict[str, Any]] = []
+    depth = 0
+    start = -1
+    in_str = False
+    esc = False
+    for i, ch in enumerate(text):
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}" and depth > 0:
+            depth -= 1
+            if depth == 0 and start >= 0:
+                try:
+                    obj = json.loads(text[start:i + 1])
+                    if isinstance(obj, dict):
+                        objs.append(obj)
+                except Exception:
+                    pass
+                start = -1
+    return objs
 
 
 
@@ -498,19 +554,29 @@ def _extract_tool_calls_from_content(text: str | None) -> list:
 class AgentLoop:
     """One agent run for one user message."""
 
-    def __init__(self, db: Session, conversation_id: UUID, user_id: UUID, job_id: UUID, llm_config: dict, max_iterations: int = 15):
+    def __init__(self, db: Session, conversation_id: UUID, user_id: UUID, job_id: UUID | None, llm_config: dict, max_iterations: int = 15, kind: str = "document"):
         self.db = db
         self.conversation_id = conversation_id
         self.user_id = user_id
         self.job_id = job_id
         self.llm_config = llm_config
         self.max_iterations = max_iterations
-        self.context = AgentContext(db=db, user_id=user_id, job_id=job_id, conversation_id=conversation_id)
+        self.kind = kind
+        self.context = AgentContext(db=db, user_id=user_id, job_id=job_id, conversation_id=conversation_id, kind=kind)
 
     async def run(self, user_message: str) -> AsyncGenerator[str, None]:
+        deadline = asyncio.get_event_loop().time() + AGENT_MAX_RUNTIME_S
         try:
             async for event in self._run_inner(user_message):
                 yield event
+                if asyncio.get_event_loop().time() > deadline:
+                    logger.warning(
+                        "Agent run exceeded %ss cap — stopping", AGENT_MAX_RUNTIME_S
+                    )
+                    yield sse_event(SSEEventType.ERROR, {
+                        "message": f"หยุดการทำงาน: เกินเวลาสูงสุด {AGENT_MAX_RUNTIME_S // 60} นาทีต่อการรันหนึ่งครั้ง"
+                    })
+                    return
         except Exception as e:
             logger.error("AgentLoop.run crashed (unhandled): %s", e, exc_info=True)
             try:
@@ -521,6 +587,11 @@ class AgentLoop:
     async def _run_inner(self, user_message: str) -> AsyncGenerator[str, None]:
         crud_msg.add(self.db, conversation_id=self.conversation_id, role="user", content=user_message, iteration=0)
         crud_conv.update_title(self.db, self.conversation_id, user_message[:60])
+
+        if self.kind == "workflow_builder":
+            async for event in self._run_workflow_builder(user_message):
+                yield event
+            return
 
         if self.llm_config.get("provider") == "completion_messages":
             async for event in self._run_completion_provider(user_message):
@@ -1278,6 +1349,307 @@ class AgentLoop:
                      tool_call_id=call_id, tool_name=tool_name, tool_result=result, iteration=iteration)
         self._last_context_result = {"tool": tool_name, "arguments": tool_args, "result": result}
 
+    async def _builder_model_text(self, prompt: str, system_prompt: str, tool_results: list[dict]) -> str:
+        """One model call for the workflow builder. Provider-agnostic: uses the
+        completion-messages endpoint or an OpenAI-compatible chat call, both
+        returning plain text that must contain the JSON action object."""
+        if self.llm_config.get("provider") == "completion_messages":
+            return await self._call_completion_provider(prompt, system_prompt, tool_results)
+        client = AsyncOpenAI(
+            api_key=self.llm_config.get("apiKey"),
+            base_url=self.llm_config.get("baseUrl") or None,
+            timeout=LLM_REQUEST_TIMEOUT_S,
+            max_retries=0,
+        )
+        response = await _chat_with_retry(
+            client,
+            model=self.llm_config.get("model", "gpt-4o-mini"),
+            messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}],
+            temperature=LLM_TEMPERATURE,
+            stream=False,
+        )
+        return response.choices[0].message.content or ""
+
+    async def _run_workflow_builder(self, user_message: str) -> AsyncGenerator[str, None]:
+        """Dispatch the AI workflow builder by provider capability.
+
+        openai_compatible → native function calling (structured, correctly-escaped
+        tool arguments — avoids the fragile free-text-JSON parsing that breaks on
+        large definitions with unescaped quotes). completion_messages → JSON contract.
+        """
+        if self.llm_config.get("provider") == "completion_messages":
+            async for event in self._run_workflow_builder_json(user_message):
+                yield event
+        else:
+            async for event in self._run_workflow_builder_native(user_message):
+                yield event
+
+    async def _await_with_keepalive(self, coro, interval: float = 12.0):
+        """Await `coro` while emitting SSE keepalive comments, so a long silent
+        operation (LLM call, etc.) never leaves the stream idle long enough for a
+        browser/proxy to drop it ("Load failed"). Yields keepalive strings; the
+        awaited result is stored on self._awaited (re-raises if `coro` raised)."""
+        task = asyncio.ensure_future(coro)
+        while True:
+            done, _ = await asyncio.wait({task}, timeout=interval)
+            if done:
+                break
+            yield ": keepalive\n\n"
+        self._awaited = task.result()
+
+    async def _builder_execute_call(self, call_id: str, tool_name: str, tool_args: dict, iteration: int, model_name: str):
+        """Execute one builder tool call (with confirmation gating), emitting SSE
+        events. Returns (result, [event...]) is awkward for a generator, so this is
+        a generator that yields SSE strings and stores the result on self._last_builder_result."""
+        yield sse_event(SSEEventType.TOOL_CALL, {"id": call_id, "name": tool_name, "arguments": tool_args})
+        if requires_confirmation(tool_name, tool_args):
+            pending = crud_pending.create(
+                self.db, conversation_id=self.conversation_id, user_id=self.user_id,
+                tool_name=tool_name, tool_arguments=tool_args,
+                description=describe_action(tool_name, tool_args),
+            )
+            yield sse_event(SSEEventType.CONFIRMATION_REQUIRED, {
+                "pending_action_id": str(pending.id), "tool_call_id": call_id,
+                "tool_name": tool_name, "description": pending.description, "arguments": tool_args,
+            })
+            # Poll for the user's decision, emitting a keepalive every ~10s so the
+            # SSE stream survives however long the user takes to confirm.
+            approved = None
+            for tick in range(300):
+                self.db.rollback()  # end the read txn before sleeping
+                action = crud_pending.get(self.db, pending.id)
+                if action and action.status == "confirmed":
+                    approved = True
+                    break
+                if action and action.status == "rejected":
+                    approved = False
+                    break
+                if tick % 10 == 0:
+                    yield ": keepalive\n\n"
+                await asyncio.sleep(1)
+            if approved is None:
+                crud_pending.resolve(self.db, pending.id, "rejected")
+                approved = False
+            if not approved:
+                result = {"error": "User rejected action", "tool_name": tool_name}
+                yield sse_event(SSEEventType.TOOL_REJECTED, {"id": call_id, "name": tool_name})
+            else:
+                result = await tool_registry.execute(tool_name, tool_args, self.context)
+        else:
+            result = await tool_registry.execute(tool_name, tool_args, self.context)
+        yield sse_event(SSEEventType.TOOL_RESULT, {"id": call_id, "name": tool_name, "result": result})
+        crud_msg.add(self.db, conversation_id=self.conversation_id, role="tool",
+                     tool_call_id=call_id, tool_name=tool_name, tool_result=result, iteration=iteration)
+        self._last_builder_result = result
+
+    async def _run_workflow_builder_native(self, user_message: str) -> AsyncGenerator[str, None]:
+        """Workflow builder over an OpenAI-compatible provider using NATIVE function
+        calling. Falls back to parsing JSON actions from message content if the
+        endpoint ignores the tools parameter."""
+        model = self.llm_config.get("model", "gpt-4o-mini")
+        system_prompt = build_system_prompt(self.context, user_message)
+        tools_schema = tool_registry.get_openai_schemas(categories=["workflow", "web"])
+        client = AsyncOpenAI(
+            api_key=self.llm_config.get("apiKey"),
+            base_url=self.llm_config.get("baseUrl") or None,
+            timeout=LLM_REQUEST_TIMEOUT_S,
+            max_retries=0,
+        )
+        history = await self.context.load_history()
+        messages: list[dict] = [{"role": "system", "content": system_prompt}] + history
+        MAX_TOOLS_PER_TURN = 6
+
+        for iteration in range(1, self.max_iterations + 1):
+            yield sse_event(SSEEventType.THINKING, {"iteration": iteration})
+            try:
+                # Keepalive-wrapped so a slow LLM turn (large definition) doesn't
+                # leave the SSE stream idle and get dropped mid-run.
+                self._awaited = None
+                async for ka in self._await_with_keepalive(_chat_with_retry(
+                    client, model=model, messages=messages, tools=tools_schema,
+                    tool_choice="auto", temperature=LLM_TEMPERATURE, stream=False,
+                )):
+                    yield ka
+                response = self._awaited
+            except Exception as e:
+                yield sse_event(SSEEventType.ERROR, {"message": f"AI provider error: {str(e)}"})
+                return
+
+            msg = response.choices[0].message
+            native_calls = list(msg.tool_calls or [])
+
+            if native_calls:
+                calls = []
+                for tc in native_calls[:MAX_TOOLS_PER_TURN]:
+                    try:
+                        args = json.loads(tc.function.arguments or "{}")
+                    except Exception:
+                        args = {}
+                    calls.append((tc.id, tc.function.name, args if isinstance(args, dict) else {}))
+                assistant_tcd = _tool_calls_data(msg)
+                assistant_content = msg.content
+            else:
+                # Endpoint may have ignored `tools` and emitted JSON action(s) as text.
+                objs = _extract_json_objects(msg.content or "")
+                tool_objs = [o for o in objs if o.get("type") == "tool_call" and o.get("tool")][:MAX_TOOLS_PER_TURN]
+                if not tool_objs:
+                    final_obj = next((o for o in objs if o.get("type") == "final"), None)
+                    final_text = str((final_obj or {}).get("answer") or msg.content or "").strip() or "…"
+                    crud_msg.add(self.db, conversation_id=self.conversation_id, role="assistant",
+                                 content=final_text, iteration=iteration, model_used=model)
+                    yield sse_event(SSEEventType.DELTA, {"text": final_text})
+                    yield sse_event(SSEEventType.DONE, {"iterations": iteration})
+                    return
+                calls = [(f"call_{uuid4().hex[:12]}", o["tool"],
+                          o.get("arguments") if isinstance(o.get("arguments"), dict) else {}) for o in tool_objs]
+                assistant_tcd = [{"id": cid, "type": "function",
+                                  "function": {"name": n, "arguments": json.dumps(a, ensure_ascii=False)}}
+                                 for cid, n, a in calls]
+                assistant_content = None
+
+            crud_msg.add(self.db, conversation_id=self.conversation_id, role="assistant",
+                         content=assistant_content, tool_calls=assistant_tcd,
+                         iteration=iteration, model_used=model)
+            messages.append({"role": "assistant", "content": assistant_content, "tool_calls": assistant_tcd})
+
+            for call_id, tool_name, tool_args in calls:
+                self._last_builder_result = None
+                async for event in self._builder_execute_call(call_id, tool_name, tool_args, iteration, model):
+                    yield event
+                messages.append({"role": "tool", "tool_call_id": call_id,
+                                 "content": tool_content_for_llm(self._last_builder_result)})
+
+        final_text = "ยังออกแบบ workflow ไม่เสร็จภายในจำนวนรอบที่กำหนด ลองระบุเป้าหมายให้ชัดเจนขึ้นได้ไหมครับ"
+        crud_msg.add(self.db, conversation_id=self.conversation_id, role="assistant",
+                     content=final_text, iteration=self.max_iterations, model_used=model)
+        yield sse_event(SSEEventType.DELTA, {"text": final_text})
+        yield sse_event(SSEEventType.DONE, {"iterations": self.max_iterations, "stopped": "max_iterations"})
+
+    async def _run_workflow_builder_json(self, user_message: str) -> AsyncGenerator[str, None]:
+        """Workflow builder for completion_messages providers (no native function
+        calling): JSON tool-calling contract parsed from free-text replies."""
+        model_name = self.llm_config.get("model", "default_ai_settings")
+        system_prompt = build_system_prompt(self.context, user_message)
+        tools_schema = tool_registry.get_openai_schemas(categories=["workflow", "web"])
+
+        history = await self.context.load_history()
+        history_lines: list[str] = []
+        for m in history[:-1]:  # exclude the just-added user message
+            role = m.get("role")
+            if role == "user":
+                history_lines.append(f"USER: {m.get('content') or ''}")
+            elif role == "assistant" and m.get("content"):
+                history_lines.append(f"ASSISTANT: {m.get('content')}")
+        history_text = "\n".join(history_lines[-20:]) or "(none)"
+
+        action_rules = {"type": "tool_call", "tool": "list_node_types", "arguments": {}}
+        final_rules = {"type": "final", "answer": "your message or question to the user"}
+        base_prompt = f"""{system_prompt}
+
+## Tool Calling Contract
+Reply with JSON objects only — no prose, no markdown fences.
+To call a tool: {json.dumps(action_rules, ensure_ascii=False)}
+To ask the user a question or give a final message: {json.dumps(final_rules, ensure_ascii=False)}
+Prefer ONE object per reply. If you must call several tools, output each as its
+own JSON object; they run in order. Never mix a "final" object with "tool_call"
+objects in the same reply.
+
+## Available Tools
+{json.dumps(tools_schema, ensure_ascii=False)}
+
+## Conversation so far
+{history_text}
+
+## Current user message
+{user_message}
+"""
+
+        MAX_TOOLS_PER_TURN = 5
+        tool_results: list[dict] = []
+        for iteration in range(1, self.max_iterations + 1):
+            yield sse_event(SSEEventType.THINKING, {"iteration": iteration})
+            prompt = base_prompt
+            if tool_results:
+                prompt += "\n## Recent Tool Results\n" + tool_content_for_llm(tool_results[-6:])
+
+            try:
+                answer = await self._builder_model_text(prompt, system_prompt, tool_results)
+            except Exception as e:
+                yield sse_event(SSEEventType.ERROR, {"message": f"AI provider error: {str(e)}"})
+                return
+
+            # A model may emit several action objects in one reply — parse them all.
+            actions = _extract_json_objects(answer)
+            tool_actions = [
+                a for a in actions
+                if a.get("type") == "tool_call" and a.get("tool")
+            ][:MAX_TOOLS_PER_TURN]
+            final_action = next((a for a in actions if a.get("type") == "final"), None)
+
+            if not tool_actions:
+                # No tools requested → this turn is a final message / question.
+                # Prefer an explicit final answer; otherwise, only fall back to raw
+                # text if it is NOT leftover action JSON (which must never be shown).
+                if final_action and final_action.get("answer"):
+                    final_text = str(final_action["answer"]).strip()
+                elif actions:
+                    # Parsed objects but none usable (e.g. malformed tool_call) —
+                    # nudge instead of dumping JSON, then retry the loop.
+                    tool_results.append({"tool": "__parse_hint", "arguments": {}, "result": {
+                        "error": "ตอบกลับไม่ตรงรูปแบบ ให้ส่ง JSON object เดียวตาม contract (tool_call หรือ final)"
+                    }})
+                    continue
+                else:
+                    final_text = answer.strip()
+                final_text = final_text or "…"
+                crud_msg.add(self.db, conversation_id=self.conversation_id, role="assistant",
+                             content=final_text, iteration=iteration, model_used=model_name)
+                yield sse_event(SSEEventType.DELTA, {"text": final_text})
+                yield sse_event(SSEEventType.DONE, {"iterations": iteration})
+                return
+
+            # Execute each requested tool in order within this turn.
+            for act in tool_actions:
+                tool_name = str(act.get("tool") or "")
+                tool_args = act.get("arguments") if isinstance(act.get("arguments"), dict) else {}
+                call_id = f"call_{uuid4().hex[:12]}"
+                crud_msg.add(self.db, conversation_id=self.conversation_id, role="assistant",
+                             content=None,
+                             tool_calls=[{"id": call_id, "type": "function",
+                                          "function": {"name": tool_name, "arguments": json.dumps(tool_args, ensure_ascii=False)}}],
+                             iteration=iteration, model_used=model_name)
+                yield sse_event(SSEEventType.TOOL_CALL, {"id": call_id, "name": tool_name, "arguments": tool_args})
+
+                if requires_confirmation(tool_name, tool_args):
+                    pending = crud_pending.create(
+                        self.db, conversation_id=self.conversation_id, user_id=self.user_id,
+                        tool_name=tool_name, tool_arguments=tool_args,
+                        description=describe_action(tool_name, tool_args),
+                    )
+                    yield sse_event(SSEEventType.CONFIRMATION_REQUIRED, {
+                        "pending_action_id": str(pending.id), "tool_call_id": call_id,
+                        "tool_name": tool_name, "description": pending.description, "arguments": tool_args,
+                    })
+                    approved = await self._wait_for_confirmation(pending.id)
+                    if not approved:
+                        result = {"error": "User rejected action", "tool_name": tool_name}
+                        yield sse_event(SSEEventType.TOOL_REJECTED, {"id": call_id, "name": tool_name})
+                    else:
+                        result = await tool_registry.execute(tool_name, tool_args, self.context)
+                else:
+                    result = await tool_registry.execute(tool_name, tool_args, self.context)
+
+                yield sse_event(SSEEventType.TOOL_RESULT, {"id": call_id, "name": tool_name, "result": result})
+                crud_msg.add(self.db, conversation_id=self.conversation_id, role="tool",
+                             tool_call_id=call_id, tool_name=tool_name, tool_result=result, iteration=iteration)
+                tool_results.append({"tool": tool_name, "arguments": tool_args, "result": result})
+
+        final_text = "ยังออกแบบ workflow ไม่เสร็จภายในจำนวนรอบที่กำหนด ลองระบุเป้าหมายให้ชัดเจนขึ้นได้ไหมครับ"
+        crud_msg.add(self.db, conversation_id=self.conversation_id, role="assistant",
+                     content=final_text, iteration=self.max_iterations, model_used=model_name)
+        yield sse_event(SSEEventType.DELTA, {"text": final_text})
+        yield sse_event(SSEEventType.DONE, {"iterations": self.max_iterations, "stopped": "max_iterations"})
+
     async def _run_completion_provider(self, user_message: str) -> AsyncGenerator[str, None]:
         model_name = self.llm_config.get("model", "default_ai_settings")
         system_prompt = build_system_prompt(self.context, user_message)
@@ -1412,7 +1784,7 @@ When a report tool such as run_report_code succeeds, final answers must be short
                 )
                 yield sse_event(SSEEventType.CONFIRMATION_REQUIRED, {
                     "pending_action_id": str(pending.id),
-                    "tool_call_id": tc.id,
+                    "tool_call_id": call_id,
                     "tool_name": tool_name,
                     "description": pending.description,
                     "arguments": tool_args,
@@ -1451,6 +1823,9 @@ When a report tool such as run_report_code succeeds, final answers must be short
 
     async def _wait_for_confirmation(self, pending_id: UUID, timeout_s: int = 300) -> bool:
         for _ in range(timeout_s):
+            # End the read transaction before sleeping so the session does
+            # not sit idle-in-transaction on a pooled connection all night.
+            self.db.rollback()
             await asyncio.sleep(1)
             self.db.expire_all()
             action = crud_pending.get(self.db, pending_id)

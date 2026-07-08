@@ -10,11 +10,11 @@ class Job(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
     name = Column(String, nullable=True)
     description = Column(String, nullable=True)
-    status = Column(String, default="draft") # draft, processing, review, completed, failed
+    status = Column(String, default="draft", index=True) # draft, processing, review, completed, failed
     schema_id = Column(UUID(as_uuid=True), ForeignKey("document_schemas.id"), nullable=True)
-    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
-    
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
     # Relationships

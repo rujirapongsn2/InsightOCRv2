@@ -4,7 +4,7 @@ from typing import Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import Response
 from sqlalchemy.orm import Session, selectinload
 
 from app.api import deps
@@ -23,7 +23,12 @@ from app.schemas.workflow import (
     WorkflowWebhookSecretResponse,
     SuggestVariablesRequest,
     SuggestVariablesResponse,
+    WorkflowExport,
+    WorkflowImportRequest,
+    WorkflowImportResponse,
 )
+from app.services.workflow_validation import validate_workflow_definition
+from app.services.storage import get_storage_service
 from app.services.workflow_engine import (
     NODE_TYPES,
     WORKFLOW_OUTPUT_DIR,
@@ -85,6 +90,7 @@ def suggest_variables_endpoint(
             query=payload.query,
             candidates=[c.model_dump() for c in payload.candidates],
             integration_id=payload.integration_id,
+            owner_user_id=str(current_user.id),
         )
     except NodeExecutionError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
@@ -103,6 +109,51 @@ def list_workflows(
         query = query.filter(Workflow.user_id == current_user.id)
     workflows = query.order_by(Workflow.created_at.desc()).all()
     return {"workflows": workflows, "total": len(workflows)}
+
+
+@router.get("/{workflow_id}/export", response_model=WorkflowExport)
+def export_workflow(
+    workflow_id: UUID,
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_active_user),
+):
+    """Portable JSON of a workflow (definition + metadata) for import elsewhere."""
+    wf = _get_workflow_or_404(db, workflow_id, current_user)
+    return WorkflowExport(
+        name=wf.name,
+        description=wf.description,
+        schedule_cron=wf.schedule_cron,
+        schedule_enabled=bool(wf.schedule_enabled),
+        definition=wf.definition or {"nodes": [], "edges": []},
+    )
+
+
+@router.post("/import", response_model=WorkflowImportResponse, status_code=201)
+def import_workflow(
+    payload: WorkflowImportRequest,
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_active_user),
+):
+    """Import a workflow JSON. Created INACTIVE. Any node whose references don't
+    resolve in this environment (missing job/integration/provider) or whose
+    required config is absent is returned as a warning for the user to fix
+    manually in the builder."""
+    definition = payload.definition or {"nodes": [], "edges": []}
+    issues = validate_workflow_definition(db, definition, current_user)
+    _validate_cron(payload.schedule_cron)
+    wf = Workflow(
+        name=payload.name,
+        description=payload.description,
+        definition=definition,
+        schedule_cron=payload.schedule_cron,
+        schedule_enabled=bool(payload.schedule_enabled),
+        is_active=False,  # imported workflows start disabled until reviewed
+        user_id=current_user.id,
+    )
+    db.add(wf)
+    db.commit()
+    db.refresh(wf)
+    return WorkflowImportResponse(workflow=wf, warnings=issues)
 
 
 @router.post("/", response_model=WorkflowResponse, status_code=201)
@@ -243,7 +294,14 @@ def run_workflow(
     db.refresh(run)
 
     from app.tasks.workflow_tasks import run_workflow_task
-    run_workflow_task.delay(str(run.id))
+    try:
+        run_workflow_task.delay(str(run.id))
+    except Exception:
+        run.status = "failed"
+        run.error = "Failed to enqueue workflow run (task broker unavailable)"
+        run.finished_at = datetime.now(timezone.utc)
+        db.commit()
+        raise HTTPException(status_code=503, detail="Task queue unavailable, please retry")
     return run
 
 
@@ -273,7 +331,14 @@ def test_node(
     db.refresh(run)
 
     from app.tasks.workflow_tasks import test_node_task
-    test_node_task.delay(str(run.id), node_id)
+    try:
+        test_node_task.delay(str(run.id), node_id)
+    except Exception:
+        run.status = "failed"
+        run.error = "Failed to enqueue node test (task broker unavailable)"
+        run.finished_at = datetime.now(timezone.utc)
+        db.commit()
+        raise HTTPException(status_code=503, detail="Task queue unavailable, please retry")
     return run
 
 
@@ -328,7 +393,24 @@ def download_run_output(
     _get_workflow_or_404(db, run.workflow_id, current_user)
 
     safe_name = os.path.basename(filename)
-    path = os.path.join(WORKFLOW_OUTPUT_DIR, str(run_id), safe_name)
-    if not os.path.isfile(path):
+    storage_key = f"{WORKFLOW_OUTPUT_DIR}/{run_id}/{safe_name}"
+    storage = get_storage_service()
+    if not storage.exists(storage_key):
         raise HTTPException(status_code=404, detail="Output file not found")
-    return FileResponse(path, filename=safe_name)
+    with storage.get_local_path(storage_key) as local_path:
+        data = open(local_path, "rb").read()
+    # HTTP headers are latin-1 only, so a non-ASCII (e.g. Thai) filename must use
+    # RFC 5987 `filename*=UTF-8''…`, with an ASCII fallback for old clients.
+    from urllib.parse import quote
+    ascii_fallback = safe_name.encode("ascii", "ignore").decode() or "download"
+    if ascii_fallback.startswith("."):  # Thai name reduced to just its extension
+        ascii_fallback = "download" + ascii_fallback
+    disposition = (
+        f"attachment; filename=\"{ascii_fallback}\"; "
+        f"filename*=UTF-8''{quote(safe_name)}"
+    )
+    return Response(
+        content=data,
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": disposition},
+    )

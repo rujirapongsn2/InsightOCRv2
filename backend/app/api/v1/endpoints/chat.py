@@ -107,9 +107,18 @@ async def list_conversations(
 ):
     """List conversations for a job (current user only)."""
     conversations = crud_chat.get_conversations_by_job(db, job_id=job_id, user_id=current_user.id)
+    # Single grouped COUNT instead of one COUNT query per conversation
+    from app.models.chat import ChatMessage
+    from sqlalchemy import func as sa_func
+    counts = dict(
+        db.query(ChatMessage.conversation_id, sa_func.count(ChatMessage.id))
+        .filter(ChatMessage.conversation_id.in_([c.id for c in conversations]))
+        .group_by(ChatMessage.conversation_id)
+        .all()
+    ) if conversations else {}
     result = []
     for conv in conversations:
-        count = crud_chat.get_message_count(db, conv.id)
+        count = counts.get(conv.id, 0)
         result.append(
             ChatConversationResponse(
                 id=conv.id,

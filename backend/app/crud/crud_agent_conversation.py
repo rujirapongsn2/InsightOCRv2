@@ -6,12 +6,20 @@ from app.models.agent_message import AgentMessage
 
 
 class CRUDAgentConversation:
-    def create(self, db: Session, *, job_id: UUID, user_id: UUID, integration_id: Optional[UUID] = None, max_iterations: int = 15) -> AgentConversation:
-        conv = AgentConversation(job_id=job_id, user_id=user_id, integration_id=integration_id, max_iterations=max_iterations)
+    def create(self, db: Session, *, job_id: Optional[UUID] = None, user_id: UUID, integration_id: Optional[UUID] = None, max_iterations: int = 15, kind: str = "document") -> AgentConversation:
+        conv = AgentConversation(job_id=job_id, user_id=user_id, integration_id=integration_id, max_iterations=max_iterations, kind=kind)
         db.add(conv)
         db.commit()
         db.refresh(conv)
         return conv
+
+    def get_by_user_kind(self, db: Session, user_id: UUID, kind: str) -> List[AgentConversation]:
+        return (
+            db.query(AgentConversation)
+            .filter(AgentConversation.user_id == user_id, AgentConversation.kind == kind)
+            .order_by(AgentConversation.updated_at.desc())
+            .all()
+        )
 
     def get(self, db: Session, conversation_id: UUID) -> Optional[AgentConversation]:
         return db.query(AgentConversation).filter(AgentConversation.id == conversation_id).first()

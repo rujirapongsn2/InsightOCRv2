@@ -29,3 +29,5 @@ pyyaml
 duckduckgo-search
 ddgs
 croniter
+openpyxl
+python-docx

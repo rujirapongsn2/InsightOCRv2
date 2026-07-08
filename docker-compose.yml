@@ -93,8 +93,8 @@ services:
 
   celery_worker:
     build: ./backend
-    container_name: softnix_ocr_celery
-    command: celery -A app.celery_app worker --loglevel=info --concurrency=8
+    # no container_name so `docker compose up --scale celery_worker=N` works
+    command: celery -A app.celery_app worker --loglevel=info --concurrency=8 -Q documents,workflows,celery
     volumes:
       - documents_uploads:/app/uploads
       - /var/run/docker.sock:/var/run/docker.sock  # Sandbox: workflow Python Code nodes
@@ -226,11 +226,21 @@ services:
   redis:
     image: redis:7-alpine
     container_name: softnix_ocr_redis
-    command: redis-server --requirepass ${REDIS_PASSWORD}
+    # Redis is the Celery broker: losing its contents on restart drops every
+    # queued task (hundreds of documents in a bulk import). Enable AOF
+    # persistence on a named volume so the queue survives a restart/crash.
+    # noeviction (default) is deliberate — a broker must never silently evict
+    # pending task messages under memory pressure; it errors loudly instead.
+    command: >-
+      redis-server --requirepass ${REDIS_PASSWORD}
+      --appendonly yes --appendfsync everysec
+      --maxmemory 200mb --maxmemory-policy noeviction
     environment:
       - REDIS_PASSWORD=${REDIS_PASSWORD}
     expose:
       - "6379"
+    volumes:
+      - redis_data:/data
     networks:
       - internal
     security_opt:
@@ -313,3 +323,4 @@ volumes:
   postgres_data:
   minio_data:
   documents_uploads:
+  redis_data:

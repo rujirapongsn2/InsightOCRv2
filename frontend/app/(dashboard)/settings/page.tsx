@@ -15,6 +15,8 @@ import {
   listAIProviders,
   setAgentProvider,
   unsetAgentProvider,
+  setWorkflowBuilderProvider,
+  unsetWorkflowBuilderProvider,
   updateAIProvider,
 } from "@/lib/ai-settings-api"
 
@@ -186,6 +188,24 @@ export default function SettingsPage() {
       } else {
         await setAgentProvider(tok, id)
         setAiProviderSuccess("ตั้ง Agent Provider เรียบร้อยแล้ว")
+      }
+      fetchAiProviders()
+    } catch (e: unknown) {
+      setAiProviderError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  const handleSetWorkflowBuilderProvider = async (id: string, currentlyWfb: boolean) => {
+    const tok = typeof window !== "undefined" ? localStorage.getItem("token") : null
+    if (!tok) return
+    setAiProviderError(null)
+    try {
+      if (currentlyWfb) {
+        await unsetWorkflowBuilderProvider(tok, id)
+        setAiProviderSuccess("ยกเลิก Workflow Builder Provider แล้ว")
+      } else {
+        await setWorkflowBuilderProvider(tok, id)
+        setAiProviderSuccess("ตั้ง Workflow Builder Provider เรียบร้อยแล้ว")
       }
       fetchAiProviders()
     } catch (e: unknown) {
@@ -435,6 +455,9 @@ export default function SettingsPage() {
                   {p.is_agent_provider && (
                     <span className="text-xs font-semibold bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-full">Agent Provider</span>
                   )}
+                  {p.is_workflow_builder_provider && (
+                    <span className="text-xs font-semibold bg-[#EBF4FB] text-[#2786C2] px-2 py-0.5 rounded-full">Workflow Builder</span>
+                  )}
                   <span className="text-xs bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full">{p.provider_type}</span>
                   {!p.is_active && <span className="text-xs bg-red-100 text-red-600 px-2 py-0.5 rounded-full">ปิดใช้งาน</span>}
                 </div>
@@ -449,6 +472,14 @@ export default function SettingsPage() {
                   onClick={() => handleSetAgentProvider(p.id, p.is_agent_provider)}
                 >
                   {p.is_agent_provider ? "ยกเลิก Agent" : "ตั้งเป็น Agent"}
+                </Button>
+                <Button
+                  size="sm"
+                  variant={p.is_workflow_builder_provider ? "default" : "outline"}
+                  className={p.is_workflow_builder_provider ? "bg-[#2786C2] hover:bg-[#1F6FA3] text-xs h-7 px-2" : "text-xs h-7 px-2"}
+                  onClick={() => handleSetWorkflowBuilderProvider(p.id, p.is_workflow_builder_provider)}
+                >
+                  {p.is_workflow_builder_provider ? "ยกเลิก Workflow" : "ตั้งเป็น Workflow"}
                 </Button>
                 <Button size="sm" variant="ghost" className="h-7 w-7 p-0" onClick={() => openEditForm(p)}>
                   <Pencil className="h-3.5 w-3.5" />
@@ -558,6 +589,7 @@ export default function SettingsPage() {
             <p>• <strong>OpenAI Compatible</strong> — รองรับ function calling เต็มรูปแบบ (แนะนำ) ใช้กับ OpenAI, Azure, Together, Groq, Ollama</p>
             <p>• <strong>Completion Messages</strong> — สำหรับ provider ที่ไม่รองรับ native tool calling (fallback)</p>
             <p>• ตั้งเป็น <strong>Agent Provider</strong> เพื่อให้ AI Agent ใช้ provider นี้ (มีได้ 1 ตัวในแต่ละเวลา)</p>
+            <p>• ตั้งเป็น <strong>Workflow Builder</strong> เพื่อเลือก LLM ที่มีประสิทธิภาพสูงสุดสำหรับสร้าง workflow ด้วย AI โดยเฉพาะ — หากไม่ตั้ง จะใช้ Agent Provider / Active Provider ตามค่าเริ่มต้นของระบบ</p>
           </div>
         </CardContent>
       </Card>

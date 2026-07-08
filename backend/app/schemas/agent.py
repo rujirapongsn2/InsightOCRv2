@@ -18,6 +18,14 @@ class ConfirmActionRequest(BaseModel):
     approved: bool
 
 
+class ResolveCredentialRequest(BaseModel):
+    """The frontend saved the key directly to /integrations or /ai-settings and
+    reports only the resulting id here — never the secret."""
+    integration_id: Optional[UUID] = None
+    ai_provider_id: Optional[UUID] = None
+    name: Optional[str] = None
+
+
 class AgentConversationResponse(BaseModel):
     id: UUID
     job_id: UUID

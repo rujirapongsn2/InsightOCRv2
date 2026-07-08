@@ -3,12 +3,13 @@ from typing import List, Any, Optional
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from app.models.user import User
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, defer
 from app.api import deps
 from app.api.permissions import ensure_document_access, ensure_job_access, is_admin_user
+from app.core.config import settings
 from app.models.document import Document
 from app.models.job import Job
-from app.schemas.document import Document as DocumentSchema
+from app.schemas.document import Document as DocumentSchema, DocumentListItem
 from app.services.ocr import process_ocr
 from app.services.structure import extract_structure
 from app.models.setting import Setting
@@ -153,21 +154,31 @@ def table_to_key_values(content: str) -> List[str]:
                 key_values.append(f"{key}: {value}")
     return key_values
 
-@router.get("/job/{job_id}", response_model=List[DocumentSchema])
+@router.get("/job/{job_id}", response_model=List[DocumentListItem])
 def read_job_documents(
     *,
     db: Session = Depends(deps.get_db),
     job_id: str,
+    skip: int = 0,
+    limit: int = 200,
     current_user: User = Depends(deps.get_current_active_user),
 ) -> Any:
     """
-    List documents belonging to a job.
+    List documents belonging to a job (without the heavy ocr_pages payload).
     """
     job = db.query(Job).filter(Job.id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     ensure_job_access(current_user, job)
-    documents = db.query(Document).filter(Document.job_id == job_id).all()
+    documents = (
+        db.query(Document)
+        .options(defer(Document.ocr_pages))
+        .filter(Document.job_id == job_id)
+        .order_by(Document.uploaded_at.asc(), Document.id.asc())
+        .offset(skip)
+        .limit(min(limit, 500))
+        .all()
+    )
     return documents
 
 @router.post("/upload", response_model=DocumentSchema)
@@ -187,28 +198,54 @@ async def upload_document(
         raise HTTPException(status_code=404, detail="Job not found")
     ensure_job_access(current_user, job)
 
+    # Validate extension and size before touching storage
+    file_ext = os.path.splitext(file.filename or "")[1].lower()
+    allowed_exts = {
+        e.strip().lower()
+        for e in settings.ALLOWED_UPLOAD_EXTENSIONS.split(",")
+        if e.strip()
+    }
+    if file_ext not in allowed_exts:
+        raise HTTPException(
+            status_code=415,
+            detail=f"File type '{file_ext or 'unknown'}' is not allowed. "
+                   f"Allowed: {', '.join(sorted(allowed_exts))}",
+        )
+    max_bytes = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
+    file.file.seek(0, os.SEEK_END)
+    file_size = file.file.tell()
+    file.file.seek(0)
+    if file_size > max_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File is too large ({file_size // (1024 * 1024)} MB). "
+                   f"Maximum is {settings.MAX_UPLOAD_SIZE_MB} MB",
+        )
+    if file_size == 0:
+        raise HTTPException(status_code=422, detail="File is empty")
+
     # Move job out of draft once a document is uploaded
     if job.status == "draft":
         job.status = "processing"
         db.add(job)
 
     # Upload file via StorageService
-    file_ext = os.path.splitext(file.filename)[1]
     # Use a relative path key: documents/{job_id}/{uuid}{ext}
     file_key = f"documents/{job_id}/{uuid.uuid4()}{file_ext}"
-    
+
     storage = get_storage_service()
     try:
         storage.upload_file(file.file, file_key, content_type=file.content_type)
     except Exception as e:
         logger.error(f"Failed to upload file: {e}")
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
-    
+
     # Create Document record
     db_document = Document(
         job_id=job_id,
         filename=file.filename,
         file_path=file_key, # Store the key, not absolute path
+        file_size=file_size,
         mime_type=file.content_type,
         status="uploaded"
     )
@@ -251,20 +288,46 @@ def process_document(
         raise HTTPException(status_code=404, detail="Document not found")
     ensure_document_access(current_user, document)
 
-    # Update schema selection (None means Auto) and queue status
-    document.schema_id = process_request.schema_id
-    document.status = "queued"
-    document.processing_error = None  # Clear any previous errors
-    db.add(document)
+    # Atomically claim the document so concurrent /process calls cannot
+    # dispatch two Celery tasks for the same document.
+    claimed = (
+        db.query(Document)
+        .filter(
+            Document.id == document_id,
+            Document.status.notin_(["queued", "processing"]),
+        )
+        .update(
+            {
+                "schema_id": process_request.schema_id,
+                "status": "queued",
+                "processing_error": None,
+            },
+            synchronize_session=False,
+        )
+    )
     db.commit()
+    if not claimed:
+        raise HTTPException(
+            status_code=409,
+            detail="Document is already queued or processing",
+        )
+    db.refresh(document)
 
     # Import and dispatch Celery task
     from app.tasks.document_tasks import process_document_task
-    
-    task = process_document_task.delay(
-        str(document.id),
-        str(process_request.schema_id) if process_request.schema_id else None,
-    )
+
+    try:
+        task = process_document_task.delay(
+            str(document.id),
+            str(process_request.schema_id) if process_request.schema_id else None,
+        )
+    except Exception:
+        # Broker unavailable — release the claim so the user can retry.
+        document.status = "failed"
+        document.processing_error = "Failed to enqueue processing task (broker unavailable)"
+        db.add(document)
+        db.commit()
+        raise HTTPException(status_code=503, detail="Task queue unavailable, please retry")
 
     document.task_id = task.id
     db.add(document)
@@ -350,7 +413,6 @@ _MAX_STREAM_SECONDS = 35 * 60
 @router.get("/{document_id}/progress-stream")
 async def document_progress_stream(
     *,
-    db: Session = Depends(deps.get_db),
     document_id: str,
     current_user: User = Depends(deps.get_current_active_user),
 ) -> Any:
@@ -358,12 +420,32 @@ async def document_progress_stream(
 
     Replaces per-second HTTP polling. The server holds one long-lived
     connection per client and pushes progress events read from Redis
-    (`doc_progress:{id}`) plus periodic DB status checks.
+    (`doc_progress:{id}`) plus periodic DB status checks. No DB session is
+    held across the stream — a connection-pool slot per viewer for 35 min
+    would exhaust the pool; instead each periodic check opens and closes
+    its own short-lived session in a worker thread.
     """
-    document = db.query(Document).filter(Document.id == document_id).first()
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found")
-    ensure_document_access(current_user, document)
+    from app.db.session import SessionLocal
+
+    check_db = SessionLocal()
+    try:
+        document = check_db.query(Document).filter(Document.id == document_id).first()
+        if not document:
+            raise HTTPException(status_code=404, detail="Document not found")
+        ensure_document_access(current_user, document)
+    finally:
+        check_db.close()
+
+    def _fetch_status():
+        s = SessionLocal()
+        try:
+            return (
+                s.query(Document.status, Document.extracted_data, Document.processing_error)
+                .filter(Document.id == document_id)
+                .first()
+            )
+        finally:
+            s.close()
 
     try:
         from app.db.redis import get_redis_client
@@ -397,8 +479,9 @@ async def document_progress_stream(
             processing_error: Optional[str] = None
             if tick % 5 == 0:
                 try:
-                    db.expire(document)
-                    fresh = db.query(Document).filter(Document.id == document_id).first()
+                    # Sync SQLAlchemy in a worker thread: keeps the event
+                    # loop free and holds a pool connection only briefly.
+                    fresh = await asyncio.to_thread(_fetch_status)
                     if fresh:
                         status = fresh.status
                         extracted_data = fresh.extracted_data
