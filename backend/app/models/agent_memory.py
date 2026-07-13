@@ -24,3 +24,5 @@ class AgentMemory(Base):
     __table_args__ = (
         UniqueConstraint("user_id", "scope", "key", "job_id", name="uq_agent_mem_user_scope_key_job"),
     )
+
+    job = relationship("Job", back_populates="agent_memories")

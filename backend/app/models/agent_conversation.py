@@ -22,6 +22,6 @@ class AgentConversation(Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
     messages = relationship("AgentMessage", back_populates="conversation", cascade="all, delete-orphan", order_by="AgentMessage.created_at")
-    job = relationship("Job")
+    job = relationship("Job", back_populates="agent_conversations")
     user = relationship("User")
     integration = relationship("Integration")

@@ -1,6 +1,25 @@
 # QUICKWIN TEST
 
 
+Date: 2026-07-13
+
+## Manual Verification - Job Delete Cascade Fix
+
+1. Root cause
+   - Confirmed repeated `DELETE /api/v1/jobs/{job_id}` failures were caused by `integration_results.job_id` being set to NULL during Job deletion.
+   - Added explicit Job relationships for integration results, chat conversations, agent conversations, and agent memories with `cascade="all, delete-orphan"` and `passive_deletes=True`.
+   - Added Alembic migration `0006_job_fk_cascade` to recreate job-owned foreign keys with `ON DELETE CASCADE`.
+
+2. Verification commands
+   - Ran `python3 -m py_compile` on updated models, migration, and regression test.
+   - Ran `docker run --rm -v /home/ubuntu/InsightOCRv2/backend:/app -w /app --env-file /home/ubuntu/InsightOCRv2/backend/.env insightocrv2-backend python -m pytest test/test_job_delete_cascade.py -q`; result: `2 passed, 1 warning`.
+   - Ran `docker compose up -d --build backend celery_worker celery_beat`; backend returned to `healthy`.
+   - Confirmed `alembic_version` is `0006_job_fk_cascade`.
+   - Confirmed `documents`, `integration_results`, `chat_conversations`, `agent_conversations`, and `agent_memories` job FKs report cascade delete in Postgres.
+   - Ran a rollback-only smoke test in the live backend container that creates a temporary Job + IntegrationResult, deletes the Job, flushes successfully, and rolls back; result: `cascade delete flush ok`.
+
+---
+
 Date: 2026-07-02
 
 ## Manual Verification - Nginx Real IP, Streaming Timeouts, and Probe Blocking
