@@ -20,4 +20,8 @@ class Job(Base):
     # Relationships
     schema = relationship("DocumentSchema")
     documents = relationship("Document", back_populates="job", cascade="all, delete-orphan")
+    chat_conversations = relationship("ChatConversation", back_populates="job", cascade="all, delete-orphan", passive_deletes=True)
+    agent_conversations = relationship("AgentConversation", back_populates="job", cascade="all, delete-orphan", passive_deletes=True)
+    agent_memories = relationship("AgentMemory", back_populates="job", cascade="all, delete-orphan", passive_deletes=True)
+    integration_results = relationship("IntegrationResult", back_populates="job", cascade="all, delete-orphan", passive_deletes=True)
     user = relationship("User")

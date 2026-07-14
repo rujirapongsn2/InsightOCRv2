@@ -35,7 +35,7 @@ class IntegrationResult(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
 
     # Relationships
-    job = relationship("Job", backref="integration_results")
+    job = relationship("Job", back_populates="integration_results")
     integration = relationship("Integration")
     user = relationship("User")
 
