@@ -10,6 +10,7 @@ from datetime import datetime, timezone as dt_timezone
 from celery import shared_task
 from celery.exceptions import SoftTimeLimitExceeded
 from app.celery_app import celery_app
+from app.core.config import settings
 from app.db.session import SessionLocal
 from app.models import Document, DocumentSchema as SchemaModel, Setting
 from app.services.storage import get_storage_service
@@ -895,6 +896,8 @@ def process_document_task(self, document_id: str, schema_id: str | None = None):
 
                 stream_completed = False
                 stream_failed = False
+                sse_idle_timeout = max(30, settings.OCR_SSE_IDLE_TIMEOUT_SECONDS)
+                last_sse_event_at = time.monotonic()
                 # headers has lowercase "accept" from submit; override with proper Accept for SSE
                 stream_headers = {k: v for k, v in headers.items() if k.lower() != "accept"}
                 stream_headers["Accept"] = "text/event-stream"
@@ -913,7 +916,7 @@ def process_document_task(self, document_id: str, schema_id: str | None = None):
                     with requests.get(
                         stream_url,
                         headers=stream_headers,
-                        timeout=1500,
+                        timeout=(30, sse_idle_timeout),
                         verify=verify_ssl,
                         stream=True,
                     ) as stream_response:
@@ -923,12 +926,17 @@ def process_document_task(self, document_id: str, schema_id: str | None = None):
                         data_lines: list[str] = []
 
                         for raw_line in stream_response.iter_lines(decode_unicode=True):
+                            if time.monotonic() - last_sse_event_at > sse_idle_timeout:
+                                raise TimeoutError(
+                                    f"SSE stream idle for more than {sse_idle_timeout} seconds"
+                                )
                             if raw_line.startswith("event:"):
                                 event_type = raw_line[6:].strip()
                             elif raw_line.startswith("data:"):
                                 data_lines.append(raw_line[5:].strip())
                             elif raw_line == "":
                                 if data_lines:
+                                    last_sse_event_at = time.monotonic()
                                     raw_data = "\n".join(data_lines)
                                     try:
                                         event_obj = json.loads(raw_data)
@@ -974,6 +982,16 @@ def process_document_task(self, document_id: str, schema_id: str | None = None):
                                 event_type = None
                                 data_lines = []
 
+                except (
+                    requests.exceptions.ReadTimeout,
+                    requests.exceptions.ConnectionError,
+                ) as stream_err:
+                    job_logger.warning(
+                        f"SSE stream unavailable or idle after {sse_idle_timeout}s ({stream_err})"
+                    )
+                    raise TimeoutError(
+                        f"SSE stream produced no event or progress for {sse_idle_timeout} seconds"
+                    ) from stream_err
                 except requests.exceptions.RequestException as stream_err:
                     job_logger.warning(f"SSE stream failed ({stream_err}), falling back to polling")
                     # Fallback: poll /status until done

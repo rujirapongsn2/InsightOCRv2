@@ -49,6 +49,7 @@ class Settings(BaseSettings):
     OCR_ENDPOINT: Optional[str] = None
     TEST_ENDPOINT: Optional[str] = None
     MISTRAL_API_KEY: Optional[str] = None
+    OCR_SSE_IDLE_TIMEOUT_SECONDS: int = 180
 
     # JWT
     SECRET_KEY: str # Set via env var

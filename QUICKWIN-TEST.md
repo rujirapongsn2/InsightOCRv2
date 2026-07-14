@@ -17,6 +17,8 @@ Date: 2026-07-14
    - Uploads the local document to the provider file API, requests a short-lived signed URL, calls OCR, and deletes the temporary upload when possible.
    - Normalizes `pages[].markdown` into InsightDOC page OCR data so existing extraction and review screens continue to work.
    - Runs only when the primary OCR flow fails, the setting is enabled, and the backend key is configured.
+   - Added a configurable SSE idle timeout (`OCR_SSE_IDLE_TIMEOUT_SECONDS`, default 180 seconds). If the primary provider produces no SSE event or progress within that window, the task raises a timeout and enters the configured fallback path.
+   - Added worker-restart recovery: every 5 minutes, maintenance inspects live Celery document tasks. A `processing` document older than 10 minutes with no active task is marked failed with an auto-reconciled error so it can be retried safely; inspection failures leave the document untouched.
 
 3. Verification commands
    - Ran `python3 -m pytest backend/test/test_ocr_fallback.py -q`: 4 passed.
@@ -29,6 +31,8 @@ Date: 2026-07-14
    - Confirmed unauthenticated `GET /api/v1/settings/config` returns `401`, proving the route is reachable through nginx.
    - Confirmed OpenAPI exposes `/api/v1/settings/ocr-fallback/test` and `ocr_fallback_api_key`.
    - Ran a live fallback smoke test with a public PDF: OCR completed successfully with 29 pages and 99,403 extracted characters; the temporary provider upload was cleaned up.
+   - Added `backend/test/test_maintenance_recovery.py` covering active task filtering and the safe skip behavior when Celery inspection is unavailable.
+   - For a stalled SSE smoke test, confirm the job log records `SSE stream idle timeout` and then `trying configured fallback provider`; for a worker restart, confirm maintenance records `auto-reconciled after worker restart`.
    - Full frontend lint still reports pre-existing repository-wide errors outside this change.
 
 ---

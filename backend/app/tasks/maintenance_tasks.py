@@ -26,10 +26,12 @@ from app.models.workflow import WorkflowRun
 logger = logging.getLogger(__name__)
 
 # A workflow run is hard-killed at task_time_limit (2100 s); anything still
-# "running" well past that is a dead worker. Documents may legitimately run
-# multiple Celery retries, so they get a larger budget.
+# "running" well past that is a dead worker. Documents are checked against
+# the live Celery task list before being reconciled, so this timeout only
+# applies when the task is no longer running (for example after a worker
+# restart).
 RUN_RUNNING_STALE = timedelta(seconds=2100 + 600)
-DOC_PROCESSING_STALE = timedelta(hours=3)
+DOC_PROCESSING_STALE = timedelta(minutes=10)
 
 # Queued rows are NOT failed just because they are old — a large bulk import
 # (thousands of files, few workers) legitimately keeps items queued for hours.
@@ -47,6 +49,24 @@ DOC_QUEUED_STALE = timedelta(hours=24)
 # Broker queue names (see task_routes in celery_app.py).
 DOC_QUEUE = "documents"
 WORKFLOW_QUEUE = "workflows"
+
+
+def _active_document_task_ids() -> Optional[set[str]]:
+    """Return active document task ids, or None when worker inspection fails."""
+    try:
+        active_by_worker = celery_app.control.inspect(timeout=2).active()
+        if active_by_worker is None:
+            return None
+        return {
+            task.get("id")
+            for tasks in active_by_worker.values()
+            for task in (tasks or [])
+            if task.get("name") == "app.tasks.document_tasks.process_document_task"
+            and task.get("id")
+        }
+    except Exception:
+        logger.warning("Unable to inspect active Celery tasks; skipping stale document recovery", exc_info=True)
+        return None
 
 
 def _broker_queue_len(queue: str) -> Optional[int]:
@@ -154,21 +174,28 @@ def reconcile_stale_states():
                 synchronize_session=False,
             )
         )
-        stale_docs = (
-            db.query(Document)
-            .filter(
-                Document.status == "processing",
-                Document.processing_started_at.isnot(None),
-                Document.processing_started_at < now - DOC_PROCESSING_STALE,
+        active_document_task_ids = _active_document_task_ids()
+        stale_docs = 0
+        if active_document_task_ids is not None:
+            stale_processing_docs = (
+                db.query(Document)
+                .filter(
+                    Document.status == "processing",
+                    Document.processing_started_at.isnot(None),
+                    Document.processing_started_at < now - DOC_PROCESSING_STALE,
+                )
+                .all()
             )
-            .update(
-                {
-                    "status": "failed",
-                    "processing_error": "Processing abandoned: worker died or timed out (auto-reconciled)",
-                },
-                synchronize_session=False,
-            )
-        )
+            for document in stale_processing_docs:
+                if document.task_id and document.task_id in active_document_task_ids:
+                    continue
+                document.status = "failed"
+                document.processing_error = (
+                    "Processing abandoned: worker task is no longer active "
+                    "(auto-reconciled after worker restart)"
+                )
+                db.add(document)
+                stale_docs += 1
         stale_queued_docs = (
             db.query(Document)
             .filter(
