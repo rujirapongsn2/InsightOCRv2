@@ -48,6 +48,7 @@ class Settings(BaseSettings):
     AGENT_MODEL: str = "gpt-4o-mini"
     OCR_ENDPOINT: Optional[str] = None
     TEST_ENDPOINT: Optional[str] = None
+    MISTRAL_API_KEY: Optional[str] = None
 
     # JWT
     SECRET_KEY: str # Set via env var

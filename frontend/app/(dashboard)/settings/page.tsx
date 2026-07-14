@@ -37,6 +37,12 @@ export default function SettingsPage() {
   const [isLoadingConfig, setIsLoadingConfig] = useState(true)
   const [ocrEngine, setOcrEngine] = useState("default")
   const [model, setModel] = useState("default")
+  const [ocrFallbackEnabled, setOcrFallbackEnabled] = useState(false)
+  const [ocrFallbackConfigured, setOcrFallbackConfigured] = useState(false)
+  const [ocrFallbackSource, setOcrFallbackSource] = useState("none")
+  const [ocrFallbackApiKey, setOcrFallbackApiKey] = useState("")
+  const [showOcrFallbackKey, setShowOcrFallbackKey] = useState(false)
+  const [ocrFallbackTesting, setOcrFallbackTesting] = useState(false)
   const [appCommitSha, setAppCommitSha] = useState("")
   const [result, setResult] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -73,6 +79,10 @@ export default function SettingsPage() {
           setSchemaSuggestionEndpoint(data.schema_suggestion_endpoint ?? "")
           setTestEndpoint(data.test_endpoint ?? "")
           setToken(data.api_token ?? "")
+          setOcrFallbackEnabled(Boolean(data.ocr_fallback_enabled))
+          setOcrFallbackConfigured(Boolean(data.ocr_fallback_configured))
+          setOcrFallbackSource(data.ocr_fallback_source ?? "none")
+          setOcrFallbackApiKey(data.ocr_fallback_api_key ?? "")
           setAppCommitSha(data.app_commit_sha ?? "")
         }
       } catch (err) {
@@ -237,17 +247,49 @@ export default function SettingsPage() {
           schema_suggestion_endpoint: schemaSuggestionEndpoint,
           test_endpoint: testEndpoint,
           api_token: token,
-          verify_ssl: false
+          verify_ssl: false,
+          ocr_fallback_enabled: ocrFallbackEnabled,
+          ocr_fallback_api_key: ocrFallbackApiKey,
         })
       })
       const data = await res.json()
       if (res.ok) {
         setResult("Settings saved to backend.")
+        setOcrFallbackConfigured(Boolean(data.ocr_fallback_configured))
+        setOcrFallbackSource(data.ocr_fallback_source ?? "none")
+        setOcrFallbackApiKey(data.ocr_fallback_api_key ?? "")
       } else {
         setError(data.detail || "Failed to save settings.")
       }
-    } catch (err: any) {
-      setError(`Error: ${err?.message || err}`)
+    } catch (err: unknown) {
+      setError(`Error: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+
+  const handleTestOcrFallback = async () => {
+    setOcrFallbackTesting(true)
+    setResult(null)
+    setError(null)
+    try {
+      const authToken = typeof window !== "undefined" ? localStorage.getItem("token") : null
+      const res = await fetch(`${getApiBaseUrl()}/settings/ocr-fallback/test`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+        },
+        body: JSON.stringify({ api_key: ocrFallbackApiKey }),
+      })
+      const data = await res.json()
+      if (res.ok) {
+        setResult(`Fallback connection successful (${data.status_code}).`)
+      } else {
+        setError(data.detail || "Fallback API key was rejected.")
+      }
+    } catch (err: unknown) {
+      setError(`Error: ${err instanceof Error ? err.message : String(err)}`)
+    } finally {
+      setOcrFallbackTesting(false)
     }
   }
 
@@ -271,8 +313,8 @@ export default function SettingsPage() {
       } else {
         setError(data.detail || `Failed (${data.status_code || res.status})`)
       }
-    } catch (err: any) {
-      setError(`Error: ${err?.message || err}`)
+    } catch (err: unknown) {
+      setError(`Error: ${err instanceof Error ? err.message : String(err)}`)
     } finally {
       setLoading(false)
     }
@@ -407,6 +449,76 @@ export default function SettingsPage() {
               <span className="break-all">{error}</span>
             </div>
           )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between gap-3">
+            <CardTitle>OCR Fallback Provider</CardTitle>
+            <span className={`rounded-full px-2 py-1 text-xs font-medium ${ocrFallbackConfigured ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
+              {ocrFallbackConfigured ? "Ready" : "Key required"}
+            </span>
+          </div>
+          <p className="text-sm text-slate-600 mt-1">
+            Use the configured fallback when the primary OCR service is unavailable.
+          </p>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <label className="flex cursor-pointer items-start gap-3 rounded-md border border-slate-200 p-3">
+            <input
+              type="checkbox"
+              className="mt-0.5 h-4 w-4 accent-[#2786C2]"
+              checked={ocrFallbackEnabled}
+              onChange={(e) => setOcrFallbackEnabled(e.target.checked)}
+              disabled={isLoadingConfig}
+            />
+            <span>
+              <span className="block text-sm font-medium text-slate-800">Enable OCR fallback</span>
+              <span className="mt-1 block text-xs text-slate-500">
+                Use the saved key as an override, or leave it empty to use the backend environment key.
+              </span>
+            </span>
+          </label>
+          <div className="space-y-2">
+            <label className="text-sm font-medium">Fallback API Key</label>
+            <div className="relative">
+              <Input
+                value={ocrFallbackApiKey}
+                onChange={(e) => setOcrFallbackApiKey(e.target.value)}
+                type={showOcrFallbackKey ? "text" : "password"}
+                placeholder="Leave empty to use backend environment key"
+                className="pr-10"
+                disabled={isLoadingConfig}
+              />
+              <button
+                type="button"
+                onClick={() => setShowOcrFallbackKey(!showOcrFallbackKey)}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                aria-label={showOcrFallbackKey ? "Hide fallback key" : "Show fallback key"}
+              >
+                {showOcrFallbackKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+              </button>
+            </div>
+            <p className="text-xs text-slate-500">
+              A key saved here overrides the backend environment key. Clear this field to use the environment key.
+            </p>
+          </div>
+          {!ocrFallbackConfigured && (
+            <p className="text-xs text-amber-700">Add the fallback API key to backend/.env, then restart the backend and worker.</p>
+          )}
+          {ocrFallbackConfigured && (
+            <p className="text-xs text-slate-500">Active key source: {ocrFallbackSource === "ui" ? "UI override" : "Environment"}</p>
+          )}
+          <div className="flex gap-2">
+            <Button type="button" onClick={handleSaveBackend} disabled={isLoadingConfig}>
+              Save OCR Fallback Settings
+            </Button>
+            <Button type="button" variant="outline" onClick={handleTestOcrFallback} disabled={isLoadingConfig || ocrFallbackTesting}>
+              {ocrFallbackTesting && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+              Test Key
+            </Button>
+          </div>
         </CardContent>
       </Card>
 

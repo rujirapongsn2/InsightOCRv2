@@ -21,3 +21,5 @@ class Setting(Base):
 
     api_token = Column(String, nullable=True)
     verify_ssl = Column(Boolean, default=False)
+    ocr_fallback_enabled = Column(Boolean, default=False, nullable=False)
+    ocr_fallback_api_key = Column(String, nullable=True)

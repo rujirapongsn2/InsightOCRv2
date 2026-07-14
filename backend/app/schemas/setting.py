@@ -16,6 +16,8 @@ class SettingBase(BaseModel):
 
     api_token: str | None = None
     verify_ssl: bool = False
+    ocr_fallback_enabled: bool = False
+    ocr_fallback_api_key: str | None = None
 
 class SettingUpdate(SettingBase):
     pass
@@ -23,6 +25,8 @@ class SettingUpdate(SettingBase):
 class Setting(SettingBase):
     id: UUID
     app_commit_sha: str | None = None
+    ocr_fallback_configured: bool = False
+    ocr_fallback_source: str = "none"
 
     class Config:
         from_attributes = True

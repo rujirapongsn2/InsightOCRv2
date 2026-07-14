@@ -1,6 +1,39 @@
 # QUICKWIN TEST
 
 
+Date: 2026-07-14
+
+## Manual Verification - OCR Fallback Provider
+
+1. Configuration
+   - Added the `ocr_fallback_enabled` database setting and Alembic migration `0006_ocr_fallback_provider`.
+   - Added the optional UI-managed fallback credential and Alembic migration `0007_ocr_fallback_api_key`.
+   - Verified credential precedence is UI override first, then `MISTRAL_API_KEY` from the backend environment when the UI field is empty.
+   - Added masked key editing, a fallback key connection test, and active source feedback in Settings.
+   - Added `MISTRAL_API_KEY` to the backend environment examples; the key is not stored in the database or exposed to the frontend.
+   - Added the Settings UI toggle and readiness badge without exposing the provider name.
+
+2. Fallback adapter
+   - Uploads the local document to the provider file API, requests a short-lived signed URL, calls OCR, and deletes the temporary upload when possible.
+   - Normalizes `pages[].markdown` into InsightDOC page OCR data so existing extraction and review screens continue to work.
+   - Runs only when the primary OCR flow fails, the setting is enabled, and the backend key is configured.
+
+3. Verification commands
+   - Ran `python3 -m pytest backend/test/test_ocr_fallback.py -q`: 4 passed.
+   - Ran `npx eslint 'app/(dashboard)/settings/page.tsx'`: passed after replacing pre-existing `any` catches with `unknown`.
+   - Ran `npm run build`: passed with Next.js 16.2.10; existing Astryx CSS optimizer warnings remain non-fatal.
+   - Ran `docker compose up -d --build backend celery_worker celery_beat`.
+   - Confirmed startup log applied `0005_doc_source_file_id -> 0006_ocr_fallback_provider`.
+   - Confirmed backend, Celery worker, Celery beat, and nginx are running; backend and nginx are healthy.
+   - Confirmed `GET http://127.0.0.1:3000/health` returns `200`.
+   - Confirmed unauthenticated `GET /api/v1/settings/config` returns `401`, proving the route is reachable through nginx.
+   - Confirmed OpenAPI exposes `/api/v1/settings/ocr-fallback/test` and `ocr_fallback_api_key`.
+   - Ran a live fallback smoke test with a public PDF: OCR completed successfully with 29 pages and 99,403 extracted characters; the temporary provider upload was cleaned up.
+   - Full frontend lint still reports pre-existing repository-wide errors outside this change.
+
+---
+
+
 Date: 2026-07-02
 
 ## Manual Verification - Nginx Real IP, Streaming Timeouts, and Probe Blocking

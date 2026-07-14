@@ -10,6 +10,7 @@ from app.models.user import User
 from app.models.setting import Setting
 from app.schemas.setting import Setting as SettingSchema, SettingUpdate
 from app.services.tls import warn_ssl_verification_disabled
+from app.services.ocr_fallback import resolve_fallback_api_key
 from app.utils.activity_logger import log_activity, Actions
 from app.utils.redact import is_masked, mask_secret
 
@@ -22,7 +23,15 @@ def _setting_response(setting: Setting) -> SettingSchema:
     data = SettingSchema.model_validate(setting)
     if data.api_token:
         data.api_token = mask_secret(data.api_token)
+    if data.ocr_fallback_api_key:
+        data.ocr_fallback_api_key = mask_secret(data.ocr_fallback_api_key)
     return data
+
+
+def _set_fallback_metadata(setting: Setting) -> None:
+    key, source = resolve_fallback_api_key(setting)
+    setattr(setting, "ocr_fallback_configured", bool(key))
+    setattr(setting, "ocr_fallback_source", source)
 
 
 def get_app_commit_sha() -> str | None:
@@ -91,6 +100,7 @@ def get_settings(
         db.refresh(setting)
 
     setattr(setting, "app_commit_sha", get_app_commit_sha())
+    _set_fallback_metadata(setting)
     return _setting_response(setting)
 
 
@@ -117,7 +127,10 @@ def update_settings(
     # without changing it — keep the stored token.
     if not is_masked(payload.api_token):
         setting.api_token = payload.api_token
+    if "ocr_fallback_api_key" in payload.model_fields_set and not is_masked(payload.ocr_fallback_api_key):
+        setting.ocr_fallback_api_key = payload.ocr_fallback_api_key or None
     setting.verify_ssl = payload.verify_ssl
+    setting.ocr_fallback_enabled = payload.ocr_fallback_enabled
 
     # Keep legacy api_endpoint in sync with ocr_endpoint for backward compatibility
     if payload.ocr_endpoint:
@@ -141,11 +154,46 @@ def update_settings(
             "ocr_endpoint": payload.ocr_endpoint,
             "structured_output_endpoint": payload.structured_output_endpoint,
             "schema_suggestion_endpoint": payload.schema_suggestion_endpoint,
-            "test_endpoint": payload.test_endpoint
+            "test_endpoint": payload.test_endpoint,
+            "ocr_fallback_enabled": payload.ocr_fallback_enabled,
         }
     )
 
+    _set_fallback_metadata(setting)
     return _setting_response(setting)
+
+
+class OCRFallbackTestRequest(BaseModel):
+    api_key: Optional[str] = None
+
+
+@router.post("/ocr-fallback/test")
+def test_ocr_fallback(
+    *,
+    payload: OCRFallbackTestRequest,
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_active_superuser),
+) -> Any:
+    """Verify the UI key, or the currently selected fallback credential."""
+    setting = db.query(Setting).first()
+    requested_key = payload.api_key
+    if is_masked(requested_key):
+        requested_key = None
+    key = (requested_key or "").strip() or resolve_fallback_api_key(setting)[0]
+    if not key:
+        raise HTTPException(status_code=400, detail="Fallback API key is not configured")
+
+    try:
+        response = requests.get(
+            "https://api.mistral.ai/v1/models",
+            headers={"Authorization": f"Bearer {key}", "Accept": "application/json"},
+            timeout=15,
+            verify=True,
+        )
+        response.raise_for_status()
+        return {"ok": True, "status_code": response.status_code}
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=400, detail="Fallback API key was rejected") from exc
 
 
 @router.post("/test")

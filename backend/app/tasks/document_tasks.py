@@ -14,6 +14,7 @@ from app.db.session import SessionLocal
 from app.models import Document, DocumentSchema as SchemaModel, Setting
 from app.services.storage import get_storage_service
 from app.services.tls import get_verify_ssl
+from app.services.ocr_fallback import process_fallback_ocr, resolve_fallback_api_key
 from app.utils.activity_logger import log_activity, Actions
 from app.utils.job_logger import get_job_logger
 import requests
@@ -1107,6 +1108,60 @@ def process_document_task(self, document_id: str, schema_id: str | None = None):
         return {"status": "failed", "error": "SoftTimeLimitExceeded"}
 
     except Exception as e:
+        # Use the environment-configured fallback before Celery retries a
+        # transient primary OCR failure. The fallback is opt-in per settings.
+        try:
+            fallback_db = SessionLocal()
+            fallback_document = fallback_db.query(Document).filter(Document.id == document_id).first()
+            fallback_setting = fallback_db.query(Setting).first()
+            fallback_key, fallback_source = resolve_fallback_api_key(fallback_setting)
+            should_fallback = bool(
+                fallback_document
+                and fallback_setting
+                and fallback_setting.ocr_fallback_enabled
+                and fallback_key
+            )
+            if should_fallback:
+                fallback_logger = get_job_logger(str(fallback_document.job_id)) if fallback_document.job_id else logger
+                fallback_logger.warning(
+                    f"Primary OCR failed for {fallback_document.filename}; trying configured fallback provider from {fallback_source}"
+                )
+                fallback_storage = get_storage_service()
+                with fallback_storage.get_local_path(fallback_document.file_path) as fallback_path:
+                    fallback_result = process_fallback_ocr(
+                        fallback_path,
+                        api_key=fallback_key,
+                        filename=fallback_document.filename or os.path.basename(fallback_path),
+                        mime_type=fallback_document.mime_type or "application/octet-stream",
+                        verify_ssl=True,
+                    )
+                fallback_pages = fallback_result["results"]["pages"]
+                fallback_document.ocr_pages = fallback_pages
+                fallback_document.page_count = len(fallback_pages)
+                fallback_document.ocr_text = extract_ai_text(fallback_result)
+                fallback_document.extracted_data = extract_structured_data(fallback_result) or None
+                fallback_document.status = "extraction_completed"
+                fallback_document.processing_error = None
+                fallback_document.processed_at = datetime.utcnow()
+                fallback_db.add(fallback_document)
+                fallback_db.commit()
+                fallback_logger.info(
+                    f"Fallback OCR completed for {fallback_document.filename}; primary error was recovered"
+                )
+                return {
+                    "status": fallback_document.status,
+                    "document_id": document_id,
+                    "extracted_data": fallback_document.extracted_data,
+                    "ocr_fallback": True,
+                }
+        except Exception as fallback_error:
+            logger.warning("Fallback OCR failed for document %s: %s", document_id, fallback_error)
+        finally:
+            try:
+                fallback_db.close()
+            except Exception:
+                pass
+
         # Transient network/server errors from the external OCR API get a
         # real Celery retry with backoff instead of failing permanently.
         transient = isinstance(
