@@ -8,6 +8,7 @@ from urllib.parse import quote
 
 from app.api import deps
 from app.api.permissions import ensure_job_access
+from app.api.v1.endpoints.integrations import _integration_api_key, _llm_base_url_for_integration
 from app.agent.loop import AgentLoop
 from app.crud.crud_agent_conversation import agent_conversation as crud_conv
 from app.crud.crud_agent_memory import agent_memory as crud_memory
@@ -96,8 +97,8 @@ def _build_agent_llm_config(db: Session, conv) -> dict:
         integration = _ensure_llm_integration(db, conv.integration_id)
         return {
             "provider": "openai_compatible",
-            "apiKey": integration.config.get("apiKey"),
-            "baseUrl": integration.config.get("baseUrl"),
+            "apiKey": _integration_api_key(integration),
+            "baseUrl": _llm_base_url_for_integration(integration),
             "model": integration.config.get("model", settings.AGENT_MODEL or "gpt-4o-mini"),
         }
 

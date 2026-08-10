@@ -4,7 +4,7 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException, Depends
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
-from openai import OpenAI
+from openai import AsyncOpenAI
 
 from app.api import deps
 from app.models.user import User
@@ -18,7 +18,14 @@ from app.schemas.chat import (
     ChatMessageCreate,
     ChatMessageResponse,
 )
-from app.api.v1.endpoints.integrations import _is_llm_integration, _supports_reasoning
+from app.api.v1.endpoints.integrations import (
+    _is_llm_integration,
+    _is_softnix_genai_integration,
+    _integration_api_key,
+    _llm_base_url_for_integration,
+    _normalize_llm_base_url,
+    _supports_reasoning,
+)
 
 router = APIRouter()
 
@@ -233,12 +240,12 @@ async def send_message(
     if not _is_llm_integration(integration):
         raise HTTPException(status_code=400, detail="Integration is not an LLM type")
 
-    llm_api_key = integration.config.get("apiKey")
+    llm_api_key = _integration_api_key(integration)
     if not llm_api_key:
         raise HTTPException(status_code=400, detail="API Key is missing from integration config")
 
     llm_model = integration.config.get("model", "gpt-4o")
-    llm_base_url = integration.config.get("baseUrl")
+    llm_base_url = _llm_base_url_for_integration(integration)
     llm_reasoning_effort = integration.config.get("reasoningEffort", "low")
 
     # Load documents for context
@@ -279,36 +286,53 @@ async def send_message(
     async def _event_generator():
         full_output = ""
         try:
+            normalized_base_url, detected_mode = _normalize_llm_base_url(llm_base_url)
+            preferred_mode = "chat" if _is_softnix_genai_integration(integration) else detected_mode
             client_kwargs: Dict[str, Any] = {"api_key": llm_api_key}
-            if llm_base_url:
-                client_kwargs["base_url"] = llm_base_url
+            if normalized_base_url:
+                client_kwargs["base_url"] = normalized_base_url
 
-            client = OpenAI(**client_kwargs)
+            async with AsyncOpenAI(**client_kwargs) as client:
+                if preferred_mode == "chat":
+                    stream = await client.chat.completions.create(
+                        model=llm_model,
+                        messages=[
+                            {"role": "system", "content": CHATDOC_SYSTEM_INSTRUCTIONS},
+                            {"role": "user", "content": input_text},
+                        ],
+                        stream=True,
+                    )
+                    async for chunk in stream:
+                        if chunk.choices:
+                            delta = chunk.choices[0].delta.content or ""
+                            if delta:
+                                full_output += delta
+                                yield f"data: {json.dumps({'type': 'delta', 'text': delta}, ensure_ascii=False)}\n\n"
+                else:
+                    create_params: Dict[str, Any] = {
+                        "model": llm_model,
+                        "instructions": CHATDOC_SYSTEM_INSTRUCTIONS,
+                        "input": input_text,
+                        "stream": True,
+                    }
+                    if _supports_reasoning(llm_model):
+                        create_params["reasoning"] = {"effort": llm_reasoning_effort}
 
-            create_params: Dict[str, Any] = {
-                "model": llm_model,
-                "instructions": CHATDOC_SYSTEM_INSTRUCTIONS,
-                "input": input_text,
-                "stream": True,
-            }
-            if _supports_reasoning(llm_model):
-                create_params["reasoning"] = {"effort": llm_reasoning_effort}
+                    stream = await client.responses.create(**create_params)
 
-            stream = client.responses.create(**create_params)
-
-            for event in stream:
-                if hasattr(event, "type"):
-                    if event.type == "response.output_text.delta":
-                        delta = event.delta if hasattr(event, "delta") else ""
-                        if delta:
-                            full_output += delta
-                            yield f"data: {json.dumps({'type': 'delta', 'text': delta}, ensure_ascii=False)}\n\n"
-                    elif event.type == "response.completed":
-                        if hasattr(event, "response") and hasattr(event.response, "output_text"):
-                            full_output = event.response.output_text
-                    elif event.type == "response.output_text.done":
-                        if hasattr(event, "text"):
-                            full_output = event.text
+                    async for event in stream:
+                        if hasattr(event, "type"):
+                            if event.type == "response.output_text.delta":
+                                delta = event.delta if hasattr(event, "delta") else ""
+                                if delta:
+                                    full_output += delta
+                                    yield f"data: {json.dumps({'type': 'delta', 'text': delta}, ensure_ascii=False)}\n\n"
+                            elif event.type == "response.completed":
+                                if hasattr(event, "response") and hasattr(event.response, "output_text"):
+                                    full_output = event.response.output_text
+                            elif event.type == "response.output_text.done":
+                                if hasattr(event, "text"):
+                                    full_output = event.text
 
             # Save assistant message
             assistant_msg = crud_chat.add_message(

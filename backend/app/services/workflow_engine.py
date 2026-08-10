@@ -33,6 +33,7 @@ from app.models.job import Job
 from app.models.integration import Integration, IntegrationType, IntegrationStatus
 from app.models.ai_settings import AISettings
 from app.utils.redact import redact_secrets
+from app.api.v1.endpoints.integrations import _integration_api_key, _llm_base_url_for_integration
 
 logger = logging.getLogger(__name__)
 
@@ -584,13 +585,13 @@ def resolve_llm_provider(
             raise NodeExecutionError(f"Integration not found: {integration_id}")
         _ensure_integration_owner(integration, owner_user_id)
         icfg = integration.config or {}
-        api_key = icfg.get("apiKey")
+        api_key = _integration_api_key(integration)
         if not api_key:
             raise NodeExecutionError(f"LLM integration '{integration.name}' is missing apiKey")
         provider = {
             "provider": "openai_compatible",
             "apiKey": api_key,
-            "baseUrl": icfg.get("baseUrl") or None,
+            "baseUrl": _llm_base_url_for_integration(integration),
             "model": requested_model or icfg.get("model") or "gpt-4o-mini",
             "source": "workflow_llm_integration",
             "name": integration.name,
@@ -653,12 +654,12 @@ def resolve_llm_provider(
     )
     if fallback:
         icfg = fallback.config or {}
-        api_key = icfg.get("apiKey")
+        api_key = _integration_api_key(fallback)
         if api_key:
             provider = {
                 "provider": "openai_compatible",
                 "apiKey": api_key,
-                "baseUrl": icfg.get("baseUrl") or None,
+                "baseUrl": _llm_base_url_for_integration(fallback),
                 "model": requested_model or icfg.get("model") or "gpt-4o-mini",
                 "source": "fallback_llm_integration",
                 "name": fallback.name,

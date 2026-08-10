@@ -13,6 +13,7 @@ MASK_PREFIX = "****"
 SENSITIVE_KEYS = {
     "apikey",
     "api_key",
+    "api_key_encrypted",
     "api_token",
     "apitoken",
     "token",
