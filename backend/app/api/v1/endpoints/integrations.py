@@ -5,7 +5,7 @@ from pydantic import BaseModel
 from typing import Optional, List, Dict, Any, Literal
 from urllib.parse import urlencode
 from uuid import UUID
-from openai import OpenAI
+from openai import AsyncOpenAI, OpenAI
 
 
 def _build_llm_input(
@@ -53,6 +53,7 @@ def _supports_reasoning(model: str) -> bool:
 
 
 LLMMode = Literal["responses", "chat"]
+SOFTNIX_GENAI_BASE_URL = "https://genai.softnix.ai/external/openai"
 
 
 def _normalize_llm_base_url(base_url: Optional[str]) -> tuple[Optional[str], Optional[LLMMode]]:
@@ -81,6 +82,56 @@ def _integration_type_value(integration: Any) -> str:
 
 def _is_llm_integration(integration: Any) -> bool:
     return _integration_type_value(integration) in LLM_INTEGRATION_TYPES
+
+
+def _is_softnix_genai_integration(integration: Any) -> bool:
+    return _integration_type_value(integration) == "softnix_genai"
+
+
+def _llm_base_url_for_integration(integration: Any) -> Optional[str]:
+    """Return the provider URL, enforcing Softnix GenAI's fixed endpoint."""
+    if _is_softnix_genai_integration(integration):
+        return SOFTNIX_GENAI_BASE_URL
+    config = getattr(integration, "config", None) or {}
+    return config.get("baseUrl")
+
+
+def _integration_api_key(integration: Any) -> Optional[str]:
+    """Read an integration key, supporting encrypted and legacy values."""
+    config = getattr(integration, "config", None) or {}
+    encrypted = config.get("apiKeyEncrypted")
+    if encrypted:
+        try:
+            return decrypt_secret(encrypted)
+        except SecretStoreError:
+            return None
+    return config.get("apiKey")
+
+
+def _normalize_softnix_config(integration_type: Any, config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Normalize and validate server-owned settings for Softnix GenAI."""
+    normalized = dict(config or {})
+    type_value = integration_type.value if hasattr(integration_type, "value") else str(integration_type)
+    if type_value != "softnix_genai":
+        return normalized
+    api_key = str(normalized.get("apiKey") or "").strip()
+    encrypted_key = normalized.get("apiKeyEncrypted")
+    if api_key and not is_masked(api_key):
+        normalized["apiKeyEncrypted"] = encrypt_secret(api_key)
+        normalized.pop("apiKey", None)
+    elif encrypted_key:
+        try:
+            decrypt_secret(str(encrypted_key))
+        except SecretStoreError as exc:
+            raise HTTPException(status_code=400, detail="API Key is invalid or cannot be decrypted") from exc
+    else:
+        raise HTTPException(status_code=400, detail="API Key is required for Softnix GenAI")
+    model = str(normalized.get("model") or "").strip()
+    if not model:
+        raise HTTPException(status_code=400, detail="Model is required for Softnix GenAI")
+    normalized["model"] = model
+    normalized["baseUrl"] = SOFTNIX_GENAI_BASE_URL
+    return normalized
 
 
 def _build_openai_client(api_key: str, base_url: Optional[str]) -> OpenAI:
@@ -139,8 +190,10 @@ def _call_llm_text(
     input_text: str,
     instructions: Optional[str] = None,
     reasoning_effort: str = "low",
+    request_mode: Optional[LLMMode] = None,
 ) -> tuple[str, LLMMode]:
-    normalized_base_url, preferred_mode = _normalize_llm_base_url(base_url)
+    normalized_base_url, detected_mode = _normalize_llm_base_url(base_url)
+    preferred_mode = request_mode or detected_mode
     client = _build_openai_client(api_key, normalized_base_url)
 
     if preferred_mode == "chat":
@@ -160,6 +213,8 @@ from sqlalchemy.orm import Session
 import httpx
 import json
 from app.api import deps
+from app.api.permissions import ensure_job_access, is_admin_user, normalize_role
+from app.models.job import Job
 from app.models.user import User
 from app.models.integration import Integration, IntegrationType, IntegrationStatus
 from app.core.config import settings
@@ -172,7 +227,8 @@ from app.schemas.integration import (
 from app.crud.crud_integration import integration as crud_integration
 from app.crud.crud_integration_result import integration_result as crud_integration_result
 from app.utils.activity_logger import log_activity, Actions
-from app.utils.redact import redact_secrets, restore_masked_secrets
+from app.utils.redact import is_masked, mask_secret, redact_secrets, restore_masked_secrets
+from app.utils.secret_store import SecretStoreError, decrypt_secret, encrypt_secret
 
 router = APIRouter()
 
@@ -313,7 +369,14 @@ async def complete_cloud_oauth(
 def _masked_response(integration) -> IntegrationResponse:
     """Serialize an integration without echoing stored credentials."""
     data = IntegrationResponse.model_validate(integration)
-    data.config = redact_secrets(data.config or {})
+    config = redact_secrets(data.config or {})
+    if _is_softnix_genai_integration(integration) and (integration.config or {}).get("apiKeyEncrypted"):
+        try:
+            config["apiKey"] = mask_secret(decrypt_secret(integration.config["apiKeyEncrypted"]))
+        except SecretStoreError:
+            config["apiKey"] = "****"
+        config.pop("apiKeyEncrypted", None)
+    data.config = config
     return data
 
 
@@ -534,6 +597,11 @@ async def create_integration(
     if normalized != "manager" and not is_admin:
         raise HTTPException(status_code=403, detail="Only managers and admins can create integrations")
 
+    integration_data.config = _normalize_softnix_config(
+        integration_data.type,
+        integration_data.config,
+    )
+
     integration = crud_integration.create(
         db=db,
         integration=integration_data,
@@ -581,8 +649,27 @@ async def update_integration(
     # A masked credential in the payload means the client echoed back the
     # redacted GET response unchanged — restore the stored value.
     if integration_data.config is not None:
+        if (
+            _integration_type_value(existing) == "softnix_genai"
+            and is_masked(integration_data.config.get("apiKey"))
+            and (existing.config or {}).get("apiKeyEncrypted")
+        ):
+            integration_data.config = {
+                **integration_data.config,
+                "apiKeyEncrypted": existing.config["apiKeyEncrypted"],
+            }
+            integration_data.config.pop("apiKey", None)
         integration_data.config = restore_masked_secrets(
             integration_data.config, existing.config or {}
+        )
+
+    effective_type = integration_data.type or _integration_type_value(existing)
+    if integration_data.config is None and effective_type == "softnix_genai":
+        integration_data.config = dict(existing.config or {})
+    if integration_data.config is not None:
+        integration_data.config = _normalize_softnix_config(
+            effective_type,
+            integration_data.config,
         )
 
     # Update integration
@@ -655,7 +742,7 @@ async def delete_integration(
 # ============================================================================
 
 class TestLLMRequest(BaseModel):
-    apiKey: str
+    apiKey: Optional[str] = None
     baseUrl: Optional[str] = None
     model: str
     reasoningEffort: str = "low"
@@ -663,6 +750,8 @@ class TestLLMRequest(BaseModel):
     userPrompt: Optional[str] = None
     outputFormatPrompt: Optional[str] = None
     testInput: str = ""
+    providerType: Optional[str] = None
+    integrationId: Optional[UUID] = None
 
 
 class TestLLMResponse(BaseModel):
@@ -686,6 +775,7 @@ class SendLLMRequest(BaseModel):
     userPrompt: Optional[str] = None
     outputFormatPrompt: Optional[str] = None
     documents: List[DocumentInput]
+    providerType: Optional[str] = None
 
 
 class DocumentResult(BaseModel):
@@ -737,26 +827,73 @@ def _resolve_send_target_integration(db: Session, request: SendToIntegrationRequ
     return matches[0]
 
 
+def _authorize_send_target(
+    db: Session,
+    current_user: User,
+    integration: Integration,
+    job_id: Optional[UUID],
+) -> None:
+    """Authorize the job and destination before any external call is made."""
+    if integration.status != IntegrationStatus.ACTIVE:
+        raise HTTPException(status_code=400, detail="Integration is not active")
+
+    if job_id:
+        job = db.query(Job).filter(Job.id == job_id).first()
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        ensure_job_access(current_user, job)
+
+    # LLM providers are intentionally shared for document processing. Other
+    # destinations can send data outside the platform and require ownership or
+    # an elevated role.
+    if _is_llm_integration(integration):
+        return
+    if is_admin_user(current_user) or normalize_role(current_user.role) == "manager":
+        return
+    if integration.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="You cannot use this integration")
+
+
 @router.post("/test-llm", response_model=TestLLMResponse)
 async def test_llm(
     request: TestLLMRequest,
+    db: Session = Depends(deps.get_db),
     current_user: User = Depends(deps.get_current_user)
 ):
     """
     Test LLM connectivity with Responses API and Chat Completions fallback.
     """
     try:
+        api_key = request.apiKey
+        base_url = request.baseUrl
+        provider_type = request.providerType
+        if request.integrationId:
+            integration = crud_integration.get(db=db, integration_id=request.integrationId)
+            if not integration:
+                raise HTTPException(status_code=404, detail="Integration not found")
+            _authorize_send_target(db, current_user, integration, None)
+            if not _is_llm_integration(integration):
+                raise HTTPException(status_code=400, detail="Integration is not an LLM type")
+            api_key = _integration_api_key(integration)
+            base_url = _llm_base_url_for_integration(integration)
+            provider_type = _integration_type_value(integration)
+        if not api_key:
+            raise HTTPException(status_code=400, detail="API Key is required")
+
         output_text, mode = _call_llm_text(
-            api_key=request.apiKey,
-            base_url=request.baseUrl,
+            api_key=api_key,
+            base_url=SOFTNIX_GENAI_BASE_URL if provider_type == "softnix_genai" else base_url,
             model=request.model,
             input_text=request.testInput.strip() or "hello",
             instructions=request.instructions or "Reply briefly to confirm connectivity.",
             reasoning_effort=request.reasoningEffort,
+            request_mode="chat" if provider_type == "softnix_genai" else None,
         )
 
         return TestLLMResponse(output=f"Success via {mode}: {output_text}")
     
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=400,
@@ -796,11 +933,12 @@ async def send_to_llm(
 
                 output_text, _mode = _call_llm_text(
                     api_key=request.apiKey,
-                    base_url=request.baseUrl,
+                    base_url=SOFTNIX_GENAI_BASE_URL if request.providerType == "softnix_genai" else request.baseUrl,
                     model=request.model,
                     input_text=composed_input,
                     instructions=request.instructions,
                     reasoning_effort=request.reasoningEffort,
+                    request_mode="chat" if request.providerType == "softnix_genai" else None,
                 )
 
                 results.append(DocumentResult(
@@ -882,16 +1020,17 @@ async def send_to_integration_stream(
     user_agent = http_request.headers.get("user-agent")
 
     integration = _resolve_send_target_integration(db, request)
+    _authorize_send_target(db, current_user, integration, request.job_id)
 
     if not _is_llm_integration(integration):
         raise HTTPException(status_code=400, detail="Streaming is only supported for LLM integrations")
 
-    llm_api_key = integration.config.get("apiKey")
+    llm_api_key = _integration_api_key(integration)
     if not llm_api_key:
         raise HTTPException(status_code=400, detail="API Key is required for LLM integration")
 
     llm_model = integration.config.get("model", "gpt-4o")
-    llm_base_url = integration.config.get("baseUrl")
+    llm_base_url = _llm_base_url_for_integration(integration)
     llm_instructions = integration.config.get("instructions", "")
     llm_user_prompt = integration.config.get("userPrompt")
     llm_output_format = integration.config.get("outputFormatPrompt")
@@ -909,46 +1048,31 @@ async def send_to_integration_stream(
     async def _event_generator():
         full_output = ""
         try:
-            normalized_base_url, preferred_mode = _normalize_llm_base_url(llm_base_url)
-            client = _build_openai_client(llm_api_key, normalized_base_url)
+            normalized_base_url, detected_mode = _normalize_llm_base_url(llm_base_url)
+            preferred_mode = "chat" if _is_softnix_genai_integration(integration) else detected_mode
+            client_kwargs: Dict[str, Any] = {
+                "api_key": llm_api_key,
+                "timeout": 120.0,
+                "max_retries": 0,
+            }
+            if normalized_base_url:
+                client_kwargs["base_url"] = normalized_base_url
 
-            def chat_stream():
-                messages: List[Dict[str, str]] = []
-                if llm_instructions and llm_instructions.strip():
-                    messages.append({"role": "system", "content": llm_instructions.strip()})
-                messages.append({"role": "user", "content": composed_input})
-                return client.chat.completions.create(
-                    model=llm_model,
-                    messages=messages,
-                    stream=True,
-                )
+            async with AsyncOpenAI(**client_kwargs) as client:
+                async def chat_stream():
+                    messages: List[Dict[str, str]] = []
+                    if llm_instructions and llm_instructions.strip():
+                        messages.append({"role": "system", "content": llm_instructions.strip()})
+                    messages.append({"role": "user", "content": composed_input})
+                    return await client.chat.completions.create(
+                        model=llm_model,
+                        messages=messages,
+                        stream=True,
+                    )
 
-            if preferred_mode == "chat":
-                stream = chat_stream()
-                for chunk in stream:
-                    if chunk.choices:
-                        delta = chunk.choices[0].delta.content or ""
-                        if delta:
-                            full_output += delta
-                            payload = json.dumps({"type": "delta", "text": delta}, ensure_ascii=False)
-                            yield f"data: {payload}\n\n"
-            else:
-                create_params: Dict[str, Any] = {
-                    "model": llm_model,
-                    "instructions": llm_instructions,
-                    "input": composed_input,
-                    "stream": True,
-                }
-                if _supports_reasoning(llm_model):
-                    create_params["reasoning"] = {"effort": llm_reasoning_effort}
-
-                try:
-                    stream = client.responses.create(**create_params)
-                except Exception as responses_error:
-                    if preferred_mode == "responses" or not _is_not_found_error(responses_error):
-                        raise
-                    stream = chat_stream()
-                    for chunk in stream:
+                if preferred_mode == "chat":
+                    stream = await chat_stream()
+                    async for chunk in stream:
                         if chunk.choices:
                             delta = chunk.choices[0].delta.content or ""
                             if delta:
@@ -956,20 +1080,43 @@ async def send_to_integration_stream(
                                 payload = json.dumps({"type": "delta", "text": delta}, ensure_ascii=False)
                                 yield f"data: {payload}\n\n"
                 else:
-                    for event in stream:
-                        if hasattr(event, "type"):
-                            if event.type == "response.output_text.delta":
-                                delta = event.delta if hasattr(event, "delta") else ""
+                    create_params: Dict[str, Any] = {
+                        "model": llm_model,
+                        "instructions": llm_instructions,
+                        "input": composed_input,
+                        "stream": True,
+                    }
+                    if _supports_reasoning(llm_model):
+                        create_params["reasoning"] = {"effort": llm_reasoning_effort}
+
+                    try:
+                        stream = await client.responses.create(**create_params)
+                    except Exception as responses_error:
+                        if preferred_mode == "responses" or not _is_not_found_error(responses_error):
+                            raise
+                        stream = await chat_stream()
+                        async for chunk in stream:
+                            if chunk.choices:
+                                delta = chunk.choices[0].delta.content or ""
                                 if delta:
                                     full_output += delta
                                     payload = json.dumps({"type": "delta", "text": delta}, ensure_ascii=False)
                                     yield f"data: {payload}\n\n"
-                            elif event.type == "response.completed":
-                                if hasattr(event, "response") and hasattr(event.response, "output_text"):
-                                    full_output = event.response.output_text
-                            elif event.type == "response.output_text.done":
-                                if hasattr(event, "text"):
-                                    full_output = event.text
+                    else:
+                        async for event in stream:
+                            if hasattr(event, "type"):
+                                if event.type == "response.output_text.delta":
+                                    delta = event.delta if hasattr(event, "delta") else ""
+                                    if delta:
+                                        full_output += delta
+                                        payload = json.dumps({"type": "delta", "text": delta}, ensure_ascii=False)
+                                        yield f"data: {payload}\n\n"
+                                elif event.type == "response.completed":
+                                    if hasattr(event, "response") and hasattr(event.response, "output_text"):
+                                        full_output = event.response.output_text
+                                elif event.type == "response.output_text.done":
+                                    if hasattr(event, "text"):
+                                        full_output = event.text
 
             # Save result to DB
             saved_result_id = None
@@ -1087,21 +1234,19 @@ async def send_to_integration(
 
     try:
         integration = _resolve_send_target_integration(db, request)
-
-        print(f"[DEBUG] Integration type: {integration.type}")
-        print(f"[DEBUG] Integration config: {integration.config}")
+        _authorize_send_target(db, current_user, integration, request.job_id)
 
         results = []
         success = False
         message = ""
 
         if _is_llm_integration(integration):
-            llm_api_key = integration.config.get("apiKey")
+            llm_api_key = _integration_api_key(integration)
             if not llm_api_key:
                 raise HTTPException(status_code=400, detail="API Key is required for LLM integration")
 
             llm_model = integration.config.get("model", "gpt-4o")
-            llm_base_url = integration.config.get("baseUrl")
+            llm_base_url = _llm_base_url_for_integration(integration)
             llm_instructions = integration.config.get("instructions", "")
             llm_user_prompt = integration.config.get("userPrompt")
             llm_output_format = integration.config.get("outputFormatPrompt")
@@ -1116,20 +1261,15 @@ async def send_to_integration(
                     output_format_prompt=llm_output_format,
                 )
 
-                print(f"[DEBUG] Sending {len(request.documents)} documents combined to LLM model={llm_model}")
-
-                output_text, mode = _call_llm_text(
+                output_text, _mode = _call_llm_text(
                     api_key=llm_api_key,
                     base_url=llm_base_url,
                     model=llm_model,
                     input_text=composed_input,
                     instructions=llm_instructions,
                     reasoning_effort=llm_reasoning_effort,
+                    request_mode="chat" if _is_softnix_genai_integration(integration) else None,
                 )
-
-                print(f"[DEBUG] LLM call mode: {mode}")
-
-                print(f"[DEBUG] LLM response length: {len(output_text)} chars")
 
                 results.append(DocumentResult(
                     id="combined",
@@ -1138,7 +1278,6 @@ async def send_to_integration(
                     success=True
                 ))
             except Exception as e:
-                print(f"[DEBUG] LLM combined call error: {str(e)}")
                 results.append(DocumentResult(
                     id="combined",
                     filename=request.job_name,
@@ -1161,13 +1300,8 @@ async def send_to_integration(
                 "documents": [{"id": d.id, "filename": d.filename, "data": d.data} for d in request.documents]
             }
 
-            print(f"[DEBUG] Sending to webhook: {webhook_url}")
-            print(f"[DEBUG] Payload: {json.dumps(payload, ensure_ascii=False, indent=2)}")
-
             async with httpx.AsyncClient() as client:
                 res = await client.post(webhook_url, json=payload, timeout=30.0)
-                print(f"[DEBUG] Webhook response status: {res.status_code}")
-                print(f"[DEBUG] Webhook response: {res.text}")
                 if res.status_code >= 400:
                     raise HTTPException(status_code=res.status_code, detail=f"Webhook responded {res.status_code}: {res.text}")
 
@@ -1201,13 +1335,8 @@ async def send_to_integration(
 
             method = integration.config.get("method", "POST")
 
-            print(f"[DEBUG] Sending to API: {method} {endpoint}")
-            print(f"[DEBUG] Payload: {json.dumps(payload, ensure_ascii=False, indent=2)}")
-
             async with httpx.AsyncClient() as client:
                 res = await client.request(method, endpoint, json=payload, headers=headers, timeout=30.0)
-                print(f"[DEBUG] API response status: {res.status_code}")
-                print(f"[DEBUG] API response: {res.text}")
                 if res.status_code >= 400:
                     raise HTTPException(status_code=res.status_code, detail=f"API responded {res.status_code}: {res.text}")
 
@@ -1258,7 +1387,6 @@ async def send_to_integration(
         )
 
     except HTTPException as he:
-        print(f"[DEBUG] HTTPException: {he.detail}")
         if integration:
             log_activity(
                 db=db,
@@ -1291,7 +1419,6 @@ async def send_to_integration(
         raise
 
     except Exception as e:
-        print(f"[DEBUG] Exception: {str(e)}")
         import traceback
         traceback.print_exc()
 

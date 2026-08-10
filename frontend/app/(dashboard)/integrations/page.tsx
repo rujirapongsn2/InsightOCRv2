@@ -607,9 +607,9 @@ export default function IntegrationsPage() {
         if (!token) { alert("Please login to continue"); return }
         setLoading(true)
 
-        let configData: Record<string, any>
+        let configData: Record<string, unknown>
         if (formState.type === "gdrive") {
-            let sa: any
+            let sa: { client_email?: string; private_key?: string; token_uri?: string }
             try { sa = JSON.parse(formState.serviceAccountJson) } catch {
                 setLoading(false); alert("Service Account JSON ไม่ถูกต้อง — กรุณาวางไฟล์ JSON ทั้งไฟล์"); return
             }
@@ -851,7 +851,15 @@ export default function IntegrationsPage() {
                                         const response = await fetch(`${getApiBaseUrl()}/integrations/test-llm`, {
                                             method: "POST",
                                             headers: { "Content-Type": "application/json", "Authorization": `Bearer ${localStorage.getItem("token")}` },
-                                            body: JSON.stringify({ apiKey: formState.apiKey, baseUrl: formState.baseUrl || undefined, model: formState.model, reasoningEffort: formState.reasoningEffort, instructions: formState.instructions })
+                                            body: JSON.stringify({
+                                                apiKey: formState.apiKey.startsWith("****") ? undefined : formState.apiKey,
+                                                integrationId: editingId || undefined,
+                                                baseUrl: formState.baseUrl || undefined,
+                                                model: formState.model,
+                                                reasoningEffort: formState.reasoningEffort,
+                                                instructions: formState.instructions,
+                                                providerType: formState.type,
+                                            })
                                         })
                                         handleAuthError(response)
                                         const data = await response.json()
@@ -896,7 +904,7 @@ export default function IntegrationsPage() {
                                     if (!formState.webhookUrl?.trim()) { alert("Please enter a webhook URL first"); return }
                                     setTestLoading(true); setTestResult(null)
                                     try {
-                                        let payload: any = { test: true, message: "Connection test from InsightDOC", timestamp: new Date().toISOString() }
+                                        let payload: Record<string, unknown> = { test: true, message: "Connection test from InsightDOC", timestamp: new Date().toISOString() }
                                         if (testInput.trim()) {
                                             try { payload = JSON.parse(testInput) } catch { setTestResult("Error: Invalid JSON format"); setTestLoading(false); return }
                                         }

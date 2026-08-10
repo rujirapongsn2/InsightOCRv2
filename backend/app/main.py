@@ -26,6 +26,7 @@ from app.initial_templates import init_system_templates
 from app.initial_ai_settings import init_ai_settings
 from app.initial_agent_skills import ensure_system_agent_skills
 from app.initial_workflows import ensure_sample_workflows
+from app.initial_integrations import migrate_softnix_integrations
 
 # Apply schema migrations (Alembic), serialized across workers by a
 # Postgres advisory lock. See backend/alembic/versions/.
@@ -69,6 +70,13 @@ def ensure_workflow_samples():
     finally:
         db.close()
 
+def ensure_integrations():
+    db = SessionLocal()
+    try:
+        migrate_softnix_integrations(db)
+    finally:
+        db.close()
+
 def ensure_sandbox_ready():
     """Warm up the Docker sandbox image without blocking API startup."""
     import threading
@@ -91,6 +99,7 @@ ensure_system_templates()
 ensure_ai_settings()
 ensure_agent_skills()
 ensure_workflow_samples()
+ensure_integrations()
 ensure_sandbox_ready()
 
 app = FastAPI(
