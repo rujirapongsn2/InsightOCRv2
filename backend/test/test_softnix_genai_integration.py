@@ -87,13 +87,21 @@ def test_softnix_uses_chat_completions_without_trying_responses(monkeypatch):
     assert calls[0]["model"] == "gpt-5.5"
 
 
-def test_softnix_endpoint_is_server_owned():
+def test_softnix_endpoint_is_configurable_with_default():
     config = _normalize_softnix_config(
         "softnix_genai",
-        {"apiKey": "test-key", "model": "gpt-5.5", "baseUrl": "https://attacker.invalid"},
+        {"apiKey": "test-key", "model": "gpt-5.5", "baseUrl": "https://genai.example.com/openai"},
     )
 
-    assert config["baseUrl"] == SOFTNIX_GENAI_BASE_URL
+    assert config["baseUrl"] == "https://genai.example.com/openai"
+
+
+def test_softnix_endpoint_must_be_http_url():
+    with pytest.raises(HTTPException, match=r"valid HTTP\(S\) URL"):
+        _normalize_softnix_config(
+            "softnix_genai",
+            {"apiKey": "test-key", "model": "gpt-5.5", "baseUrl": "javascript:alert(1)"},
+        )
 
 
 def test_softnix_api_key_is_encrypted_at_rest():
@@ -112,13 +120,13 @@ def test_softnix_config_requires_credentials():
         _normalize_softnix_config("softnix_genai", {"model": "gpt-5.5"})
 
 
-def test_softnix_integration_always_uses_server_endpoint():
+def test_softnix_integration_uses_configured_endpoint():
     integration = SimpleNamespace(
         type=IntegrationType.SOFTNIX_GENAI,
-        config={"baseUrl": "https://attacker.invalid"},
+        config={"baseUrl": "https://genai.example.com/openai"},
     )
 
-    assert _llm_base_url_for_integration(integration) == SOFTNIX_GENAI_BASE_URL
+    assert _llm_base_url_for_integration(integration) == "https://genai.example.com/openai"
 
 
 def test_non_llm_integration_requires_owner_or_elevated_role():

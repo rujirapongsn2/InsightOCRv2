@@ -3,7 +3,7 @@ from fastapi.responses import RedirectResponse
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any, Literal
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 from uuid import UUID
 from openai import AsyncOpenAI, OpenAI
 
@@ -89,10 +89,10 @@ def _is_softnix_genai_integration(integration: Any) -> bool:
 
 
 def _llm_base_url_for_integration(integration: Any) -> Optional[str]:
-    """Return the provider URL, enforcing Softnix GenAI's fixed endpoint."""
-    if _is_softnix_genai_integration(integration):
-        return SOFTNIX_GENAI_BASE_URL
+    """Return the configured provider URL, with a default for Softnix GenAI."""
     config = getattr(integration, "config", None) or {}
+    if _is_softnix_genai_integration(integration):
+        return config.get("baseUrl") or SOFTNIX_GENAI_BASE_URL
     return config.get("baseUrl")
 
 
@@ -109,7 +109,7 @@ def _integration_api_key(integration: Any) -> Optional[str]:
 
 
 def _normalize_softnix_config(integration_type: Any, config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    """Normalize and validate server-owned settings for Softnix GenAI."""
+    """Normalize and validate settings for Softnix GenAI."""
     normalized = dict(config or {})
     type_value = integration_type.value if hasattr(integration_type, "value") else str(integration_type)
     if type_value != "softnix_genai":
@@ -130,7 +130,11 @@ def _normalize_softnix_config(integration_type: Any, config: Optional[Dict[str, 
     if not model:
         raise HTTPException(status_code=400, detail="Model is required for Softnix GenAI")
     normalized["model"] = model
-    normalized["baseUrl"] = SOFTNIX_GENAI_BASE_URL
+    endpoint = str(normalized.get("baseUrl") or SOFTNIX_GENAI_BASE_URL).strip().rstrip("/")
+    parsed_endpoint = urlsplit(endpoint)
+    if parsed_endpoint.scheme not in {"http", "https"} or not parsed_endpoint.netloc:
+        raise HTTPException(status_code=400, detail="Softnix GenAI endpoint must be a valid HTTP(S) URL")
+    normalized["baseUrl"] = endpoint
     return normalized
 
 
@@ -882,7 +886,7 @@ async def test_llm(
 
         output_text, mode = _call_llm_text(
             api_key=api_key,
-            base_url=SOFTNIX_GENAI_BASE_URL if provider_type == "softnix_genai" else base_url,
+            base_url=base_url or (SOFTNIX_GENAI_BASE_URL if provider_type == "softnix_genai" else None),
             model=request.model,
             input_text=request.testInput.strip() or "hello",
             instructions=request.instructions or "Reply briefly to confirm connectivity.",
@@ -933,7 +937,7 @@ async def send_to_llm(
 
                 output_text, _mode = _call_llm_text(
                     api_key=request.apiKey,
-                    base_url=SOFTNIX_GENAI_BASE_URL if request.providerType == "softnix_genai" else request.baseUrl,
+                    base_url=request.baseUrl or (SOFTNIX_GENAI_BASE_URL if request.providerType == "softnix_genai" else None),
                     model=request.model,
                     input_text=composed_input,
                     instructions=request.instructions,
