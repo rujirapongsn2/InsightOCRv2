@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { Modal } from "@/components/ui/modal"
-import { Plus, Pencil, Trash2, Plug, Eye, ShieldCheck, Maximize2, ChevronRight, ChevronDown, LayoutTemplate, X, FileCheck2, Receipt, Landmark, Scale, Lock, PackageCheck, Ship, BarChart2, Briefcase, ClipboardList, CalendarCheck, HeartPulse, FlaskConical, ClipboardCheck, TrendingUp, AlertOctagon, type LucideIcon, Zap, Bot, Cloud } from "lucide-react"
+import { Plus, Pencil, Trash2, Plug, Eye, ShieldCheck, Maximize2, ChevronRight, ChevronDown, LayoutTemplate, X, FileCheck2, Receipt, Landmark, Scale, Lock, PackageCheck, Ship, BarChart2, Briefcase, ClipboardList, CalendarCheck, HeartPulse, FlaskConical, ClipboardCheck, TrendingUp, AlertOctagon, type LucideIcon, Zap, Bot, Cloud, HardDrive, Folder, ChevronLeft, LoaderCircle, CheckCircle2 } from "lucide-react"
 import { getApiBaseUrl, handleAuthError } from "@/lib/api"
 import {
     getIntegrations,
@@ -14,6 +14,10 @@ import {
     updateIntegration,
     deleteIntegration,
     testDriveIntegration,
+    getCloudOAuthStart,
+    listCloudFolders,
+    updateCloudDestination,
+    type CloudFolder,
     type Integration as APIIntegration,
 } from "@/lib/integrations-api"
 import { LLM_TEMPLATES, TEMPLATE_CATEGORIES, type LLMIntegrationTemplate, type TemplateCategory } from "@/lib/integration-templates"
@@ -25,7 +29,9 @@ const TEMPLATE_ICONS: Record<string, LucideIcon> = {
     TrendingUp, AlertOctagon,
 }
 
-type IntegrationType = "api" | "workflow" | "llm" | "gdrive" | "onedrive"
+type IntegrationType = "api" | "workflow" | "llm" | "softnix_genai" | "gdrive" | "onedrive"
+
+const SOFTNIX_GENAI_BASE_URL = "https://genai.softnix.ai/external/openai"
 
 type IntegrationConfig = {
     method?: "POST" | "PUT"
@@ -49,6 +55,13 @@ type IntegrationConfig = {
     client_id?: string
     client_secret?: string
     drive_id?: string
+    auth_mode?: "oauth" | "service_account" | "app"
+    provider?: "google" | "microsoft"
+    account_email?: string
+    account_name?: string
+    folder_id?: string
+    folder_name?: string
+    drive_name?: string
 }
 
 interface Integration {
@@ -151,18 +164,29 @@ const CATALOG: {
         type: "llm",
         label: "LLM Provider",
         sublabel: "OpenAI / Compatible",
-        logoUrl: "/integrations/openai.svg",
+        // This category includes multiple providers, so a neutral agent mark is more accurate than one vendor logo.
+        logoUrl: null,
         FallbackIcon: Bot,
-        iconBg: "bg-emerald-50",
-        iconColor: "text-emerald-600",
-        accentColor: "border-emerald-100 hover:border-emerald-200",
+        iconBg: "bg-sky-50",
+        iconColor: "text-sky-600",
+        accentColor: "border-sky-100 hover:border-sky-200",
+    },
+    {
+        type: "softnix_genai",
+        label: "Softnix GenAI",
+        sublabel: "OpenAI Compatible",
+        logoUrl: null,
+        FallbackIcon: Bot,
+        iconBg: "bg-cyan-50",
+        iconColor: "text-cyan-600",
+        accentColor: "border-cyan-100 hover:border-cyan-200",
     },
     {
         type: "gdrive",
         label: "Google Drive",
-        sublabel: "Service Account",
-        logoUrl: "/integrations/googledrive.svg",
-        FallbackIcon: Cloud,
+        sublabel: "Connect account",
+        logoUrl: "https://img.icons8.com/fluent/1200/google-drive--v1.jpg",
+        FallbackIcon: HardDrive,
         iconBg: "bg-blue-50",
         iconColor: "text-blue-500",
         accentColor: "border-blue-100 hover:border-blue-200",
@@ -170,7 +194,7 @@ const CATALOG: {
     {
         type: "onedrive",
         label: "OneDrive",
-        sublabel: "SharePoint / Azure",
+        sublabel: "Connect account",
         logoUrl: "/integrations/onedrive.svg",
         FallbackIcon: Cloud,
         iconBg: "bg-sky-50",
@@ -200,6 +224,147 @@ function LogoImage({
     }
     return (
         <img src={src} alt={alt} className={imgClass} onError={() => setError(true)} />
+    )
+}
+
+function CloudConnectionWizard({
+    integration,
+    token,
+    onClose,
+    onSaved,
+    onAdvanced,
+}: {
+    integration: Integration
+    token: string
+    onClose: () => void
+    onSaved: (integration: APIIntegration) => void
+    onAdvanced: () => void
+}) {
+    const providerLabel = integration.type === "gdrive" ? "Google Drive" : "OneDrive"
+    const rootName = integration.type === "gdrive" ? "My Drive" : "OneDrive"
+    const initialName = integration.config.folder_name || rootName
+    const [name, setName] = useState(integration.name)
+    const [selectedFolder, setSelectedFolder] = useState({ id: integration.config.folder_id || "root", name: initialName })
+    const [path, setPath] = useState([{ id: "root", name: rootName }])
+    const [folders, setFolders] = useState<CloudFolder[]>([])
+    const [loading, setLoading] = useState(true)
+    const [saving, setSaving] = useState(false)
+    const [error, setError] = useState<string | null>(null)
+
+    const loadFolders = async (parentId: string) => {
+        setLoading(true)
+        setError(null)
+        try {
+            const items = await listCloudFolders(token, integration.id, parentId)
+            setFolders(items.filter((item) => item.is_folder))
+        } catch (err) {
+            setError(err instanceof Error ? err.message : "อ่านรายการโฟลเดอร์ไม่สำเร็จ")
+        } finally {
+            setLoading(false)
+        }
+    }
+
+    useEffect(() => {
+        loadFolders("root")
+        // The selected folder is the starting point when reconnecting an existing integration.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [integration.id])
+
+    const enterFolder = (folder: CloudFolder) => {
+        const next = { id: folder.id, name: folder.name }
+        setSelectedFolder(next)
+        setPath((previous) => [...previous, next])
+        loadFolders(folder.id)
+    }
+
+    const goUp = () => {
+        if (path.length <= 1) return
+        const nextPath = path.slice(0, -1)
+        const parent = nextPath[nextPath.length - 1]
+        setPath(nextPath)
+        loadFolders(parent.id)
+    }
+
+    const save = async () => {
+        setSaving(true)
+        setError(null)
+        try {
+            const updated = await updateCloudDestination(token, integration.id, {
+                name: name.trim() || integration.name,
+                folder_id: selectedFolder.id,
+                folder_name: selectedFolder.name,
+                status: "active",
+            })
+            await testDriveIntegration(token, integration.id, { folderId: selectedFolder.id })
+            onSaved(updated as APIIntegration)
+        } catch (err) {
+            setError(err instanceof Error ? err.message : "เชื่อมต่อโฟลเดอร์ไม่สำเร็จ")
+        } finally {
+            setSaving(false)
+        }
+    }
+
+    return (
+        <Modal isOpen onClose={onClose} title={`ตั้งค่า ${providerLabel}`} width="min(38rem, calc(100vw - 2rem))">
+            <div className="space-y-4">
+                <div className="flex items-center gap-3 rounded-lg border border-emerald-100 bg-emerald-50 px-4 py-3">
+                    <CheckCircle2 className="h-5 w-5 shrink-0 text-emerald-600" />
+                    <div className="min-w-0">
+                        <div className="text-sm font-semibold text-slate-900">เชื่อมต่อบัญชีสำเร็จ</div>
+                        <div className="truncate text-xs text-slate-600">{integration.config.account_email || integration.config.account_name || providerLabel}</div>
+                    </div>
+                </div>
+
+                <div className="space-y-2">
+                    <label className="text-sm font-medium text-slate-800" htmlFor="cloud-connection-name">ชื่อการเชื่อมต่อ</label>
+                    <Input id="cloud-connection-name" value={name} onChange={(event) => setName(event.target.value)} />
+                </div>
+
+                <div className="rounded-lg border border-slate-200 bg-white">
+                    <div className="flex items-center justify-between gap-3 border-b border-slate-100 px-4 py-3">
+                        <div>
+                            <div className="text-sm font-semibold text-slate-900">เลือกโฟลเดอร์ปลายทาง</div>
+                            <div className="text-xs text-slate-500">ใช้โฟลเดอร์นี้สำหรับนำเข้าและส่งออกเอกสาร</div>
+                        </div>
+                        <Button type="button" variant="outline" size="sm" onClick={goUp} disabled={path.length <= 1 || loading} aria-label="ย้อนกลับหนึ่งระดับ">
+                            <ChevronLeft className="mr-1 h-4 w-4" />ย้อนกลับ
+                        </Button>
+                    </div>
+                    <div className="flex items-center gap-2 border-b border-slate-100 px-4 py-2 text-xs text-slate-500">
+                        <Folder className="h-4 w-4 text-amber-500" />
+                        <span className="truncate">{path.map((item) => item.name).join(" / ")}</span>
+                    </div>
+                    <div className="max-h-56 overflow-y-auto p-2">
+                        {loading ? (
+                            <div className="flex items-center justify-center gap-2 py-8 text-sm text-slate-500"><LoaderCircle className="h-4 w-4 animate-spin" />กำลังโหลดโฟลเดอร์</div>
+                        ) : folders.length === 0 ? (
+                            <div className="py-8 text-center text-sm text-slate-500">ไม่พบโฟลเดอร์ย่อย</div>
+                        ) : (
+                            folders.map((folder) => (
+                                <button key={folder.id} type="button" onClick={() => enterFolder(folder)} className="flex w-full items-center gap-3 rounded-md px-3 py-2.5 text-left text-sm text-slate-700 transition-colors hover:bg-slate-50">
+                                    <Folder className="h-4 w-4 shrink-0 text-amber-500" />
+                                    <span className="truncate">{folder.name}</span>
+                                    <ChevronRight className="ml-auto h-4 w-4 shrink-0 text-slate-400" />
+                                </button>
+                            ))
+                        )}
+                    </div>
+                    <div className="flex items-center justify-between gap-3 border-t border-slate-100 bg-slate-50 px-4 py-3">
+                        <span className="truncate text-sm font-medium text-slate-800">ใช้: {selectedFolder.name}</span>
+                        <Button type="button" size="sm" onClick={save} disabled={saving || loading}>
+                            {saving ? <LoaderCircle className="mr-2 h-4 w-4 animate-spin" /> : <CheckCircle2 className="mr-2 h-4 w-4" />}
+                            {saving ? "กำลังบันทึก" : "ใช้โฟลเดอร์นี้"}
+                        </Button>
+                    </div>
+                </div>
+
+                {error && <div role="alert" className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div>}
+                <div className="flex items-center justify-between gap-3 border-t border-slate-100 pt-3">
+                    <button type="button" className="text-xs font-medium text-slate-500 underline underline-offset-2 hover:text-slate-700" onClick={onAdvanced}>ตั้งค่าแบบผู้ดูแลระบบ</button>
+                    <Button type="button" variant="outline" onClick={onClose}>ยกเลิก</Button>
+                </div>
+            </div>
+        </Modal>
     )
 }
 
@@ -264,10 +429,27 @@ export default function IntegrationsPage() {
     const [expandedIntegrations, setExpandedIntegrations] = useState<Record<string, boolean>>({})
     const [showTemplateModal, setShowTemplateModal] = useState(false)
     const [templateCategory, setTemplateCategory] = useState<"all" | TemplateCategory>("all")
+    const [cloudWizardIntegration, setCloudWizardIntegration] = useState<Integration | null>(null)
 
     useEffect(() => {
         loadIntegrations()
     }, [token])
+
+    useEffect(() => {
+        if (!token || integrations.length === 0 || typeof window === "undefined") return
+        const params = new URLSearchParams(window.location.search)
+        const oauthStatus = params.get("oauth")
+        const integrationId = params.get("integration_id")
+        if (oauthStatus === "success" && integrationId) {
+            const connected = integrations.find((item) => item.id === integrationId)
+            if (connected) setCloudWizardIntegration(connected)
+            window.history.replaceState({}, "", window.location.pathname)
+        } else if (oauthStatus === "error") {
+            const message = params.get("message") || "เชื่อมต่อ cloud storage ไม่สำเร็จ"
+            window.history.replaceState({}, "", window.location.pathname)
+            alert(message)
+        }
+    }, [integrations, token])
 
     const loadIntegrations = async () => {
         if (!token) return
@@ -314,8 +496,37 @@ export default function IntegrationsPage() {
         ? LLM_TEMPLATES
         : LLM_TEMPLATES.filter(t => t.category === templateCategory)
 
+    const startCloudOAuth = async (type: "gdrive" | "onedrive") => {
+        if (!token) return
+        try {
+            const provider = type === "gdrive" ? "google" : "microsoft"
+            const result = await getCloudOAuthStart(token, provider)
+            window.location.assign(result.authorization_url)
+        } catch (err) {
+            const message = err instanceof Error ? err.message : "เริ่มเชื่อมต่อ cloud storage ไม่สำเร็จ"
+            alert(message)
+            if (!isUser) openManualCloud(type)
+        }
+    }
+
+    const openManualCloud = (type: "gdrive" | "onedrive") => {
+        setFormState({ ...defaultFormState, type })
+        setEditingId(null)
+        setTestResult(null)
+        setTestInput("")
+        setShowForm(true)
+    }
+
     const openCreate = (type?: IntegrationType) => {
-        setFormState({ ...defaultFormState, type: type || "api" })
+        if (type === "gdrive" || type === "onedrive") {
+            startCloudOAuth(type)
+            return
+        }
+        setFormState({
+            ...defaultFormState,
+            type: type || "api",
+            ...(type === "softnix_genai" ? { baseUrl: SOFTNIX_GENAI_BASE_URL } : {}),
+        })
         setEditingId(null)
         setTestResult(null)
         setTestInput("")
@@ -337,6 +548,10 @@ export default function IntegrationsPage() {
     }
 
     const openEdit = (integration: Integration) => {
+        if ((integration.type === "gdrive" || integration.type === "onedrive") && integration.config.auth_mode === "oauth") {
+            setCloudWizardIntegration(integration)
+            return
+        }
         setFormState({
             name: integration.name, type: integration.type,
             description: integration.description || "", status: integration.status,
@@ -349,7 +564,7 @@ export default function IntegrationsPage() {
             parameters: integration.config.parameters || "",
             model: integration.config.model || "",
             apiKey: integration.config.apiKey || "",
-            baseUrl: integration.config.baseUrl || "",
+            baseUrl: integration.config.baseUrl || (integration.type === "softnix_genai" ? SOFTNIX_GENAI_BASE_URL : ""),
             instructions: integration.config.instructions || "",
             userPrompt: integration.config.userPrompt || "",
             outputFormatPrompt: integration.config.outputFormatPrompt || "",
@@ -371,9 +586,10 @@ export default function IntegrationsPage() {
     const handleDelete = async (id: string) => {
         const integration = integrations.find(i => i.id === id)
         if (!integration) return
-        if (isUser) { alert("Users cannot delete integrations"); return }
+        const ownsOAuthConnection = integration.config.auth_mode === "oauth" && integration.user_id === user?.id
+        if (isUser && !ownsOAuthConnection) { alert("Users cannot delete integrations"); return }
         if (isManager && integration.user_id !== user?.id) { alert("Managers can only delete their own integrations"); return }
-        if (!confirm("Delete this integration?")) return
+        if (!confirm(ownsOAuthConnection ? "ยกเลิกการเชื่อมต่อบัญชีนี้หรือไม่?" : "Delete this integration?")) return
         if (!token) return
         try {
             await deleteIntegration(token, id)
@@ -408,7 +624,9 @@ export default function IntegrationsPage() {
                 method: formState.method, endpoint: formState.endpoint, authHeader: formState.authHeader,
                 headersJson: formState.headersJson, payloadTemplate: formState.payloadTemplate,
                 webhookUrl: formState.webhookUrl, parameters: formState.parameters,
-                model: formState.model, apiKey: formState.apiKey, baseUrl: formState.baseUrl,
+                model: formState.model,
+                apiKey: formState.apiKey,
+                baseUrl: formState.type === "softnix_genai" ? SOFTNIX_GENAI_BASE_URL : formState.baseUrl,
                 instructions: formState.instructions, userPrompt: formState.userPrompt,
                 outputFormatPrompt: formState.outputFormatPrompt, reasoningEffort: formState.reasoningEffort,
             }
@@ -521,9 +739,14 @@ export default function IntegrationsPage() {
                     </div>
                 )
             case "llm":
+            case "softnix_genai":
+                {
+                const isSoftnixGenAI = formState.type === "softnix_genai"
                 return (
                     <div className="space-y-4 p-4 bg-slate-50 rounded-lg border">
-                        <div className="text-sm font-semibold text-slate-700">LLM API Settings</div>
+                        <div className="text-sm font-semibold text-slate-700">
+                            {isSoftnixGenAI ? "Softnix GenAI API Settings" : "LLM API Settings"}
+                        </div>
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                             <div className="space-y-2">
                                 <label className="text-sm font-medium">API Key *</label>
@@ -531,10 +754,17 @@ export default function IntegrationsPage() {
                                     onChange={(e) => setFormState({ ...formState, apiKey: e.target.value })} disabled={isUser} required />
                             </div>
                             <div className="space-y-2">
-                                <label className="text-sm font-medium">Base URL (Optional)</label>
-                                <Input placeholder="https://api.openai.com/v1 (default)" value={formState.baseUrl}
-                                    onChange={(e) => setFormState({ ...formState, baseUrl: e.target.value })} disabled={isUser} />
-                                <p className="text-xs text-slate-500">Leave empty for OpenAI. Use provider base URL such as https://openrouter.ai/api/v1.</p>
+                                <label className="text-sm font-medium">{isSoftnixGenAI ? "API Endpoint" : "Base URL (Optional)"}</label>
+                                <Input
+                                    placeholder={isSoftnixGenAI ? SOFTNIX_GENAI_BASE_URL : "https://api.openai.com/v1 (default)"}
+                                    value={isSoftnixGenAI ? SOFTNIX_GENAI_BASE_URL : formState.baseUrl}
+                                    onChange={(e) => setFormState({ ...formState, baseUrl: e.target.value })}
+                                    disabled={isUser || isSoftnixGenAI}
+                                    readOnly={isSoftnixGenAI}
+                                />
+                                <p className="text-xs text-slate-500">
+                                    {isSoftnixGenAI ? "ระบบจะเรียก Chat Completions และเติม /chat/completions ให้อัตโนมัติ" : "Leave empty for OpenAI. Use provider base URL such as https://openrouter.ai/api/v1."}
+                                </p>
                             </div>
                         </div>
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -640,6 +870,7 @@ export default function IntegrationsPage() {
                         </div>
                     </div>
                 )
+                }
             case "workflow":
                 return (
                     <div className="space-y-4">
@@ -777,6 +1008,7 @@ export default function IntegrationsPage() {
                     </div>
                 )
             case "llm":
+            case "softnix_genai":
                 return (
                     <div className="space-y-3 text-sm text-slate-700">
                         <div className="flex flex-wrap gap-3">
@@ -800,7 +1032,7 @@ export default function IntegrationsPage() {
                             )}
                         </div>
                         {integration.config.baseUrl && (
-                            <div><span className="font-semibold">Base URL:</span><span className="ml-2 text-slate-600 break-all">{integration.config.baseUrl}</span></div>
+                            <div><span className="font-semibold">{integration.type === "softnix_genai" ? "API Endpoint:" : "Base URL:"}</span><span className="ml-2 text-slate-600 break-all">{integration.config.baseUrl || (integration.type === "softnix_genai" ? SOFTNIX_GENAI_BASE_URL : "")}</span></div>
                         )}
                         {integration.config.instructions && (
                             <div className="space-y-1">
@@ -944,7 +1176,7 @@ export default function IntegrationsPage() {
             </div>
 
             {/* ─── Integration type catalog ─── */}
-            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4">
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4">
                 {CATALOG.map((cat) => {
                     const count = integrations.filter(i => i.type === cat.type).length
                     const activeCount = integrations.filter(i => i.type === cat.type && i.status === "active").length
@@ -970,11 +1202,18 @@ export default function IntegrationsPage() {
                                 <span className="text-[0.8125rem] font-medium leading-none text-slate-500">Not connected</span>
                             )}
                             {/* Add button */}
-                            {(isAdmin || isManager) && (
-                                <Button size="sm" variant="outline" className="h-9 w-full text-[0.8125rem]" onClick={() => openCreate(cat.type)}>
-                                    <Plus className="h-3 w-3 mr-1" />
-                                    Add
-                                </Button>
+                            {(isAdmin || isManager || cat.type === "gdrive" || cat.type === "onedrive") && (
+                                <div className="w-full space-y-2">
+                                    <Button size="sm" variant="outline" className="h-9 w-full text-[0.8125rem]" onClick={() => openCreate(cat.type)}>
+                                        <Plus className="h-3 w-3 mr-1" />
+                                        {cat.type === "gdrive" || cat.type === "onedrive" ? "Connect" : "Add"}
+                                    </Button>
+                                    {(isAdmin || isManager) && (cat.type === "gdrive" || cat.type === "onedrive") && (
+                                        <button type="button" className="text-xs font-medium text-slate-500 underline underline-offset-2 hover:text-slate-700" onClick={() => openManualCloud(cat.type as "gdrive" | "onedrive")}>
+                                            ตั้งค่าแบบผู้ดูแลระบบ
+                                        </button>
+                                    )}
+                                </div>
                             )}
                         </div>
                     )
@@ -1013,14 +1252,14 @@ export default function IntegrationsPage() {
                                     </span>
                                     {/* Actions */}
                                     <div className="flex items-center gap-1 shrink-0">
-                                        {isUser ? (
+                                        {isUser && integration.config.auth_mode !== "oauth" ? (
                                             <span className="flex items-center gap-1 text-[0.8125rem] font-medium text-slate-500"><Eye className="h-3.5 w-3.5" />View only</span>
-                                        ) : (isAdmin || (isManager && integration.user_id === user?.id)) ? (
+                                        ) : (isAdmin || isManager || (integration.config.auth_mode === "oauth" && integration.user_id === user?.id)) ? (
                                             <>
-                                                <Button variant="ghost" size="sm" className="h-8 w-8 p-0" onClick={() => openEdit(integration)}>
+                                                <Button variant="ghost" size="sm" className="h-8 w-8 p-0" onClick={() => openEdit(integration)} title="แก้ไขการเชื่อมต่อ">
                                                     <Pencil className="h-3.5 w-3.5" />
                                                 </Button>
-                                                <Button variant="ghost" size="sm" className="h-8 w-8 p-0 text-red-500 hover:text-red-600" onClick={() => handleDelete(integration.id)}>
+                                                <Button variant="ghost" size="sm" className="h-8 w-8 p-0 text-red-500 hover:text-red-600" onClick={() => handleDelete(integration.id)} title={integration.config.auth_mode === "oauth" ? "ยกเลิกการเชื่อมต่อ" : "ลบ integration"}>
                                                     <Trash2 className="h-3.5 w-3.5" />
                                                 </Button>
                                             </>
@@ -1050,6 +1289,23 @@ export default function IntegrationsPage() {
                 </div>
             )}
 
+            {cloudWizardIntegration && token && (
+                <CloudConnectionWizard
+                    integration={cloudWizardIntegration}
+                    token={token}
+                    onClose={() => setCloudWizardIntegration(null)}
+                    onSaved={(updated) => {
+                        setIntegrations((items) => items.map((item) => item.id === updated.id ? updated as Integration : item))
+                        setCloudWizardIntegration(null)
+                    }}
+                    onAdvanced={() => {
+                        const integration = cloudWizardIntegration
+                        setCloudWizardIntegration(null)
+                        openManualCloud(integration.type as "gdrive" | "onedrive")
+                    }}
+                />
+            )}
+
             {/* ─── Create / Edit Modal ─── */}
             <Modal isOpen={showForm} onClose={() => setShowForm(false)} title={editingId ? "Edit Integration" : "Add Integration"}>
                 <form className="space-y-4" onSubmit={handleSubmit}>
@@ -1061,10 +1317,22 @@ export default function IntegrationsPage() {
                         <div className="space-y-2">
                             <label className="text-sm font-medium">Type</label>
                             <select className="flex h-10 w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm"
-                                value={formState.type} onChange={(e) => setFormState({ ...formState, type: e.target.value as IntegrationType })} disabled={isUser}>
+                                value={formState.type}
+                                onChange={(e) => {
+                                    const nextType = e.target.value as IntegrationType
+                                    setFormState((previous) => ({
+                                        ...previous,
+                                        type: nextType,
+                                        baseUrl: nextType === "softnix_genai"
+                                            ? SOFTNIX_GENAI_BASE_URL
+                                            : previous.type === "softnix_genai" ? "" : previous.baseUrl,
+                                    }))
+                                }}
+                                disabled={isUser}>
                                 <option value="api">Custom API</option>
                                 <option value="workflow">Workflow / N8N</option>
                                 <option value="llm">LLM Provider</option>
+                                <option value="softnix_genai">Softnix GenAI</option>
                                 <option value="gdrive">Google Drive</option>
                                 <option value="onedrive">OneDrive / SharePoint</option>
                             </select>

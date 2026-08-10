@@ -48,7 +48,7 @@ def _ensure_llm_integration(db: Session, integration_id: UUID):
     integration = crud_integration.get(db, integration_id=integration_id)
     if not integration:
         raise HTTPException(status_code=400, detail="Integration not found")
-    if _enum_value(integration.type) != "llm":
+    if _enum_value(integration.type) not in ("llm", "softnix_genai"):
         raise HTTPException(status_code=400, detail="Integration is not LLM type")
     if _enum_value(integration.status) != "active":
         raise HTTPException(status_code=400, detail="Integration is not active")

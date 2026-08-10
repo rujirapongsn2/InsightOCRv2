@@ -53,7 +53,7 @@ interface EditableField {
     value: any
 }
 
-type IntegrationType = "api" | "workflow" | "llm" | "gdrive" | "onedrive"
+type IntegrationType = "api" | "workflow" | "llm" | "softnix_genai" | "gdrive" | "onedrive"
 
 interface IntegrationConfig {
     method?: "POST" | "PUT"
@@ -784,7 +784,7 @@ export default function JobDetailPage() {
         }
 
         // Use streaming for LLM integrations
-        if (integration?.type === "llm") {
+        if (integration?.type === "llm" || integration?.type === "softnix_genai") {
             // Open modal immediately with streaming state
             setLlmStreamText("")
             setLlmStreaming(true)
@@ -1008,6 +1008,7 @@ export default function JobDetailPage() {
         api: { label: "Custom API", icon: Plug, className: "bg-slate-100 text-slate-600" },
         workflow: { label: "Workflow", icon: Workflow, className: "bg-red-50 text-red-600" },
         llm: { label: "LLM Provider", icon: Bot, className: "bg-emerald-50 text-emerald-700" },
+        softnix_genai: { label: "Softnix GenAI", icon: Bot, className: "bg-cyan-50 text-cyan-700" },
         gdrive: { label: "Google Drive", icon: Cloud, className: "bg-blue-50 text-blue-600" },
         onedrive: { label: "OneDrive", icon: Cloud, className: "bg-sky-50 text-sky-600" },
     }
@@ -1174,9 +1175,9 @@ export default function JobDetailPage() {
                             ) : (
                                 <div className="space-y-1.5 max-h-48 overflow-y-auto">
                                     {resultHistory.map((r) => {
-                                        const isLlm = r.integration_type === "llm"
-                                        const typeBadge = r.integration_type === "llm" ? "LLM" : r.integration_type === "api" ? "API" : r.integration_type === "workflow" ? "Workflow" : r.integration_type || "—"
-                                        const typeBgColor = r.integration_type === "llm" ? "bg-[#ebf8ff] text-[#2b6cb0]" : r.integration_type === "api" ? "bg-[#fffaf0] text-[#c05621]" : "bg-[#f0fff4] text-[#276749]"
+                                        const isLlm = r.integration_type === "llm" || r.integration_type === "softnix_genai"
+                                        const typeBadge = r.integration_type === "llm" ? "LLM" : r.integration_type === "softnix_genai" ? "Softnix GenAI" : r.integration_type === "api" ? "API" : r.integration_type === "workflow" ? "Workflow" : r.integration_type || "—"
+                                        const typeBgColor = isLlm ? "bg-[#ebf8ff] text-[#2b6cb0]" : r.integration_type === "api" ? "bg-[#fffaf0] text-[#c05621]" : "bg-[#f0fff4] text-[#276749]"
                                         const rowContent = (
                                             <>
                                                 <div className="flex items-center gap-2 min-w-0 flex-1">

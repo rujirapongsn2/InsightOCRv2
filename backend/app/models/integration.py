@@ -14,6 +14,7 @@ class IntegrationType(str, enum.Enum):
     API = "api"
     WORKFLOW = "workflow"
     LLM = "llm"
+    SOFTNIX_GENAI = "softnix_genai"
     GDRIVE = "gdrive"
     ONEDRIVE = "onedrive"
 

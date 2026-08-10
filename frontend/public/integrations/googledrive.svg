@@ -1,6 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Google Drive">
-  <rect width="64" height="64" rx="14" fill="#eff6ff"/>
-  <path d="M28 12h14l16 28H44z" fill="#2563eb"/>
-  <path d="M22 22l-16 28h16l16-28z" fill="#16a34a"/>
-  <path d="M22 50h32l-8-14H30z" fill="#f59e0b"/>
+  <path d="M24 8h15l17 29H41z" fill="#4285f4"/>
+  <path d="M24 8 7 37l8 13 17-29z" fill="#0f9d58"/>
+  <path d="M7 37h34l7 12H14z" fill="#f4b400"/>
 </svg>

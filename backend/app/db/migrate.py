@@ -33,7 +33,7 @@ def _extend_integration_type_enum() -> None:
     # so it cannot live inside an Alembic migration.
     with engine.connect() as conn:
         autocommit = conn.execution_options(isolation_level="AUTOCOMMIT")
-        for label in ("GDRIVE", "ONEDRIVE"):
+        for label in ("SOFTNIX_GENAI", "GDRIVE", "ONEDRIVE"):
             try:
                 autocommit.execute(text(
                     f"ALTER TYPE integrationtype ADD VALUE IF NOT EXISTS '{label}'"

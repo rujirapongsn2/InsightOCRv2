@@ -20,6 +20,7 @@ from typing import Any, Dict, List
 
 import requests
 from jose import jwt
+from app.core.config import settings
 
 GOOGLE_SCOPE = "https://www.googleapis.com/auth/drive"
 GOOGLE_DEFAULT_TOKEN_URI = "https://oauth2.googleapis.com/token"
@@ -36,7 +37,15 @@ class CloudDriveError(Exception):
 class GoogleDriveClient:
     """Google Drive v3 via a service account (JWT-bearer flow)."""
 
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any], db: Any = None, integration: Any = None):
+        self.db = db
+        self.integration = integration
+        self.auth_mode = config.get("auth_mode", "service_account")
+        self.refresh_token_encrypted = config.get("refresh_token_encrypted")
+        if self.auth_mode == "oauth":
+            if not self.refresh_token_encrypted:
+                raise CloudDriveError("Google Drive OAuth credential ไม่สมบูรณ์ กรุณาเชื่อมต่อบัญชีใหม่")
+            return
         self.client_email = config.get("client_email")
         self.private_key = config.get("private_key")
         self.token_uri = config.get("token_uri") or GOOGLE_DEFAULT_TOKEN_URI
@@ -49,6 +58,40 @@ class GoogleDriveClient:
             self.private_key = self.private_key.replace("\\n", "\n")
 
     def _token(self) -> str:
+        if self.auth_mode == "oauth":
+            from app.services.cloud_oauth import CloudOAuthError, decrypt_refresh_token, encrypt_refresh_token
+
+            try:
+                refresh_token = decrypt_refresh_token(self.refresh_token_encrypted)
+            except CloudOAuthError as exc:
+                raise CloudDriveError(
+                    "Google Drive OAuth credential ใช้งานไม่ได้ กรุณาเชื่อมต่อบัญชีใหม่"
+                ) from exc
+            try:
+                resp = requests.post(
+                    GOOGLE_DEFAULT_TOKEN_URI,
+                    data={
+                        "client_id": settings.GOOGLE_OAUTH_CLIENT_ID,
+                        "client_secret": settings.GOOGLE_OAUTH_CLIENT_SECRET,
+                        "refresh_token": refresh_token,
+                        "grant_type": "refresh_token",
+                    },
+                    timeout=DEFAULT_TIMEOUT,
+                )
+            except requests.RequestException as exc:
+                raise CloudDriveError("ติดต่อ Google เพื่อขอ access token ไม่สำเร็จ") from exc
+            if resp.status_code != 200:
+                raise CloudDriveError(f"ต่ออายุ Google access token ไม่สำเร็จ: HTTP {resp.status_code} {resp.text[:300]}")
+            try:
+                body = resp.json()
+            except ValueError as exc:
+                raise CloudDriveError("Google ส่งข้อมูล access token กลับมาไม่ถูกต้อง") from exc
+            access_token = body.get("access_token")
+            if not access_token:
+                raise CloudDriveError("Google ไม่ส่ง access token กลับมา")
+            if body.get("refresh_token"):
+                self._persist_refresh_token(body["refresh_token"], encrypt_refresh_token)
+            return access_token
         now = int(time.time())
         claims = {
             "iss": self.client_email,
@@ -75,6 +118,20 @@ class GoogleDriveClient:
 
     def _headers(self) -> Dict[str, str]:
         return {"Authorization": f"Bearer {self._token()}"}
+
+    def _persist_refresh_token(self, token: str, encrypt) -> None:
+        if not self.db or not self.integration:
+            return
+        try:
+            self.integration.config = {
+                **(self.integration.config or {}),
+                "refresh_token_encrypted": encrypt(token),
+            }
+            self.db.commit()
+            self.refresh_token_encrypted = self.integration.config["refresh_token_encrypted"]
+        except Exception as exc:  # noqa: BLE001
+            self.db.rollback()
+            raise CloudDriveError("บันทึก OAuth credential ใหม่ไม่สำเร็จ") from exc
 
     def list_folder(self, folder_id: str) -> List[Dict[str, Any]]:
         if not folder_id:
@@ -105,6 +162,34 @@ class GoogleDriveClient:
             page_token = body.get("nextPageToken")
             if not page_token:
                 return files
+
+    def list_children(self, folder_id: str = "root") -> List[Dict[str, Any]]:
+        """List files and folders for the folder picker."""
+        parent = "root" if not folder_id or folder_id == "root" else folder_id
+        try:
+            resp = requests.get(
+                "https://www.googleapis.com/drive/v3/files",
+                headers=self._headers(),
+                params={
+                    "q": f"'{parent}' in parents and trashed=false",
+                    "fields": "files(id,name,mimeType,size,modifiedTime)",
+                    "pageSize": 1000,
+                    "orderBy": "folder,name",
+                    "supportsAllDrives": "true",
+                    "includeItemsFromAllDrives": "true",
+                },
+                timeout=DEFAULT_TIMEOUT,
+            )
+        except requests.RequestException as exc:
+            raise CloudDriveError("ติดต่อ Google เพื่ออ่านโฟลเดอร์ไม่สำเร็จ") from exc
+        if resp.status_code != 200:
+            raise CloudDriveError(f"Google Drive อ่านโฟลเดอร์ไม่สำเร็จ: HTTP {resp.status_code} {resp.text[:300]}")
+        folder_mime = "application/vnd.google-apps.folder"
+        try:
+            items = resp.json().get("files", [])
+        except ValueError as exc:
+            raise CloudDriveError("Google ส่งรายการโฟลเดอร์กลับมาไม่ถูกต้อง") from exc
+        return [{**item, "is_folder": item.get("mimeType") == folder_mime} for item in items]
 
     def download(self, file_id: str) -> bytes:
         resp = requests.get(
@@ -150,24 +235,67 @@ class GoogleDriveClient:
     def check(self) -> Dict[str, Any]:
         """Lightweight connectivity check — verifies token issuance works."""
         self._token()
-        return {"provider": "gdrive", "client_email": self.client_email, "ok": True}
+        return {"provider": "gdrive", "account": getattr(self, "client_email", None), "ok": True}
 
 
 # ── OneDrive / SharePoint (Microsoft Graph) ──────────────────────────
 class OneDriveClient:
     """OneDrive for Business / SharePoint via Graph app-only (client credentials)."""
 
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any], db: Any = None, integration: Any = None):
+        self.db = db
+        self.integration = integration
+        self.auth_mode = config.get("auth_mode", "app")
+        self.refresh_token_encrypted = config.get("refresh_token_encrypted")
         self.tenant_id = config.get("tenant_id")
         self.client_id = config.get("client_id")
         self.client_secret = config.get("client_secret")
         self.drive_id = config.get("drive_id")
-        missing = [k for k in ("tenant_id", "client_id", "client_secret", "drive_id")
+        required = ("tenant_id", "drive_id") if self.auth_mode == "oauth" else ("tenant_id", "client_id", "client_secret", "drive_id")
+        missing = [k for k in required
                    if not config.get(k)]
         if missing:
             raise CloudDriveError(f"OneDrive integration: ต้องระบุ {', '.join(missing)}")
 
     def _token(self) -> str:
+        if self.auth_mode == "oauth":
+            from app.services.cloud_oauth import CloudOAuthError, decrypt_refresh_token, encrypt_refresh_token
+
+            try:
+                refresh_token = decrypt_refresh_token(self.refresh_token_encrypted)
+            except CloudOAuthError as exc:
+                raise CloudDriveError(
+                    "OneDrive OAuth credential ใช้งานไม่ได้ กรุณาเชื่อมต่อบัญชีใหม่"
+                ) from exc
+            tenant = self.tenant_id or settings.MICROSOFT_OAUTH_TENANT
+            if not settings.MICROSOFT_OAUTH_SCOPE:
+                raise CloudDriveError("ยังไม่ได้ตั้งค่า Microsoft OAuth scope ใน backend/.env")
+            try:
+                resp = requests.post(
+                    f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token",
+                    data={
+                        "client_id": settings.MICROSOFT_OAUTH_CLIENT_ID,
+                        "client_secret": settings.MICROSOFT_OAUTH_CLIENT_SECRET,
+                        "refresh_token": refresh_token,
+                        "scope": settings.MICROSOFT_OAUTH_SCOPE,
+                        "grant_type": "refresh_token",
+                    },
+                    timeout=DEFAULT_TIMEOUT,
+                )
+            except requests.RequestException as exc:
+                raise CloudDriveError("ติดต่อ Microsoft เพื่อขอ access token ไม่สำเร็จ") from exc
+            if resp.status_code != 200:
+                raise CloudDriveError(f"ต่ออายุ Microsoft access token ไม่สำเร็จ: HTTP {resp.status_code} {resp.text[:300]}")
+            try:
+                body = resp.json()
+            except ValueError as exc:
+                raise CloudDriveError("Microsoft ส่งข้อมูล access token กลับมาไม่ถูกต้อง") from exc
+            access_token = body.get("access_token")
+            if not access_token:
+                raise CloudDriveError("Microsoft ไม่ส่ง access token กลับมา")
+            if body.get("refresh_token"):
+                self._persist_refresh_token(body["refresh_token"], encrypt_refresh_token)
+            return access_token
         resp = requests.post(
             f"https://login.microsoftonline.com/{self.tenant_id}/oauth2/v2.0/token",
             data={
@@ -184,6 +312,20 @@ class OneDriveClient:
 
     def _headers(self) -> Dict[str, str]:
         return {"Authorization": f"Bearer {self._token()}"}
+
+    def _persist_refresh_token(self, token: str, encrypt) -> None:
+        if not self.db or not self.integration:
+            return
+        try:
+            self.integration.config = {
+                **(self.integration.config or {}),
+                "refresh_token_encrypted": encrypt(token),
+            }
+            self.db.commit()
+            self.refresh_token_encrypted = self.integration.config["refresh_token_encrypted"]
+        except Exception as exc:  # noqa: BLE001
+            self.db.rollback()
+            raise CloudDriveError("บันทึก OAuth credential ใหม่ไม่สำเร็จ") from exc
 
     def list_folder(self, folder_id: str) -> List[Dict[str, Any]]:
         # folder_id "root" or empty → drive root; otherwise an item id
@@ -207,6 +349,29 @@ class OneDriveClient:
         return [{"id": it["id"], "name": it["name"], "size": it.get("size"),
                  "mimeType": (it.get("file") or {}).get("mimeType")}
                 for it in items if "file" in it]
+
+    def list_children(self, folder_id: str = "root") -> List[Dict[str, Any]]:
+        """List files and folders for the folder picker."""
+        seg = "root" if not folder_id or folder_id == "root" else f"items/{folder_id}"
+        try:
+            resp = requests.get(
+                f"{GRAPH_BASE}/drives/{self.drive_id}/{seg}/children",
+                headers=self._headers(),
+                params={"$select": "id,name,size,file,folder,lastModifiedDateTime", "$top": 999},
+                timeout=DEFAULT_TIMEOUT,
+            )
+        except requests.RequestException as exc:
+            raise CloudDriveError("ติดต่อ OneDrive เพื่ออ่านโฟลเดอร์ไม่สำเร็จ") from exc
+        if resp.status_code != 200:
+            raise CloudDriveError(f"OneDrive อ่านโฟลเดอร์ไม่สำเร็จ: HTTP {resp.status_code} {resp.text[:300]}")
+        try:
+            items = resp.json().get("value", [])
+        except ValueError as exc:
+            raise CloudDriveError("OneDrive ส่งรายการโฟลเดอร์กลับมาไม่ถูกต้อง") from exc
+        return [
+            {**item, "is_folder": "folder" in item, "mimeType": (item.get("file") or {}).get("mimeType")}
+            for item in items
+        ]
 
     def download(self, item_id: str) -> bytes:
         resp = requests.get(
@@ -242,11 +407,11 @@ class OneDriveClient:
         return {"provider": "onedrive", "drive": resp.json(), "ok": True}
 
 
-def get_drive_client(integration) -> Any:
+def get_drive_client(integration, db: Any = None) -> Any:
     """Return the right client for an Integration row based on its type."""
     config = integration.config or {}
     if integration.type == "gdrive":
-        return GoogleDriveClient(config)
+        return GoogleDriveClient(config, db=db, integration=integration)
     if integration.type == "onedrive":
-        return OneDriveClient(config)
+        return OneDriveClient(config, db=db, integration=integration)
     raise CloudDriveError(f"Integration type '{integration.type}' ไม่รองรับสำหรับ cloud drive")

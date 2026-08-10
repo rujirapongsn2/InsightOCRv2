@@ -1,7 +1,9 @@
 from fastapi import APIRouter, HTTPException, Depends, Request
+from fastapi.responses import RedirectResponse
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any, Literal
+from urllib.parse import urlencode
 from uuid import UUID
 from openai import OpenAI
 
@@ -67,6 +69,18 @@ def _normalize_llm_base_url(base_url: Optional[str]) -> tuple[Optional[str], Opt
         return normalized[: -len("/responses")], "responses"
 
     return normalized, None
+
+
+LLM_INTEGRATION_TYPES = ("llm", "softnix_genai")
+
+
+def _integration_type_value(integration: Any) -> str:
+    value = getattr(integration, "type", integration)
+    return value.value if hasattr(value, "value") else str(value)
+
+
+def _is_llm_integration(integration: Any) -> bool:
+    return _integration_type_value(integration) in LLM_INTEGRATION_TYPES
 
 
 def _build_openai_client(api_key: str, base_url: Optional[str]) -> OpenAI:
@@ -147,6 +161,8 @@ import httpx
 import json
 from app.api import deps
 from app.models.user import User
+from app.models.integration import Integration, IntegrationType, IntegrationStatus
+from app.core.config import settings
 from app.schemas.integration import (
     IntegrationCreate,
     IntegrationUpdate,
@@ -159,6 +175,139 @@ from app.utils.activity_logger import log_activity, Actions
 from app.utils.redact import redact_secrets, restore_masked_secrets
 
 router = APIRouter()
+
+CloudProvider = Literal["google", "microsoft"]
+
+
+def _cloud_redirect_url(**params: str) -> str:
+    query = urlencode(params)
+    return f"{settings.PUBLIC_APP_URL.rstrip('/')}/integrations?{query}"
+
+
+def _can_manage_cloud(current_user: User, integration: Integration) -> bool:
+    return bool(
+        current_user.is_superuser
+        or current_user.role in ("admin", "manager", "documents_admin")
+        or integration.user_id == current_user.id
+    )
+
+
+class CloudDestinationUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    status: Optional[str] = None
+    folder_id: str
+    folder_name: str = ""
+
+
+class DriveFolderResponse(BaseModel):
+    id: str
+    name: str
+    is_folder: bool
+    mimeType: Optional[str] = None
+    size: Optional[int] = None
+
+
+@router.get("/oauth/{provider}/start")
+async def start_cloud_oauth(
+    provider: CloudProvider,
+    current_user: User = Depends(deps.get_current_active_user),
+):
+    """Return an OAuth authorization URL for a user-owned cloud connection."""
+    from app.services.cloud_oauth import authorization_url, CloudOAuthError
+
+    try:
+        return {"provider": provider, "authorization_url": authorization_url(provider, str(current_user.id))}
+    except CloudOAuthError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.get("/oauth/{provider}/callback")
+async def complete_cloud_oauth(
+    provider: CloudProvider,
+    code: Optional[str] = None,
+    state: Optional[str] = None,
+    error: Optional[str] = None,
+    error_description: Optional[str] = None,
+    db: Session = Depends(deps.get_db),
+):
+    """Exchange the provider callback and create/update the user's connection."""
+    from app.services.cloud_oauth import complete_authorization, consume_state, CloudOAuthError
+
+    if error:
+        if state:
+            try:
+                consume_state(state, provider)
+            except CloudOAuthError:
+                pass
+        message = error_description or error
+        return RedirectResponse(_cloud_redirect_url(oauth="error", provider=provider, message=message[:240]))
+    if not code or not state:
+        return RedirectResponse(_cloud_redirect_url(oauth="error", provider=provider, message="OAuth callback ไม่สมบูรณ์"))
+
+    try:
+        user_id = UUID(consume_state(state, provider))
+        user = db.query(User).filter(User.id == user_id, User.is_active.is_(True)).first()
+        if not user:
+            raise CloudOAuthError("ไม่พบผู้ใช้สำหรับ OAuth session นี้")
+        oauth_data = complete_authorization(provider, code)
+    except (ValueError, CloudOAuthError) as exc:
+        return RedirectResponse(_cloud_redirect_url(oauth="error", provider=provider, message=str(exc)[:240]))
+
+    integration_type = IntegrationType.GDRIVE if provider == "google" else IntegrationType.ONEDRIVE
+    provider_label = "Google Drive" if provider == "google" else "OneDrive"
+    config: Dict[str, Any] = {
+        "auth_mode": "oauth",
+        "provider": provider,
+        "account_id": oauth_data.get("account_id"),
+        "account_email": oauth_data.get("account_email"),
+        "account_name": oauth_data.get("account_name"),
+        "refresh_token_encrypted": oauth_data["refresh_token_encrypted"],
+        "access_token_expires_at": oauth_data.get("access_token_expires_at"),
+        "folder_id": "root",
+        "folder_name": "My Drive" if provider == "google" else "OneDrive",
+    }
+    if provider == "microsoft":
+        config.update({
+            "tenant_id": settings.MICROSOFT_OAUTH_TENANT,
+            "drive_id": oauth_data.get("drive_id"),
+            "drive_name": oauth_data.get("drive_name"),
+            "drive_type": oauth_data.get("drive_type"),
+        })
+
+    existing = next(
+        (
+            item for item in db.query(Integration).filter(
+                Integration.user_id == user.id,
+                Integration.type == integration_type,
+            ).all()
+            if (item.config or {}).get("auth_mode") == "oauth"
+            and (item.config or {}).get("provider") == provider
+            and (item.config or {}).get("account_id") == config.get("account_id")
+        ),
+        None,
+    )
+    if existing:
+        config["folder_id"] = (existing.config or {}).get("folder_id") or config["folder_id"]
+        config["folder_name"] = (existing.config or {}).get("folder_name") or config["folder_name"]
+        existing.name = f"{provider_label} · {config.get('account_email') or config.get('account_name') or 'Connected account'}"
+        existing.status = IntegrationStatus.ACTIVE
+        existing.config = {**(existing.config or {}), **config}
+        integration_id = existing.id
+    else:
+        existing = Integration(
+            user_id=user.id,
+            name=f"{provider_label} · {config.get('account_email') or config.get('account_name') or 'Connected account'}",
+            type=integration_type,
+            description="เชื่อมต่อผ่านบัญชีผู้ใช้",
+            status=IntegrationStatus.ACTIVE,
+            config=config,
+        )
+        db.add(existing)
+        db.flush()
+        integration_id = existing.id
+    db.commit()
+    return RedirectResponse(_cloud_redirect_url(oauth="success", provider=provider, integration_id=str(integration_id)))
 
 
 def _masked_response(integration) -> IntegrationResponse:
@@ -260,9 +409,71 @@ async def get_integration_result(
     }
 
 
+@router.get("/{integration_id}/folders", response_model=List[DriveFolderResponse])
+async def list_cloud_folders(
+    integration_id: UUID,
+    parent_id: str = "root",
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_active_user),
+):
+    """List files/folders for the OAuth connection's folder picker."""
+    integration = crud_integration.get(db=db, integration_id=integration_id)
+    if not integration or integration.type not in (IntegrationType.GDRIVE, IntegrationType.ONEDRIVE):
+        raise HTTPException(status_code=404, detail="Cloud integration not found")
+    if not _can_manage_cloud(current_user, integration):
+        raise HTTPException(status_code=403, detail="ไม่มีสิทธิ์จัดการ integration นี้")
+    if (integration.config or {}).get("auth_mode") != "oauth":
+        raise HTTPException(status_code=400, detail="Folder picker ใช้ได้กับ OAuth connection เท่านั้น")
+
+    from app.services.cloud_drive import get_drive_client, CloudDriveError
+    try:
+        client = get_drive_client(integration, db=db)
+        return client.list_children(parent_id)
+    except CloudDriveError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.put("/{integration_id}/cloud-destination", response_model=IntegrationResponse)
+async def update_cloud_destination(
+    integration_id: UUID,
+    payload: CloudDestinationUpdate,
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_active_user),
+):
+    """Save a selected folder without exposing OAuth secrets to the browser."""
+    integration = crud_integration.get(db=db, integration_id=integration_id)
+    if not integration or integration.type not in (IntegrationType.GDRIVE, IntegrationType.ONEDRIVE):
+        raise HTTPException(status_code=404, detail="Cloud integration not found")
+    if not _can_manage_cloud(current_user, integration):
+        raise HTTPException(status_code=403, detail="ไม่มีสิทธิ์จัดการ integration นี้")
+    if (integration.config or {}).get("auth_mode") != "oauth":
+        raise HTTPException(status_code=400, detail="Destination wizard ใช้ได้กับ OAuth connection เท่านั้น")
+
+    config = {
+        **(integration.config or {}),
+        "folder_id": payload.folder_id or "root",
+        "folder_name": payload.folder_name or "Root",
+    }
+    integration.config = config
+    if payload.name and payload.name.strip():
+        integration.name = payload.name.strip()
+    if payload.description is not None:
+        integration.description = payload.description.strip() or None
+    if payload.status in ("active", "paused"):
+        integration.status = payload.status
+    db.commit()
+    db.refresh(integration)
+    return _masked_response(integration)
+
+
+class DriveTestRequest(BaseModel):
+    folder_id: Optional[str] = None
+
+
 @router.post("/{integration_id}/test-drive")
 async def test_drive_integration(
     integration_id: UUID,
+    payload: Optional[DriveTestRequest] = None,
     db: Session = Depends(deps.get_db),
     current_user: User = Depends(deps.get_current_user),
 ):
@@ -272,11 +483,21 @@ async def test_drive_integration(
         raise HTTPException(status_code=404, detail="Integration not found")
     if integration.type not in ("gdrive", "onedrive"):
         raise HTTPException(status_code=400, detail="Integration นี้ไม่ใช่ Google Drive / OneDrive")
+    if not _can_manage_cloud(current_user, integration):
+        raise HTTPException(status_code=403, detail="ไม่มีสิทธิ์ทดสอบ integration นี้")
+    if (integration.config or {}).get("auth_mode") == "oauth" and payload and payload.folder_id:
+        selected_folder = (integration.config or {}).get("folder_id") or "root"
+        if payload.folder_id != selected_folder:
+            raise HTTPException(status_code=400, detail="ทดสอบได้เฉพาะโฟลเดอร์ปลายทางที่บันทึกไว้")
 
     from app.services.cloud_drive import get_drive_client, CloudDriveError
     try:
-        client = get_drive_client(integration)
+        client = get_drive_client(integration, db=db)
         result = client.check()
+        if payload and payload.folder_id:
+            children = client.list_children(payload.folder_id)
+            result["folder_id"] = payload.folder_id
+            result["children_count"] = len(children)
         return {"ok": True, "detail": result}
     except CloudDriveError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -662,7 +883,7 @@ async def send_to_integration_stream(
 
     integration = _resolve_send_target_integration(db, request)
 
-    if integration.type != "llm":
+    if not _is_llm_integration(integration):
         raise HTTPException(status_code=400, detail="Streaming is only supported for LLM integrations")
 
     llm_api_key = integration.config.get("apiKey")
@@ -759,7 +980,7 @@ async def send_to_integration_stream(
                         job_id=request.job_id,
                         integration_id=integration.id,
                         user_id=current_user.id,
-                        integration_type="llm",
+                        integration_type=_integration_type_value(integration),
                         integration_name=integration.name,
                         status="success",
                         output=full_output,
@@ -808,7 +1029,7 @@ async def send_to_integration_stream(
                         job_id=request.job_id,
                         integration_id=integration.id,
                         user_id=current_user.id,
-                        integration_type="llm",
+                        integration_type=_integration_type_value(integration),
                         integration_name=integration.name,
                         status="error",
                         error_message=str(e),
@@ -874,7 +1095,7 @@ async def send_to_integration(
         success = False
         message = ""
 
-        if integration.type == "llm":
+        if _is_llm_integration(integration):
             llm_api_key = integration.config.get("apiKey")
             if not llm_api_key:
                 raise HTTPException(status_code=400, detail="API Key is required for LLM integration")
@@ -1023,9 +1244,9 @@ async def send_to_integration(
                     integration_type=integration.type.value if hasattr(integration.type, "value") else str(integration.type),
                     integration_name=integration.name,
                     status="success" if success else "error",
-                    output=results[0].output if results and integration.type == "llm" else None,
+                    output=results[0].output if results and _is_llm_integration(integration) else None,
                     error_message=results[0].error if results and not success else None,
-                    model_used=integration.config.get("model") if integration.type == "llm" else None,
+                    model_used=integration.config.get("model") if _is_llm_integration(integration) else None,
                 )
             except Exception:
                 pass
@@ -1033,7 +1254,7 @@ async def send_to_integration(
         return SendToIntegrationResponse(
             success=success,
             message=message,
-            results=results if integration.type == "llm" else None
+            results=results if _is_llm_integration(integration) else None
         )
 
     except HTTPException as he:

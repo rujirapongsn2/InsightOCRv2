@@ -5,7 +5,7 @@ import { useAuth } from "@/components/auth-provider"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { AlertCircle, Bot, CheckCircle2, Eye, EyeOff, Loader2, Pencil, Plus, Trash2 } from "lucide-react"
+import { AlertCircle, Bot, CheckCircle2, ChevronDown, Eye, EyeOff, Loader2, Pencil, Plus, Trash2 } from "lucide-react"
 import { getApiBaseUrl } from "@/lib/api"
 import {
   type AIProviderSetting,
@@ -713,30 +713,38 @@ export default function SettingsPage() {
         <CardContent className="space-y-4">
           <div className="space-y-2">
             <label className="text-sm font-medium">Engine</label>
-            <select
-              title="Select OCR Engine"
-              className="flex h-10 w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm"
-              value={ocrEngine}
-              onChange={(e) => setOcrEngine(e.target.value)}
-            >
-              <option value="default">default</option>
-              <option value="tesseract">tesseract</option>
-              <option value="easyocr">easyocr</option>
-            </select>
+            <div className="relative">
+              <select
+                aria-label="Select OCR Engine"
+                className="flex h-10 w-full appearance-none rounded-md border border-slate-200 bg-white px-3 py-2 pr-10 text-sm transition-colors focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20 disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-400"
+                value={ocrEngine}
+                onChange={(e) => setOcrEngine(e.target.value)}
+                disabled={isLoadingConfig}
+              >
+                <option value="default">Provider default</option>
+                <option value="tesseract">Tesseract</option>
+                <option value="easyocr">EasyOCR</option>
+              </select>
+              <ChevronDown aria-hidden="true" className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
+            </div>
           </div>
           <div className="space-y-2">
             <label className="text-sm font-medium">Model</label>
-            <select
-              title="Select OCR Model"
-              className="flex h-10 w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm"
-              value={model}
-              onChange={(e) => setModel(e.target.value)}
-            >
-              <option value="default">default</option>
-              <option value="scb10x/typhoon-ocr-7b">scb10x/typhoon-ocr-7b</option>
-              <option value="gemma3:27b">gemma3:27b</option>
-              <option value="qwen/qwen2.5-vl-72b-instruct">qwen/qwen2.5-vl-72b-instruct</option>
-            </select>
+            <div className="relative">
+              <select
+                aria-label="Select OCR Model"
+                className="flex h-10 w-full appearance-none rounded-md border border-slate-200 bg-white px-3 py-2 pr-10 text-sm transition-colors focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20 disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-400"
+                value={model}
+                onChange={(e) => setModel(e.target.value)}
+                disabled={isLoadingConfig}
+              >
+                <option value="default">Provider default</option>
+                <option value="scb10x/typhoon-ocr-7b">Typhoon OCR 7B</option>
+                <option value="gemma3:27b">Gemma 3 27B</option>
+                <option value="qwen/qwen2.5-vl-72b-instruct">Qwen 2.5 VL 72B Instruct</option>
+              </select>
+              <ChevronDown aria-hidden="true" className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
+            </div>
           </div>
           <div className="flex gap-2">
             <Button type="button" onClick={handleSaveBackend}>
