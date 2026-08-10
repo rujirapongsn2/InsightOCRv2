@@ -644,7 +644,10 @@ def resolve_llm_provider(
 
     fallback = (
         db.query(Integration)
-        .filter(Integration.type == IntegrationType.LLM, Integration.status == IntegrationStatus.ACTIVE)
+        .filter(
+            Integration.type.in_((IntegrationType.LLM, IntegrationType.SOFTNIX_GENAI)),
+            Integration.status == IntegrationStatus.ACTIVE,
+        )
         .order_by(Integration.created_at.asc())
         .first()
     )
@@ -1089,7 +1092,7 @@ def _load_drive_integration(db: Session, config: dict, expected_type: str, conte
         raise NodeExecutionError(
             f"integration '{integration.name}' เป็นชนิด {integration.type} ไม่ใช่ {expected_type}"
         )
-    return integration, get_drive_client(integration)
+    return integration, get_drive_client(integration, db=db)
 
 
 def _content_to_bytes(content: Any, mime_type: str) -> bytes:
@@ -1104,11 +1107,20 @@ def _content_to_bytes(content: Any, mime_type: str) -> bytes:
     return _stringify(content).encode("utf-8")
 
 
+def _cloud_folder_id(integration: Integration, config: dict) -> str:
+    """Use the saved OAuth destination and prevent arbitrary folder access."""
+    requested = config.get("folder_id")
+    selected = (integration.config or {}).get("folder_id") or "root"
+    if (integration.config or {}).get("auth_mode") == "oauth" and requested and requested != selected:
+        raise NodeExecutionError("OAuth cloud integration ใช้งานได้เฉพาะโฟลเดอร์ปลายทางที่บันทึกไว้")
+    return requested or selected
+
+
 def _exec_cloud_upload(db: Session, config: dict, context: dict, log, provider: str) -> Any:
     integration, client = _load_drive_integration(db, config, provider, context)
     filename = os.path.basename(str(config.get("filename") or "result.json"))
     mime_type = config.get("mime_type") or "application/json"
-    folder_id = config.get("folder_id") or ""
+    folder_id = _cloud_folder_id(integration, config)
     data = _content_to_bytes(config.get("content"), mime_type)
 
     log(f"อัปโหลด '{filename}' ({len(data)} bytes) ผ่าน '{integration.name}'")
@@ -1126,7 +1138,7 @@ def _exec_cloud_import(db: Session, config: dict, context: dict, log, provider: 
     )
 
     integration, client = _load_drive_integration(db, config, provider, context)
-    folder_id = config.get("folder_id") or ""
+    folder_id = _cloud_folder_id(integration, config)
     job_id = config.get("job_id")
     if not job_id:
         raise NodeExecutionError("ต้องเลือก Job ปลายทาง")

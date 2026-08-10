@@ -18,7 +18,7 @@ from app.schemas.chat import (
     ChatMessageCreate,
     ChatMessageResponse,
 )
-from app.api.v1.endpoints.integrations import _supports_reasoning
+from app.api.v1.endpoints.integrations import _is_llm_integration, _supports_reasoning
 
 router = APIRouter()
 
@@ -230,7 +230,7 @@ async def send_message(
     integration = crud_integration.get(db, integration_id=conv.integration_id) if conv.integration_id else None
     if not integration:
         raise HTTPException(status_code=400, detail="No LLM integration linked to this conversation")
-    if integration.type != "llm":
+    if not _is_llm_integration(integration):
         raise HTTPException(status_code=400, detail="Integration is not an LLM type")
 
     llm_api_key = integration.config.get("apiKey")

@@ -51,6 +51,24 @@ class Settings(BaseSettings):
     MISTRAL_API_KEY: Optional[str] = None
     OCR_SSE_IDLE_TIMEOUT_SECONDS: int = 180
 
+    # Cloud storage OAuth. Keep provider secrets server-side; users connect
+    # their own accounts through the integrations UI.
+    PUBLIC_APP_URL: str = "http://localhost:3000"
+    GOOGLE_OAUTH_CLIENT_ID: Optional[str] = None
+    GOOGLE_OAUTH_CLIENT_SECRET: Optional[str] = None
+    GOOGLE_OAUTH_REDIRECT_URI: Optional[str] = None
+    # Full Drive access is required only because the current UX browses
+    # existing folders and supports both import and export. The application
+    # enforces the saved destination folder for OAuth workflow operations.
+    GOOGLE_OAUTH_SCOPE: Optional[str] = None
+    MICROSOFT_OAUTH_CLIENT_ID: Optional[str] = None
+    MICROSOFT_OAUTH_CLIENT_SECRET: Optional[str] = None
+    MICROSOFT_OAUTH_TENANT: str = "common"
+    MICROSOFT_OAUTH_REDIRECT_URI: Optional[str] = None
+    # Files.ReadWrite is the delegated scope needed for existing-folder
+    # import/export; AppFolder is a narrower alternative for app-only storage.
+    MICROSOFT_OAUTH_SCOPE: Optional[str] = None
+
     # JWT
     SECRET_KEY: str # Set via env var
     ALGORITHM: str = "HS256"

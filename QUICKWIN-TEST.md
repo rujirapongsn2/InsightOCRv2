@@ -1083,3 +1083,22 @@ Date: 2026-06-30
    - Verification:
      - `npm run build` passed for the frontend, including Next.js production build and TypeScript.
      - Targeted `npx eslint components/agent/AgentPanel.tsx` still reports pre-existing `any` usage in the file. The production build passes.
+
+17. Cloud storage OAuth connection wizard
+   - Added user-owned OAuth connection flow for Google Drive and OneDrive.
+   - Added single-use OAuth state backed by Redis, server-side encrypted refresh-token storage with rotation support, provider callbacks, folder browsing, destination save, and post-save folder connectivity verification.
+   - OAuth workflow actions are restricted to the saved destination folder; the provider scope must be explicitly configured in `backend/.env`.
+   - Kept the existing Service Account and Azure app credential forms available under `ตั้งค่าแบบผู้ดูแลระบบ` for existing enterprise workflows.
+   - Added optional backend variables in `backend/.env.example` and `backend/.env.prod.example`:
+     - `PUBLIC_APP_URL`
+     - `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, `GOOGLE_OAUTH_REDIRECT_URI`
+     - `MICROSOFT_OAUTH_CLIENT_ID`, `MICROSOFT_OAUTH_CLIENT_SECRET`, `MICROSOFT_OAUTH_TENANT`, `MICROSOFT_OAUTH_REDIRECT_URI`
+   - Manual verification after registering provider callbacks:
+     1. Set the OAuth variables in `backend/.env` and restart backend/frontend.
+     2. Open Integrations as a normal user and click `Connect` on Google Drive or OneDrive.
+     3. Complete provider consent, select a folder, and click `ใช้โฟลเดอร์นี้`.
+     4. Confirm the connected account and selected folder appear in the Connected list.
+     5. Run a cloud import/export workflow and confirm the selected folder is used.
+   - Automated verification:
+     - Frontend `npm run build` passed.
+     - Backend OAuth and OCR fallback tests passed (`7 passed`).

@@ -23,6 +23,7 @@ SENSITIVE_KEYS = {
     "auth_header",
     "access_token",
     "refresh_token",
+    "refresh_token_encrypted",
     "client_secret",
     "private_key",  # Google service-account key
     "webhook_secret",

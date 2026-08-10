@@ -102,6 +102,7 @@ export default function DashboardPage() {
         return stats.daily_usage.map((d) => ({
             label: d.day.slice(5).replace("-", "/"),
             count: d.count,
+            isToday: d.day === new Date().toISOString().slice(0, 10),
         }))
     }, [stats])
 
@@ -169,15 +170,13 @@ export default function DashboardPage() {
                                 return (
                                     <div key={item.label} className="flex flex-col items-center gap-2">
                                         <div className="h-44 w-full bg-slate-100 rounded-lg flex items-end justify-center">
-                                            <div
-                                                className="w-full rounded-md"
-                                                style={{
-                                                    height: `${height}px`,
-                                                    minHeight: "4px",
-                                                    background: "linear-gradient(135deg, #F3903F 0%, #FDC70C 33%, #A9CB2E 66%, #2786C2 100%)"
-                                                }}
-                                                aria-label={`${item.label} usage ${item.count}`}
-                                            />
+                                            {item.count > 0 && (
+                                                <div
+                                                    className={`w-full rounded-md transition-[height] duration-300 ${item.isToday ? "bg-[#F28C28]" : "bg-[#2F8CC9]"}`}
+                                                    style={{ height: `${height}px` }}
+                                                    aria-label={`${item.label} usage ${item.count}`}
+                                                />
+                                            )}
                                         </div>
                                         <div className="text-xs text-slate-600">{item.label}</div>
                                         <div className="text-sm font-semibold text-slate-800">{item.count}</div>
@@ -208,10 +207,9 @@ export default function DashboardPage() {
                                     </div>
                                     <div className="h-2 rounded-full bg-slate-100">
                                         <div
-                                            className="h-2 rounded-full"
+                                            className="h-2 rounded-full bg-[#2F8CC9] transition-[width] duration-300"
                                             style={{
                                                 width: `${percent}%`,
-                                                background: "linear-gradient(135deg, #F3903F 0%, #FDC70C 33%, #A9CB2E 66%, #2786C2 100%)"
                                             }}
                                         />
                                     </div>
