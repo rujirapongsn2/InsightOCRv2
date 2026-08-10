@@ -175,7 +175,7 @@ const CATALOG: {
         type: "softnix_genai",
         label: "Softnix GenAI",
         sublabel: "OpenAI Compatible",
-        logoUrl: null,
+        logoUrl: "/integrations/softnix-genai.png",
         FallbackIcon: Bot,
         iconBg: "bg-cyan-50",
         iconColor: "text-cyan-600",
@@ -626,7 +626,7 @@ export default function IntegrationsPage() {
                 webhookUrl: formState.webhookUrl, parameters: formState.parameters,
                 model: formState.model,
                 apiKey: formState.apiKey,
-                baseUrl: formState.type === "softnix_genai" ? SOFTNIX_GENAI_BASE_URL : formState.baseUrl,
+                baseUrl: formState.baseUrl || (formState.type === "softnix_genai" ? SOFTNIX_GENAI_BASE_URL : ""),
                 instructions: formState.instructions, userPrompt: formState.userPrompt,
                 outputFormatPrompt: formState.outputFormatPrompt, reasoningEffort: formState.reasoningEffort,
             }
@@ -757,13 +757,13 @@ export default function IntegrationsPage() {
                                 <label className="text-sm font-medium">{isSoftnixGenAI ? "API Endpoint" : "Base URL (Optional)"}</label>
                                 <Input
                                     placeholder={isSoftnixGenAI ? SOFTNIX_GENAI_BASE_URL : "https://api.openai.com/v1 (default)"}
-                                    value={isSoftnixGenAI ? SOFTNIX_GENAI_BASE_URL : formState.baseUrl}
+                                    value={formState.baseUrl}
                                     onChange={(e) => setFormState({ ...formState, baseUrl: e.target.value })}
-                                    disabled={isUser || isSoftnixGenAI}
-                                    readOnly={isSoftnixGenAI}
+                                    disabled={isUser}
+                                    required={isSoftnixGenAI}
                                 />
                                 <p className="text-xs text-slate-500">
-                                    {isSoftnixGenAI ? "ระบบจะเรียก Chat Completions และเติม /chat/completions ให้อัตโนมัติ" : "Leave empty for OpenAI. Use provider base URL such as https://openrouter.ai/api/v1."}
+                                    {isSoftnixGenAI ? "ใช้ Chat Completions และเติม /chat/completions ให้อัตโนมัติ สามารถแก้ไข endpoint ได้" : "Leave empty for OpenAI. Use provider base URL such as https://openrouter.ai/api/v1."}
                                 </p>
                             </div>
                         </div>
