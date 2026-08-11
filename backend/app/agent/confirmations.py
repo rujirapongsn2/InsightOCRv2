@@ -1,9 +1,18 @@
+EXPLICIT_CONFIRMATION_TOOLS = frozenset({"create_skill", "web_search"})
+
+
+def requires_explicit_confirmation(tool_name: str) -> bool:
+    """Return whether an approved action must come from the manual UI."""
+    return tool_name in EXPLICIT_CONFIRMATION_TOOLS
+
+
 def requires_confirmation(tool_name: str, args: dict) -> bool:
     DESTRUCTIVE_TOOLS = {
         "approve_document", "reject_document", "bulk_approve",
         "update_document_field", "delete_file", "forget_memory",
         "create_skill", "delete_skill", "send_to_workflow",
         "save_workflow",  # final commit of an AI-designed workflow
+        "web_search",  # external context must never be mixed in silently
     }
     if tool_name in DESTRUCTIVE_TOOLS:
         return True
@@ -39,4 +48,6 @@ def describe_action(tool_name: str, args: dict) -> str:
         path = args.get("path", "")
         if method != "GET":
             return f"เรียก External API: {method} {path}"
+    if tool_name == "web_search":
+        return f"ค้นหาข้อมูลภายนอกจากเว็บ: {args.get('query', '')}"
     return f"{tool_name}({args})"

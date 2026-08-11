@@ -155,3 +155,46 @@ async def test_create_skill_confirmation_accepts_explicit_confirmation():
 
     assert result == {"ok": True}
     resolve.assert_called_once()
+
+
+async def test_web_search_confirmation_requires_explicit_confirmation():
+    owner = _user()
+    action = SimpleNamespace(
+        user_id=owner.id,
+        tool_name="web_search",
+        status="pending",
+    )
+    db = MagicMock()
+    with patch("app.api.v1.endpoints.agent.crud_pending.get", return_value=action), \
+         patch("app.api.v1.endpoints.agent.crud_pending.resolve") as resolve:
+        with pytest.raises(HTTPException) as exc:
+            await confirm_pending_action(
+                uuid.uuid4(),
+                ConfirmActionRequest(approved=True),
+                db=db,
+                current_user=owner,
+            )
+
+    assert exc.value.status_code == 400
+    resolve.assert_not_called()
+
+
+async def test_web_search_confirmation_accepts_explicit_confirmation():
+    owner = _user()
+    action = SimpleNamespace(
+        user_id=owner.id,
+        tool_name="web_search",
+        status="pending",
+    )
+    db = MagicMock()
+    with patch("app.api.v1.endpoints.agent.crud_pending.get", return_value=action), \
+         patch("app.api.v1.endpoints.agent.crud_pending.resolve", return_value=True) as resolve:
+        result = await confirm_pending_action(
+            uuid.uuid4(),
+            ConfirmActionRequest(approved=True, explicit_confirmation=True),
+            db=db,
+            current_user=owner,
+        )
+
+    assert result == {"ok": True}
+    resolve.assert_called_once()

@@ -16,7 +16,7 @@ class AgentMessageCreate(BaseModel):
 
 class ConfirmActionRequest(BaseModel):
     approved: bool
-    # Skill creation must be approved from an explicit user confirmation UI,
+    # Sensitive actions must be approved from an explicit user confirmation UI,
     # even when the session's general auto-confirm mode is enabled.
     explicit_confirmation: bool = False
 

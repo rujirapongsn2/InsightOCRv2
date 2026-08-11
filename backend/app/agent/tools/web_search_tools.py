@@ -79,4 +79,5 @@ tool_registry.register(ToolDef(
         "required": ["query"],
     },
     handler=_web_search_handler,
+    requires_confirmation=True,
 ))

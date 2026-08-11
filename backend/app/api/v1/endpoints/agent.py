@@ -33,6 +33,7 @@ from app.schemas.agent import (
 from app.services.storage import get_storage_service
 from app.agent.tools.registry import tool_registry
 from app.agent.tools.skill_tools import _normalize_allowed_tools, _strict_skill_metadata
+from app.agent.confirmations import requires_explicit_confirmation
 
 router = APIRouter()
 
@@ -292,10 +293,10 @@ async def confirm_pending_action(
         raise HTTPException(status_code=404)
     if action.status != "pending":
         raise HTTPException(status_code=400, detail=f"Action is {action.status}")
-    if action.tool_name == "create_skill" and data.approved and not data.explicit_confirmation:
+    if data.approved and requires_explicit_confirmation(action.tool_name) and not data.explicit_confirmation:
         raise HTTPException(
             status_code=400,
-            detail="Creating a Skill requires explicit user confirmation",
+            detail=f"{action.tool_name} requires explicit user confirmation",
         )
     crud_pending.resolve(db, pending_action_id, "confirmed" if data.approved else "rejected")
     return {"ok": True}

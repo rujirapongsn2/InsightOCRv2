@@ -325,9 +325,10 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
                                 setEvents([...newEvents])
                                 break
                             case "confirmation_required":
-                                // Creating a Skill always requires the user to
-                                // approve the reviewed draft explicitly.
-                                if (evt.tool_name !== "create_skill" && autoConfirmRef.current && evt.tool_call_id && evt.pending_action_id) {
+                                // Skill creation and web search always require
+                                // the user to approve the action explicitly.
+                                const requiresExplicitConfirmation = evt.tool_name === "create_skill" || evt.tool_name === "web_search"
+                                if (!requiresExplicitConfirmation && autoConfirmRef.current && evt.tool_call_id && evt.pending_action_id) {
                                     const toolCallId = evt.tool_call_id
                                     const pendingId = evt.pending_action_id
                                     setAutoConfirmedIds(prev => new Set(prev).add(toolCallId))

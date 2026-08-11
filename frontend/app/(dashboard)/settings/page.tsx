@@ -61,6 +61,7 @@ export default function SettingsPage() {
   })
   const [showProviderKey, setShowProviderKey] = useState(false)
   const [savingProvider, setSavingProvider] = useState(false)
+  const [savingFeatureProvider, setSavingFeatureProvider] = useState<string | null>(null)
 
   useEffect(() => {
     const fetchConfig = async () => {
@@ -187,39 +188,40 @@ export default function SettingsPage() {
     }
   }
 
-  const handleSetAgentProvider = async (id: string, currentlyAgent: boolean) => {
+  const handleFeatureProviderChange = async (feature: "agent" | "workflow_builder", providerId: string) => {
     const tok = typeof window !== "undefined" ? localStorage.getItem("token") : null
     if (!tok) return
-    setAiProviderError(null)
-    try {
-      if (currentlyAgent) {
-        await unsetAgentProvider(tok, id)
-        setAiProviderSuccess("ยกเลิก Agent Provider แล้ว")
-      } else {
-        await setAgentProvider(tok, id)
-        setAiProviderSuccess("ตั้ง Agent Provider เรียบร้อยแล้ว")
-      }
-      fetchAiProviders()
-    } catch (e: unknown) {
-      setAiProviderError(e instanceof Error ? e.message : String(e))
-    }
-  }
+    const currentProvider = aiProviders.find((provider) => feature === "agent"
+      ? provider.is_agent_provider
+      : provider.is_workflow_builder_provider)
+    if (providerId === (currentProvider?.id ?? "")) return
 
-  const handleSetWorkflowBuilderProvider = async (id: string, currentlyWfb: boolean) => {
-    const tok = typeof window !== "undefined" ? localStorage.getItem("token") : null
-    if (!tok) return
     setAiProviderError(null)
+    setSavingFeatureProvider(feature)
     try {
-      if (currentlyWfb) {
-        await unsetWorkflowBuilderProvider(tok, id)
-        setAiProviderSuccess("ยกเลิก Workflow Builder Provider แล้ว")
+      if (providerId) {
+        if (feature === "agent") {
+          await setAgentProvider(tok, providerId)
+          setAiProviderSuccess("อัปเดตโมเดลสำหรับ AI Agent แล้ว")
+        } else {
+          await setWorkflowBuilderProvider(tok, providerId)
+          setAiProviderSuccess("อัปเดตโมเดลสำหรับ Workflow Builder แล้ว")
+        }
       } else {
-        await setWorkflowBuilderProvider(tok, id)
-        setAiProviderSuccess("ตั้ง Workflow Builder Provider เรียบร้อยแล้ว")
+        if (currentProvider) {
+          if (feature === "agent") {
+            await unsetAgentProvider(tok, currentProvider.id)
+          } else {
+            await unsetWorkflowBuilderProvider(tok, currentProvider.id)
+          }
+        }
+        setAiProviderSuccess(`ยกเลิกการกำหนดโมเดลสำหรับ ${feature === "agent" ? "AI Agent" : "Workflow Builder"} แล้ว`)
       }
-      fetchAiProviders()
+      await fetchAiProviders()
     } catch (e: unknown) {
       setAiProviderError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setSavingFeatureProvider(null)
     }
   }
 
@@ -522,13 +524,13 @@ export default function SettingsPage() {
         </CardContent>
       </Card>
 
-      {/* AI Agent Provider */}
+      {/* AI provider assignments and provider management */}
       <Card>
         <CardHeader>
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
               <Bot className="h-5 w-5 text-indigo-500" />
-              <CardTitle>AI Agent Provider</CardTitle>
+              <CardTitle>AI Provider</CardTitle>
               {aiProviderLoading && <Loader2 className="h-4 w-4 animate-spin text-slate-400" />}
             </div>
             {!showProviderForm && (
@@ -538,7 +540,7 @@ export default function SettingsPage() {
             )}
           </div>
           <p className="text-sm text-slate-600 mt-1">
-            กำหนด OpenAI-compatible LLM ที่ AI Agent ใช้งาน (เช่น OpenAI, Azure OpenAI, Ollama, LM Studio)
+            เลือกโมเดลให้แต่ละ feature หรือเพิ่ม provider ของคุณเอง
           </p>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -554,6 +556,50 @@ export default function SettingsPage() {
               <span>{aiProviderSuccess}</span>
             </div>
           )}
+
+          <div className="grid gap-3 md:grid-cols-2">
+            <div className="rounded-lg border border-slate-200 bg-white p-3">
+              <label htmlFor="workflow-builder-provider" className="block text-sm font-semibold text-slate-800">
+                Workflow Builder
+              </label>
+              <p className="mt-1 text-xs text-slate-500">โมเดลสำหรับสร้าง workflow ด้วย AI</p>
+              <select
+                id="workflow-builder-provider"
+                className="mt-3 flex h-9 w-full rounded-md border border-slate-200 bg-white px-2 text-sm text-slate-800"
+                value={aiProviders.find((provider) => provider.is_workflow_builder_provider)?.id ?? ""}
+                onChange={(event) => handleFeatureProviderChange("workflow_builder", event.target.value)}
+                disabled={aiProviderLoading || savingFeatureProvider !== null}
+              >
+                <option value="">ใช้ค่าเริ่มต้นของระบบ</option>
+                {aiProviders.filter((provider) => provider.is_active).map((provider) => (
+                  <option key={provider.id} value={provider.id}>
+                    {provider.model || provider.display_name} — {provider.display_name}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="rounded-lg border border-indigo-200 bg-indigo-50/40 p-3">
+              <label htmlFor="agent-provider" className="block text-sm font-semibold text-slate-800">
+                AI Agent
+              </label>
+              <p className="mt-1 text-xs text-slate-500">โมเดลสำหรับสนทนาและเรียกใช้ tools</p>
+              <select
+                id="agent-provider"
+                className="mt-3 flex h-9 w-full rounded-md border border-indigo-200 bg-white px-2 text-sm text-slate-800"
+                value={aiProviders.find((provider) => provider.is_agent_provider)?.id ?? ""}
+                onChange={(event) => handleFeatureProviderChange("agent", event.target.value)}
+                disabled={aiProviderLoading || savingFeatureProvider !== null}
+              >
+                <option value="">ใช้ค่าเริ่มต้นของระบบ</option>
+                {aiProviders.filter((provider) => provider.is_active).map((provider) => (
+                  <option key={provider.id} value={provider.id}>
+                    {provider.model || provider.display_name} — {provider.display_name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
 
           {/* Provider list */}
           {!aiProviderLoading && aiProviders.length === 0 && !showProviderForm && (
@@ -577,26 +623,10 @@ export default function SettingsPage() {
                 <p className="text-xs text-slate-400">model: {p.model || "gpt-4o-mini"}</p>
               </div>
               <div className="flex items-center gap-1 shrink-0 ml-2">
-                <Button
-                  size="sm"
-                  variant={p.is_agent_provider ? "default" : "outline"}
-                  className={p.is_agent_provider ? "bg-indigo-600 hover:bg-indigo-700 text-xs h-7 px-2" : "text-xs h-7 px-2"}
-                  onClick={() => handleSetAgentProvider(p.id, p.is_agent_provider)}
-                >
-                  {p.is_agent_provider ? "ยกเลิก Agent" : "ตั้งเป็น Agent"}
-                </Button>
-                <Button
-                  size="sm"
-                  variant={p.is_workflow_builder_provider ? "default" : "outline"}
-                  className={p.is_workflow_builder_provider ? "bg-[#2786C2] hover:bg-[#1F6FA3] text-xs h-7 px-2" : "text-xs h-7 px-2"}
-                  onClick={() => handleSetWorkflowBuilderProvider(p.id, p.is_workflow_builder_provider)}
-                >
-                  {p.is_workflow_builder_provider ? "ยกเลิก Workflow" : "ตั้งเป็น Workflow"}
-                </Button>
-                <Button size="sm" variant="ghost" className="h-7 w-7 p-0" onClick={() => openEditForm(p)}>
+                <Button size="sm" variant="ghost" className="h-7 w-7 p-0" onClick={() => openEditForm(p)} aria-label={`แก้ไข ${p.display_name}`} title={`แก้ไข ${p.display_name}`}>
                   <Pencil className="h-3.5 w-3.5" />
                 </Button>
-                <Button size="sm" variant="ghost" className="h-7 w-7 p-0 text-red-500 hover:text-red-700 hover:bg-red-50" onClick={() => handleDeleteProvider(p.id)}>
+                <Button size="sm" variant="ghost" className="h-7 w-7 p-0 text-red-500 hover:text-red-700 hover:bg-red-50" onClick={() => handleDeleteProvider(p.id)} aria-label={`ลบ ${p.display_name}`} title={`ลบ ${p.display_name}`}>
                   <Trash2 className="h-3.5 w-3.5" />
                 </Button>
               </div>
@@ -697,12 +727,6 @@ export default function SettingsPage() {
             </div>
           )}
 
-          <div className="text-xs text-slate-400 pt-1 space-y-0.5">
-            <p>• <strong>OpenAI Compatible</strong> — รองรับ function calling เต็มรูปแบบ (แนะนำ) ใช้กับ OpenAI, Azure, Together, Groq, Ollama</p>
-            <p>• <strong>Completion Messages</strong> — สำหรับ provider ที่ไม่รองรับ native tool calling (fallback)</p>
-            <p>• ตั้งเป็น <strong>Agent Provider</strong> เพื่อให้ AI Agent ใช้ provider นี้ (มีได้ 1 ตัวในแต่ละเวลา)</p>
-            <p>• ตั้งเป็น <strong>Workflow Builder</strong> เพื่อเลือก LLM ที่มีประสิทธิภาพสูงสุดสำหรับสร้าง workflow ด้วย AI โดยเฉพาะ — หากไม่ตั้ง จะใช้ Agent Provider / Active Provider ตามค่าเริ่มต้นของระบบ</p>
-          </div>
         </CardContent>
       </Card>
 
