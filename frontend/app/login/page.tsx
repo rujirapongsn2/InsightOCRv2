@@ -33,7 +33,7 @@ export default function LoginPage() {
 
             if (res.ok) {
                 const data = await res.json()
-                login(data.access_token)
+                login(data.access_token, data.refresh_token)
             } else {
                 const errData = await res.json()
                 setError(errData.detail || "Login failed")

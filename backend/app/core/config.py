@@ -73,6 +73,8 @@ class Settings(BaseSettings):
     SECRET_KEY: str # Set via env var
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 480
+    # Keep refresh sessions independent from the short-lived access token.
+    REFRESH_TOKEN_EXPIRE_DAYS: int = 30
 
     # Extra CORS origins (comma-separated) to append beyond BACKEND_CORS_ORIGINS
     BACKEND_EXTRA_CORS_ORIGINS: str = ""
