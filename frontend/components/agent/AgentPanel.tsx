@@ -52,6 +52,7 @@ interface AgentEvent {
     failed_steps?: string[]
     stopped?: string
     tool_call_id?: string
+    tool_name?: string
 }
 
 interface PendingAction {
@@ -198,7 +199,8 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
         const ok = window.confirm(
             "เปิด 'ยืนยันอัตโนมัติ' แล้ว Agent จะอนุมัติการกระทำที่รุนแรงทั้งหมด\n" +
             "(ลบไฟล์, อนุมัติเอกสาร, แก้ไข field, ส่ง API) โดยอัตโนมัติ\n" +
-            "ใน session นี้โดยไม่ถามซ้ำอีก\n\n" +
+            "ใน session นี้โดยไม่ถามซ้ำอีก\n" +
+            "ยกเว้นการสร้าง Skill ซึ่งยังต้องตรวจ draft และยืนยันเอง\n\n" +
             "คุณแน่ใจหรือไม่?"
         )
         if (ok) setAutoConfirm(true)
@@ -323,7 +325,9 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
                                 setEvents([...newEvents])
                                 break
                             case "confirmation_required":
-                                if (autoConfirmRef.current && evt.tool_call_id && evt.pending_action_id) {
+                                // Creating a Skill always requires the user to
+                                // approve the reviewed draft explicitly.
+                                if (evt.tool_name !== "create_skill" && autoConfirmRef.current && evt.tool_call_id && evt.pending_action_id) {
                                     const toolCallId = evt.tool_call_id
                                     const pendingId = evt.pending_action_id
                                     setAutoConfirmedIds(prev => new Set(prev).add(toolCallId))
@@ -388,7 +392,9 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
     const confirmAction = async (approved: boolean) => {
         if (!pendingAction) return
         await fetch(`${apiBase}/agent/confirm/${pendingAction.pending_action_id}`, {
-            method: "POST", headers: headers(), body: JSON.stringify({ approved }),
+            method: "POST",
+            headers: headers(),
+            body: JSON.stringify({ approved, explicit_confirmation: true }),
         })
         setPendingAction(null)
     }
@@ -524,6 +530,12 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
             description: "เตรียมข้อมูลปลายทาง",
             prompt: "ช่วยวางแผนส่งข้อมูลจาก job นี้ไป integration โดยตรวจความพร้อมก่อน และระบุ action ที่ต้องทำทีละขั้น",
         },
+        {
+            icon: Library,
+            label: "สร้าง Skill",
+            description: "ออกแบบขั้นตอนที่ใช้ซ้ำ",
+            prompt: "ใช้ skill create-skill เพื่อช่วยฉันออกแบบ Skill ใหม่สำหรับ ",
+        },
     ]
 
     const applySuggestion = (prompt: string) => {
@@ -573,8 +585,8 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
                                 : "text-white/70 hover:text-white"
                         }`}
                         title={autoConfirm
-                            ? "⚠️ ยืนยันอัตโนมัติเปิดอยู่ — Agent จะอนุมัติการกระทำที่รุนแรงทั้งหมดโดยไม่ถาม คลิกเพื่อปิด"
-                            : "เปิดยืนยันอัตโนมัติ — Agent จะอนุมัติทุก destructive action ใน session นี้โดยไม่ถามซ้ำ"
+                            ? "⚠️ ยืนยันอัตโนมัติเปิดอยู่ — ยกเว้นการสร้าง Skill คลิกเพื่อปิด"
+                            : "เปิดยืนยันอัตโนมัติ — ยกเว้นการสร้าง Skill ที่ต้องยืนยัน draft"
                         }
                     >
                         {autoConfirm ? <ShieldAlert className="h-3.5 w-3.5" /> : <ShieldCheck className="h-3.5 w-3.5" />}
@@ -695,7 +707,7 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
                                         <div className="flex items-start gap-2">
                                             <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
                                             <p className="text-[0.8125rem] leading-5 text-amber-800">
-                                                Act เปิดอยู่: Agent จะอนุมัติการลบไฟล์ อนุมัติเอกสาร แก้ไข field และส่ง API ใน session นี้โดยไม่ถามซ้ำ
+                                                Act เปิดอยู่: Agent จะอนุมัติการลบไฟล์ อนุมัติเอกสาร แก้ไข field และส่ง API โดยไม่ถามซ้ำ ยกเว้นการสร้าง Skill
                                             </p>
                                         </div>
                                     </div>
@@ -861,7 +873,7 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
 
             {/* Skill Library */}
             {showSkillLibrary && (
-                <SkillLibrary jobId={jobId} onClose={() => setShowSkillLibrary(false)} />
+                <SkillLibrary onClose={() => setShowSkillLibrary(false)} />
             )}
 
             {/* Confirmation Dialog */}

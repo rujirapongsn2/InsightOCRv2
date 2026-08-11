@@ -105,6 +105,51 @@ async def _exec_single(tool_name: str, args: dict, context) -> dict:
     return await tool_registry.execute(tool_name, args, context)
 
 
+def _skill_policy_blocked_call_ids(parsed: list[tuple]) -> set[str]:
+    """Keep skill activation and creation atomic in a multi-tool turn.
+
+    The tool schema is refreshed only after an assistant turn. Any unrelated
+    call in the same turn could otherwise run before execute_skill activates
+    the new policy. The model receives a normal tool result and can retry it
+    on the next turn with the refreshed schema.
+    """
+    blocked_indexes = _skill_policy_blocked_indexes([item[1] for item in parsed])
+    return {parsed[index][0].id for index in blocked_indexes}
+
+
+def _skill_policy_blocked_indexes(tool_names: list[str]) -> set[int]:
+    """Return calls that must wait until the next model turn.
+
+    Skill activation/creation is a turn boundary. The helper is kept separate
+    from the provider loop so every multi-action path can apply the same rule.
+    """
+    first_skill_index = next(
+        (index for index, name in enumerate(tool_names) if name in {"execute_skill", "create_skill"}),
+        None,
+    )
+    if first_skill_index is None:
+        return set()
+    return {index for index in range(len(tool_names)) if index != first_skill_index}
+
+
+async def _blocked_skill_policy_result(tool_name: str) -> dict:
+    return {
+        "error": (
+            f"Tool '{tool_name}' was deferred because the Skill action must run "
+            "alone before the next turn"
+        ),
+        "blocked_by_skill_policy": True,
+    }
+
+
+def _skill_creation_final_text(result: dict) -> str:
+    name = str(result.get("name") or "skill")
+    return (
+        f"สร้าง Personal Skill `{name}` เรียบร้อยแล้ว\n\n"
+        f"เรียกใช้ภายหลังด้วย `/{name}` หรือเลือกจาก Skill Library"
+    )
+
+
 def _extract_json_object(text: str) -> dict[str, Any] | None:
     if not text:
         return None
@@ -587,6 +632,7 @@ class AgentLoop:
     async def _run_inner(self, user_message: str) -> AsyncGenerator[str, None]:
         crud_msg.add(self.db, conversation_id=self.conversation_id, role="user", content=user_message, iteration=0)
         crud_conv.update_title(self.db, self.conversation_id, user_message[:60])
+        self.context.clear_active_skill_tool_policy()
 
         if self.kind == "workflow_builder":
             async for event in self._run_workflow_builder(user_message):
@@ -611,8 +657,6 @@ class AgentLoop:
         )
         model = self.llm_config.get("model", "gpt-4o-mini")
         system_prompt = build_system_prompt(self.context, user_message)
-        tools_schema = tool_registry.get_openai_schemas()
-
         history = await self.context.load_history()
 
         # System prompt only once in messages[0] — subsequent iterations append to messages directly
@@ -676,6 +720,10 @@ class AgentLoop:
         for iteration in range(1, self.max_iterations + 1):
             yield sse_event(SSEEventType.THINKING, {"iteration": iteration})
 
+            allowed_tools = self.context.active_skill_allowed_tools
+            visible_tools = allowed_tools
+            tools_schema = tool_registry.get_openai_schemas(allowed_names=visible_tools)
+
             try:
                 response = await _chat_with_retry(
                     client,
@@ -728,19 +776,27 @@ class AgentLoop:
                 for tc, name, args in parsed:
                     yield sse_event(SSEEventType.TOOL_CALL, {"id": tc.id, "name": name, "arguments": args})
 
+                policy_blocked_call_ids = _skill_policy_blocked_call_ids(parsed)
+
                 # Determine execution strategy
-                needs_confirmation = any(requires_confirmation(name, args) for _, name, args in parsed)
+                needs_confirmation = any(
+                    tc.id not in policy_blocked_call_ids and requires_confirmation(name, args)
+                    for tc, name, args in parsed
+                )
 
                 # Tool-failure nudges are deferred and flushed only AFTER every
                 # tool response is appended — injecting a system message between
                 # the tool messages of one assistant turn breaks the OpenAI
                 # "tool_calls must be followed by a tool message per id" rule.
                 failure_notes: list[str] = []
+                created_skill_result: dict | None = None
 
                 if needs_confirmation:
                     # Sequential — confirmation gates require per-tool user interaction
                     for tc, tool_name, tool_args in parsed:
-                        if requires_confirmation(tool_name, tool_args):
+                        if tc.id in policy_blocked_call_ids:
+                            result = await _blocked_skill_policy_result(tool_name)
+                        elif requires_confirmation(tool_name, tool_args):
                             pending = crud_pending.create(
                                 self.db, conversation_id=self.conversation_id, user_id=self.user_id,
                                 tool_name=tool_name, tool_arguments=tool_args,
@@ -771,6 +827,9 @@ class AgentLoop:
                             result = await tool_registry.execute(tool_name, tool_args, self.context)
                             result = _verify_file_tool_result(self.context, tool_name, result)
 
+                        if tool_name == "create_skill" and isinstance(result, dict) and result.get("ok"):
+                            created_skill_result = result
+
                         yield sse_event(SSEEventType.TOOL_RESULT, {"id": tc.id, "name": tool_name, "result": result})
                         crud_msg.add(self.db, conversation_id=self.conversation_id, role="tool",
                                      tool_call_id=tc.id, tool_name=tool_name,
@@ -798,7 +857,12 @@ class AgentLoop:
                             unresolved_tool_errors.clear()
                 else:
                     # Parallel — all read-only tools, execute concurrently
-                    tasks = [_exec_single(name, args, self.context) for _, name, args in parsed]
+                    tasks = [
+                        _blocked_skill_policy_result(name)
+                        if tc.id in policy_blocked_call_ids
+                        else _exec_single(name, args, self.context)
+                        for tc, name, args in parsed
+                    ]
                     results = await asyncio.gather(*tasks, return_exceptions=True)
 
                     for (tc, tool_name, _), result in zip(parsed, results):
@@ -806,6 +870,8 @@ class AgentLoop:
                             result = {"error": str(result)}
                         else:
                             result = _verify_file_tool_result(self.context, tool_name, result)
+                        if tool_name == "create_skill" and isinstance(result, dict) and result.get("ok"):
+                            created_skill_result = result
                         yield sse_event(SSEEventType.TOOL_RESULT, {"id": tc.id, "name": tool_name, "result": result})
                         crud_msg.add(self.db, conversation_id=self.conversation_id, role="tool",
                                      tool_call_id=tc.id, tool_name=tool_name,
@@ -836,6 +902,24 @@ class AgentLoop:
                 # this assistant turn are contiguous, system messages are safe.
                 for note in failure_notes:
                     messages.append({"role": "system", "content": note})
+
+                # Skill creation is a terminal action for this user turn. Do
+                # not let the model immediately execute the newly saved Skill
+                # against the original request in the same run.
+                if created_skill_result:
+                    final_text = _skill_creation_final_text(created_skill_result)
+                    crud_msg.add(
+                        self.db,
+                        conversation_id=self.conversation_id,
+                        role="assistant",
+                        content=final_text,
+                        iteration=iteration,
+                        model_used=model,
+                    )
+                    for chunk in (final_text[i:i + 50] for i in range(0, len(final_text), 50)):
+                        yield sse_event(SSEEventType.DELTA, {"text": chunk})
+                    yield sse_event(SSEEventType.DONE, {"iterations": iteration})
+                    return
 
             else:
                 final_text = msg.content or ""
@@ -1653,28 +1737,13 @@ objects in the same reply.
     async def _run_completion_provider(self, user_message: str) -> AsyncGenerator[str, None]:
         model_name = self.llm_config.get("model", "default_ai_settings")
         system_prompt = build_system_prompt(self.context, user_message)
-        tools_schema = tool_registry.get_openai_schemas()
         tool_results: list[dict] = []
 
-        # The system-level provider may not support native function calling. Always
-        # preload the current Job context with backend tools so the AI answers from
-        # real job data instead of guessing.
+        # Do not preload document data here. A strict Skill may only allow a
+        # subset of document tools, and the Skill is activated by the model's
+        # first execute_skill call. The model can request list_documents through
+        # the normal tool contract after that policy is active.
         yield sse_event(SSEEventType.THINKING, {"iteration": 0})
-        self._last_context_result = None
-        async for event in self._emit_context_tool("list_documents", {"status_filter": "all"}, 0):
-            yield event
-        if self._last_context_result:
-            tool_results.append(self._last_context_result)
-            docs = self._last_context_result.get("result", {}).get("documents", [])
-            for doc in docs[:3]:
-                doc_id = doc.get("id")
-                if not doc_id:
-                    continue
-                self._last_context_result = None
-                async for event in self._emit_context_tool("get_document_detail", {"doc_id": doc_id}, 0):
-                    yield event
-                if self._last_context_result:
-                    tool_results.append(self._last_context_result)
 
         action_rules = {
             "type": "tool_call",
@@ -1690,13 +1759,13 @@ You can process only the current InsightDOC Job by requesting backend tools.
 Return exactly one JSON object and no markdown.
 To call a tool, return: {json.dumps(action_rules, ensure_ascii=False)}
 To answer the user, return: {json.dumps(final_rules, ensure_ascii=False)}
-The backend already preloaded current job documents in Recent Tool Results.
-Do not invent document data. Use tool results as source of truth.
+Request `list_documents` and then the relevant detail tools when document data
+is needed. Do not invent document data. Use tool results as source of truth.
 If more information or an action is needed, request one tool_call JSON object.
 When a report tool such as run_report_code succeeds, final answers must be short: say what was created, provide the outputs/ path, and do not include code, tool arguments, OCR text, or raw JSON.
 
 ## Available Tools
-{json.dumps(tools_schema, ensure_ascii=False)}
+__TOOL_CATALOG__
 
 ## User Request
 {user_message}
@@ -1704,10 +1773,16 @@ When a report tool such as run_report_code succeeds, final answers must be short
 
         for iteration in range(1, self.max_iterations + 1):
             yield sse_event(SSEEventType.THINKING, {"iteration": iteration})
+            allowed_tools = self.context.active_skill_allowed_tools
+            visible_tools = allowed_tools
+            tools_schema = tool_registry.get_openai_schemas(allowed_names=visible_tools)
+            iteration_base_prompt = base_prompt.replace(
+                "__TOOL_CATALOG__", json.dumps(tools_schema, ensure_ascii=False)
+            )
             if tool_results:
-                prompt = base_prompt + "\n## Recent Tool Results\n" + tool_content_for_llm(tool_results[-5:])
+                prompt = iteration_base_prompt + "\n## Recent Tool Results\n" + tool_content_for_llm(tool_results[-5:])
             else:
-                prompt = base_prompt
+                prompt = iteration_base_prompt
 
             try:
                 answer = await self._call_completion_provider(prompt, system_prompt, tool_results)
@@ -1812,6 +1887,20 @@ When a report tool such as run_report_code succeeds, final answers must be short
                          tool_call_id=call_id, tool_name=tool_name,
                          tool_result=result, iteration=iteration)
             tool_results.append({"tool": tool_name, "arguments": tool_args, "result": result})
+            if tool_name == "create_skill" and isinstance(result, dict) and result.get("ok"):
+                final_text = _skill_creation_final_text(result)
+                crud_msg.add(
+                    self.db,
+                    conversation_id=self.conversation_id,
+                    role="assistant",
+                    content=final_text,
+                    iteration=iteration,
+                    model_used=model_name,
+                )
+                for chunk in (final_text[i:i + 50] for i in range(0, len(final_text), 50)):
+                    yield sse_event(SSEEventType.DELTA, {"text": chunk})
+                yield sse_event(SSEEventType.DONE, {"iterations": iteration})
+                return
             if _is_report_success(tool_name, result):
                 tool_results.append({"tool": "__report_final_hint", "arguments": {}, "result": {"message": _short_report_final_text(result, user_message)}})
 

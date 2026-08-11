@@ -287,7 +287,9 @@ function AiBuilderInner() {
     const confirmAction = async (approved: boolean) => {
         if (!pendingAction || !token) return
         await fetch(`${apiBase}/agent/confirm/${pendingAction.pending_action_id}`, {
-            method: "POST", headers: headers(), body: JSON.stringify({ approved }),
+            method: "POST",
+            headers: headers(),
+            body: JSON.stringify({ approved, explicit_confirmation: true }),
         })
         setPendingAction(null)
     }

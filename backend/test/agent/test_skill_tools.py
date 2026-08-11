@@ -141,16 +141,23 @@ class TestCreateSkill:
         assert "error" in result
         assert "already exists" in result["error"]
 
-    async def test_system_scope_allowed(self):
+    async def test_system_scope_rejected(self):
         ctx = _make_context()
-        with patch.object(crud_skill, "get_by_name", return_value=None), \
-             patch.object(crud_skill, "create", return_value=_fake_skill(scope="system")) as mock_create:
-            result = await _create_skill_handler(
-                {"name": "sys-skill", "description": "D", "procedure": "P", "scope": "system"},
-                ctx,
-            )
-        assert result["ok"] is True
-        assert mock_create.call_args.kwargs["scope"] == "system"
+        result = await _create_skill_handler(
+            {"name": "sys-skill", "description": "D", "procedure": "P", "scope": "system"},
+            ctx,
+        )
+        assert "error" in result
+        assert "personal" in result["error"]
+
+    async def test_unknown_allowed_tool_rejected(self):
+        ctx = _make_context()
+        result = await _create_skill_handler(
+            {"name": "unknown-tool", "description": "D", "procedure": "P", "allowed_tools": ["not-a-tool"]},
+            ctx,
+        )
+        assert "error" in result
+        assert "Unknown platform tool" in result["error"]
 
     async def test_invalid_scope_rejected(self):
         ctx = _make_context()
@@ -171,8 +178,8 @@ class TestCreateSkill:
                     "procedure": "# Steps\n1. Step one\n2. Step two",
                     "scope": "user",
                     "trigger_hint": "when user mentions invoices",
-                    "tools_used": ["list_documents", "approve_document"],
-                    "allowed_tools": "Bash(git:*) Read",
+                    "tools_used": ["list_skills", "create_skill"],
+                    "allowed_tools": ["list_skills", "create_skill"],
                     "license": "MIT",
                     "compatibility": "Requires Python 3.12+",
                     "metadata": {"author": "test", "version": "1.0"},
@@ -183,7 +190,9 @@ class TestCreateSkill:
         assert result["ok"] is True
         kwargs = mock_create.call_args.kwargs
         assert kwargs["trigger_hint"] == "when user mentions invoices"
-        assert kwargs["tools_used"] == ["list_documents", "approve_document"]
+        assert kwargs["tools_used"] == ["list_skills", "create_skill"]
+        assert kwargs["allowed_tools"] == "list_skills create_skill"
+        assert kwargs["metadata_"]["tool_policy"] == "strict"
         assert kwargs["license_"] == "MIT"
 
 
@@ -238,6 +247,18 @@ class TestExecuteSkill:
         ctx = _make_context()
         result = await _execute_skill_handler({"name": "  "}, ctx)
         assert "error" in result
+
+    async def test_execute_strict_skill_returns_tool_policy(self):
+        ctx = _make_context()
+        skill = _fake_skill(
+            allowed_tools="list_skills",
+            metadata_={"tool_policy": "strict"},
+        )
+        with patch.object(crud_skill, "get_by_name", return_value=skill), \
+             patch.object(crud_skill, "increment_usage"):
+            result = await _execute_skill_handler({"name": "test-skill"}, ctx)
+        assert result["enforce_tools"] is True
+        assert result["allowed_tool_names"] == ["list_skills"]
 
 
 # ── list_skills ────────────────────────────────────────────────────────────────
@@ -319,7 +340,7 @@ compatibility: Requires Python 3.12+
 metadata:
   author: test
   version: "1.0"
-allowed-tools: Bash(git:*) Read
+allowed-tools: list_skills
 ---
 # New Skill
 This is the procedure.
@@ -403,4 +424,4 @@ class TestDiscoverSkills:
 class TestAllowedValues:
     async def test_allowed_scopes(self):
         assert "user" in ALLOWED_SCOPES
-        assert "system" in ALLOWED_SCOPES
+        assert "system" not in ALLOWED_SCOPES

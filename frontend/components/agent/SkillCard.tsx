@@ -1,6 +1,6 @@
 "use client"
 
-import { Bot, User, Globe, Trash2, Download, Edit3, Zap, FileCode } from "lucide-react"
+import { Trash2, Download, Edit3, Upload } from "lucide-react"
 
 interface Skill {
     id: string
@@ -22,9 +22,10 @@ interface Skill {
 
 interface SkillCardProps {
     skill: Skill
-    onEdit: (skill: Skill) => void
-    onDelete: (skill: Skill) => void
+    onEdit?: (skill: Skill) => void
+    onDelete?: (skill: Skill) => void
     onExport: (skill: Skill) => void
+    onPublish?: (skill: Skill) => void
     compact?: boolean
 }
 
@@ -33,7 +34,7 @@ const SCOPE_ICONS: Record<string, string> = {
     system: "🌐",
 }
 
-export default function SkillCard({ skill, onEdit, onDelete, onExport, compact }: SkillCardProps) {
+export default function SkillCard({ skill, onEdit, onDelete, onExport, onPublish, compact }: SkillCardProps) {
     const scopeIcon = SCOPE_ICONS[skill.scope] || "📦"
     const isSystem = skill.scope === "system"
 
@@ -63,7 +64,7 @@ export default function SkillCard({ skill, onEdit, onDelete, onExport, compact }
                     <code className="text-sm font-mono font-semibold text-softnix-deep truncate">{skill.name}</code>
                     {isSystem && (
                         <span className="text-[10px] bg-[#D6EAF8] text-softnix-blue rounded-full px-2 py-0.5 font-medium">
-                            System
+                            {skill.source === "file" ? "Built-in" : "Shared"}
                         </span>
                     )}
                     {skill.source === "imported" && (
@@ -73,13 +74,15 @@ export default function SkillCard({ skill, onEdit, onDelete, onExport, compact }
                     )}
                 </div>
                 <div className="flex items-center gap-1 flex-shrink-0">
-                    <button
-                        onClick={() => onEdit(skill)}
-                        className="p-1 text-mute-gray hover:text-softnix-blue rounded"
-                        title="Edit"
-                    >
-                        <Edit3 className="h-3.5 w-3.5" />
-                    </button>
+                    {onEdit && (
+                        <button
+                            onClick={() => onEdit(skill)}
+                            className="p-1 text-mute-gray hover:text-softnix-blue rounded"
+                            title="Edit"
+                        >
+                            <Edit3 className="h-3.5 w-3.5" />
+                        </button>
+                    )}
                     <button
                         onClick={() => onExport(skill)}
                         className="p-1 text-mute-gray hover:text-emerald-600 rounded"
@@ -87,7 +90,16 @@ export default function SkillCard({ skill, onEdit, onDelete, onExport, compact }
                     >
                         <Download className="h-3.5 w-3.5" />
                     </button>
-                    {!isSystem && (
+                    {onPublish && (
+                        <button
+                            onClick={() => onPublish(skill)}
+                            className="p-1 text-mute-gray hover:text-softnix-blue rounded"
+                            title="Publish to all users"
+                        >
+                            <Upload className="h-3.5 w-3.5" />
+                        </button>
+                    )}
+                    {onDelete && (
                         <button
                             onClick={() => onDelete(skill)}
                             className="p-1 text-mute-gray hover:text-red-500 rounded"

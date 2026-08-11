@@ -70,6 +70,18 @@ _CONTRACT_QUERY_HINTS = (
     "legal risk",
     "version comparison",
 )
+_CREATE_SKILL_NAME = "create-skill"
+_CREATE_SKILL_QUERY_HINTS = (
+    "สร้าง skill",
+    "สร้างสกิล",
+    "ออกแบบ skill",
+    "ออกแบบสกิล",
+    "ช่วยทำ skill",
+    "create skill",
+    "create a skill",
+    "design a skill",
+    "build a skill",
+)
 
 
 def _skill_search_text(skill) -> str:
@@ -105,6 +117,9 @@ def _skill_matches_query(skill, query: str) -> bool:
     if getattr(skill, "name", "") == _CONTRACT_SKILL_NAME:
         return any(hint in query_lower for hint in _CONTRACT_QUERY_HINTS)
 
+    if getattr(skill, "name", "") == _CREATE_SKILL_NAME:
+        return any(hint in query_lower for hint in _CREATE_SKILL_QUERY_HINTS)
+
     return any(term in search_text for term in _query_terms(query_lower))
 
 
@@ -115,6 +130,26 @@ class AgentContext:
         self.job_id = job_id
         self.conversation_id = conversation_id
         self.kind = kind
+        # None keeps legacy skills unrestricted. An empty set means a strict
+        # skill intentionally has no tool access.
+        self.active_skill_allowed_tools: set[str] | None = None
+
+    def clear_active_skill_tool_policy(self) -> None:
+        self.active_skill_allowed_tools = None
+
+    def activate_skill_tool_policy(self, tool_names: list[str], *, enforce: bool) -> None:
+        if not enforce:
+            # A legacy child skill must not weaken an already active strict
+            # policy. Legacy skills remain unrestricted only at the top level.
+            return
+
+        next_policy = set(tool_names)
+        if self.active_skill_allowed_tools is None:
+            self.active_skill_allowed_tools = next_policy
+        else:
+            # Nested skills cannot expand the parent's allowlist. This keeps
+            # delegation inside the strict policy selected for the turn.
+            self.active_skill_allowed_tools &= next_policy
 
     async def load_history(self, limit: int = 20) -> list[dict]:
         messages = crud_conv.get_messages(self.db, self.conversation_id, limit=limit)

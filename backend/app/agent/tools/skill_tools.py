@@ -12,6 +12,7 @@ Agent skills tools — agentskills.io compliant.
 """
 import logging
 from pathlib import Path
+import re
 
 from app.agent.tools.registry import ToolDef, tool_registry
 from app.crud.crud_agent_skill import agent_skill as crud_skill
@@ -24,11 +25,35 @@ from app.services.skill_discovery import (
 
 logger = logging.getLogger(__name__)
 
-ALLOWED_SCOPES = {"user", "system"}
+ALLOWED_SCOPES = {"user"}
 ALLOWED_CREATED_BY = {"user", "agent", "imported"}
 MAX_NAME_LENGTH = 64
 MAX_DESC_LENGTH = 1024
 MAX_PROCEDURE_LENGTH = 50000
+
+
+def _normalize_allowed_tools(value) -> tuple[list[str], str | None]:
+    """Normalize a UI or model supplied tool list to registered tool names."""
+    if value is None:
+        return [], None
+    if isinstance(value, str):
+        raw_names = re.split(r"[\s,]+", value.strip()) if value.strip() else []
+    elif isinstance(value, list):
+        raw_names = [str(name).strip() for name in value if str(name).strip()]
+    else:
+        raise ValueError("allowed_tools must be a string or list of tool names")
+
+    names = list(dict.fromkeys(raw_names))
+    unknown = [name for name in names if not tool_registry.has_tools([name])]
+    if unknown:
+        raise ValueError(f"Unknown platform tool(s): {', '.join(unknown)}")
+    return names, " ".join(names) if names else ""
+
+
+def _strict_skill_metadata(metadata) -> dict:
+    value = dict(metadata) if isinstance(metadata, dict) else {}
+    value["tool_policy"] = "strict"
+    return value
 
 
 # ── create_skill ──────────────────────────────────────────────────────────────
@@ -39,7 +64,7 @@ async def _create_skill_handler(args: dict, context) -> dict:
         return {"error": "name must not be empty"}
     if len(name) > MAX_NAME_LENGTH:
         return {"error": f"name must be <= {MAX_NAME_LENGTH} chars"}
-    if "--" in name or name.startswith("-") or name.endswith("-"):
+    if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", name):
         return {"error": "name must be lowercase letters, numbers, and single hyphens only"}
 
     description = args["description"].strip()
@@ -54,13 +79,14 @@ async def _create_skill_handler(args: dict, context) -> dict:
     if len(procedure) > MAX_PROCEDURE_LENGTH:
         return {"error": f"procedure must be <= {MAX_PROCEDURE_LENGTH} chars"}
 
-    scope = args.get("scope", "user")
-    if scope not in ALLOWED_SCOPES:
-        return {"error": f"Invalid scope '{scope}'. Allowed: {', '.join(sorted(ALLOWED_SCOPES))}"}
+    if args.get("scope") not in (None, "user"):
+        return {"error": "Skills created through Agent DOC are always personal skills"}
+    scope = "user"
 
-    created_by = args.get("created_by", "agent")
-    if created_by not in ALLOWED_CREATED_BY:
-        return {"error": f"Invalid created_by '{created_by}'"}
+    try:
+        tool_names, allowed_tools = _normalize_allowed_tools(args.get("allowed_tools"))
+    except ValueError as exc:
+        return {"error": str(exc)}
 
     # Check for duplicate
     user_id = context.user_id if scope == "user" else None
@@ -77,12 +103,12 @@ async def _create_skill_handler(args: dict, context) -> dict:
             description=description,
             procedure=procedure,
             trigger_hint=args.get("trigger_hint"),
-            tools_used=args.get("tools_used"),
-            allowed_tools=args.get("allowed_tools"),
+            tools_used=tool_names,
+            allowed_tools=allowed_tools,
             license_=args.get("license"),
             compatibility=args.get("compatibility"),
-            metadata_=args.get("metadata"),
-            created_by=created_by,
+            metadata_=_strict_skill_metadata(args.get("metadata")),
+            created_by="agent",
             source="db",
         )
     except Exception as e:
@@ -125,11 +151,15 @@ async def _import_skill_handler(args: dict, context) -> dict:
     if errors:
         return {"error": "Validation failed", "validation_errors": errors}
 
-    scope = args.get("scope", "user")
-    if scope not in ALLOWED_SCOPES:
-        return {"error": f"Invalid scope '{scope}'"}
+    if args.get("scope") not in (None, "user"):
+        return {"error": "Imported skills through Agent DOC are always personal skills"}
+    scope = "user"
+    user_id = context.user_id
 
-    user_id = context.user_id if scope == "user" else None
+    try:
+        tool_names, allowed_tools = _normalize_allowed_tools(skill_data.get("allowed_tools"))
+    except ValueError as exc:
+        return {"error": str(exc)}
 
     # Check for duplicate
     existing = crud_skill.get_by_name(context.db, user_id=user_id, name=skill_data["name"], scope=scope)
@@ -151,10 +181,11 @@ async def _import_skill_handler(args: dict, context) -> dict:
             description=skill_data["description"],
             procedure=skill_data["body"],
             trigger_hint=args.get("trigger_hint"),
-            allowed_tools=skill_data.get("allowed_tools"),
+            tools_used=tool_names,
+            allowed_tools=allowed_tools,
             license_=skill_data.get("license"),
             compatibility=skill_data.get("compatibility"),
-            metadata_=skill_data.get("metadata_"),
+            metadata_=_strict_skill_metadata(skill_data.get("metadata_")),
             created_by="imported",
             source="imported",
             file_path=str(path.resolve()),
@@ -180,6 +211,8 @@ async def _export_skill_handler(args: dict, context) -> dict:
         return {"error": "name is required"}
 
     scope = args.get("scope", "user")
+    if scope not in ("user", "system"):
+        return {"error": "scope must be 'user' or 'system'"}
     user_id = context.user_id if scope == "user" else None
 
     skill = crud_skill.get_by_name(context.db, user_id=user_id, name=name, scope=scope)
@@ -296,6 +329,16 @@ async def _execute_skill_handler(args: dict, context) -> dict:
     # Track usage
     crud_skill.increment_usage(context.db, skill.id)
 
+    try:
+        allowed_tool_names, _ = _normalize_allowed_tools(getattr(skill, "allowed_tools", None))
+    except ValueError:
+        return {"error": f"Skill '{skill.name}' contains unknown platform tools and cannot run"}
+    metadata = getattr(skill, "metadata_", None)
+    enforce_tools = bool(
+        (isinstance(metadata, dict) and metadata.get("tool_policy") == "strict")
+        or (getattr(skill, "source", None) == "file" and getattr(skill, "allowed_tools", None))
+    )
+
     return {
         "ok": True,
         "skill_name": skill.name,
@@ -306,6 +349,8 @@ async def _execute_skill_handler(args: dict, context) -> dict:
         "arguments": skill_args,
         "has_file_backing": bool(skill.file_path),
         "file_path": skill.file_path,
+        "allowed_tool_names": allowed_tool_names,
+        "enforce_tools": enforce_tools,
     }
 
 
@@ -316,11 +361,10 @@ async def _delete_skill_handler(args: dict, context) -> dict:
     if not name:
         return {"error": "name must not be empty"}
 
-    scope = args.get("scope", "user")
-    if scope not in ALLOWED_SCOPES:
-        return {"error": f"Invalid scope '{scope}'"}
-
-    user_id = context.user_id if scope == "user" else None
+    if args.get("scope") not in (None, "user"):
+        return {"error": "Only personal skills can be deleted through Agent DOC"}
+    scope = "user"
+    user_id = context.user_id
     deleted = crud_skill.delete(context.db, user_id=user_id, name=name, scope=scope)
     if not deleted:
         return {"ok": False, "error": f"Skill '{name}' not found in {scope} scope"}
@@ -333,7 +377,9 @@ async def _discover_skills_handler(args: dict, context) -> dict:
     """Scan filesystem directories for SKILL.md files and register them."""
     search_paths = args.get("search_paths")
     auto_register = args.get("auto_register", True)
-    scope = args.get("scope", "system")
+    scope = args.get("scope", "user")
+    if scope != "user":
+        return {"error": "Discovered skills can only be registered as personal skills through Agent DOC"}
 
     if search_paths and isinstance(search_paths, list):
         discovered = discover_skills(search_paths)
@@ -349,7 +395,7 @@ async def _discover_skills_handler(args: dict, context) -> dict:
             try:
                 crud_skill.upsert_file_skill(
                     context.db,
-                    user_id=None if scope == "system" else context.user_id,
+                    user_id=context.user_id,
                     scope=scope,
                     name=skill_data["name"],
                     description=skill_data["description"],
@@ -379,9 +425,9 @@ tool_registry.register(ToolDef(
     name="create_skill",
     category="skill",
     description=(
-        "Save a reusable procedure as a skill for future use. "
+        "Save a reusable personal skill after the user has reviewed its draft. "
         "The skill name must be lowercase letters, numbers, and hyphens only (agentskills.io format). "
-        "Use this after successfully completing a complex multi-step task to capture the workflow."
+        "The user must confirm before this tool can save the skill."
     ),
     parameters_schema={
         "type": "object",
@@ -389,18 +435,16 @@ tool_registry.register(ToolDef(
             "name": {"type": "string", "maxLength": MAX_NAME_LENGTH, "description": "Skill name (lowercase, hyphens). Must match agentskills.io naming."},
             "description": {"type": "string", "maxLength": MAX_DESC_LENGTH, "description": "What the skill does and when to use it."},
             "procedure": {"type": "string", "description": "Step-by-step procedure in markdown. Can include {{variable}} templates."},
-            "scope": {"type": "string", "enum": sorted(ALLOWED_SCOPES), "default": "user"},
             "trigger_hint": {"type": "string", "description": "When to suggest this skill (e.g. 'when user wants to bulk approve invoices')"},
-            "tools_used": {"type": "array", "items": {"type": "string"}, "description": "List of tool names used in this skill"},
-            "allowed_tools": {"type": "string", "description": "Space-separated pre-approved tools for this skill (agentskills.io format)"},
+            "allowed_tools": {"type": "array", "items": {"type": "string"}, "description": "Only registered InsightDOC tool names needed by this skill. An empty list means no tools."},
             "license": {"type": "string", "description": "License name (agentskills.io format)"},
             "compatibility": {"type": "string", "maxLength": 500, "description": "Environment requirements"},
             "metadata": {"type": "object", "description": "Additional key-value metadata"},
-            "created_by": {"type": "string", "enum": sorted(ALLOWED_CREATED_BY), "default": "agent"},
         },
         "required": ["name", "description", "procedure"],
     },
     handler=_create_skill_handler,
+    requires_confirmation=True,
 ))
 
 tool_registry.register(ToolDef(
@@ -411,7 +455,6 @@ tool_registry.register(ToolDef(
         "type": "object",
         "properties": {
             "file_path": {"type": "string", "description": "Absolute path to SKILL.md file"},
-            "scope": {"type": "string", "enum": sorted(ALLOWED_SCOPES), "default": "user"},
             "overwrite": {"type": "boolean", "default": False, "description": "Overwrite if skill already exists"},
         },
         "required": ["file_path"],
@@ -427,7 +470,6 @@ tool_registry.register(ToolDef(
         "type": "object",
         "properties": {
             "name": {"type": "string", "description": "Skill name to export"},
-            "scope": {"type": "string", "enum": sorted(ALLOWED_SCOPES), "default": "user"},
             "bundle": {"type": "boolean", "default": False, "description": "Export as ZIP bundle instead of markdown"},
             "output_dir": {"type": "string", "description": "Directory to write exported file (optional)"},
         },
@@ -472,12 +514,11 @@ tool_registry.register(ToolDef(
 tool_registry.register(ToolDef(
     name="delete_skill",
     category="skill",
-    description="Delete a saved skill by name and scope. Requires confirmation for user-scoped skills.",
+    description="Delete one of the current user's saved personal skills. Requires confirmation.",
     parameters_schema={
         "type": "object",
         "properties": {
             "name": {"type": "string", "description": "Skill name to delete"},
-            "scope": {"type": "string", "enum": sorted(ALLOWED_SCOPES), "default": "user"},
         },
         "required": ["name"],
     },
@@ -488,13 +529,12 @@ tool_registry.register(ToolDef(
 tool_registry.register(ToolDef(
     name="discover_skills",
     category="skill",
-    description="Scan filesystem directories (.agents/skills, skills, .claude/skills) for SKILL.md files and register them as system skills.",
+    description="Scan filesystem directories for SKILL.md files and register them as personal skills.",
     parameters_schema={
         "type": "object",
         "properties": {
             "search_paths": {"type": "array", "items": {"type": "string"}, "description": "Directories to search (default: standard locations)"},
             "auto_register": {"type": "boolean", "default": True, "description": "Auto-register discovered skills in DB"},
-            "scope": {"type": "string", "enum": sorted(ALLOWED_SCOPES), "default": "system"},
         },
     },
     handler=_discover_skills_handler,

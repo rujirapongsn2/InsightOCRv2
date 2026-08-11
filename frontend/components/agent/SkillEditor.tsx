@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useEffect } from "react"
-import { X, Save, Loader2 } from "lucide-react"
+import { X, Save, Loader2, Wrench } from "lucide-react"
 
 interface Skill {
     id?: string
@@ -17,20 +17,28 @@ interface Skill {
     metadata?: Record<string, string> | null
 }
 
+export interface SkillTool {
+    name: string
+    category: string
+    description: string
+    requires_confirmation: boolean
+}
+
+export type SkillDraft = Omit<Skill, "id" | "scope"> & { scope?: string }
+
 interface SkillEditorProps {
     skill?: Skill | null       // null = create mode
-    onSave: (data: Skill) => Promise<void>
+    tools: SkillTool[]
+    onSave: (data: SkillDraft) => Promise<void>
     onClose: () => void
 }
 
-export default function SkillEditor({ skill, onSave, onClose }: SkillEditorProps) {
+export default function SkillEditor({ skill, tools, onSave, onClose }: SkillEditorProps) {
     const [name, setName] = useState("")
     const [description, setDescription] = useState("")
     const [procedure, setProcedure] = useState("")
-    const [scope, setScope] = useState<"user" | "system">("user")
     const [triggerHint, setTriggerHint] = useState("")
-    const [toolsUsed, setToolsUsed] = useState("")
-    const [allowedTools, setAllowedTools] = useState("")
+    const [selectedTools, setSelectedTools] = useState<string[]>([])
     const [license, setLicense] = useState("")
     const [compatibility, setCompatibility] = useState("")
     const [saving, setSaving] = useState(false)
@@ -43,10 +51,8 @@ export default function SkillEditor({ skill, onSave, onClose }: SkillEditorProps
             setName(skill.name)
             setDescription(skill.description)
             setProcedure(skill.procedure)
-            setScope((skill.scope as "user" | "system") || "user")
             setTriggerHint(skill.trigger_hint || "")
-            setToolsUsed((skill.tools_used || []).join(", "))
-            setAllowedTools(skill.allowed_tools || "")
+            setSelectedTools((skill.allowed_tools || "").split(/[\s,]+/).filter(Boolean))
             setLicense(skill.license || "")
             setCompatibility(skill.compatibility || "")
         }
@@ -60,28 +66,34 @@ export default function SkillEditor({ skill, onSave, onClose }: SkillEditorProps
         if (!procedure.trim()) { setError("Procedure is required"); return }
 
         const nameSanitized = name.trim().toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/--+/g, "-")
-        if (nameSanitized !== name.trim().toLowerCase()) {
-            setError(`Name will be normalized to: ${nameSanitized}`)
+        if (!nameSanitized || nameSanitized.startsWith("-") || nameSanitized.endsWith("-")) {
+            setError("Use lowercase letters, numbers, and hyphens for the name")
+            return
         }
 
         setSaving(true)
         try {
             await onSave({
                 name: nameSanitized,
-                scope,
                 description: description.trim(),
                 procedure: procedure.trim(),
                 trigger_hint: triggerHint.trim() || null,
-                tools_used: toolsUsed ? toolsUsed.split(",").map(s => s.trim()).filter(Boolean) : null,
-                allowed_tools: allowedTools.trim() || null,
+                tools_used: selectedTools,
+                allowed_tools: selectedTools.join(" "),
                 license: license.trim() || null,
                 compatibility: compatibility.trim() || null,
             })
-        } catch (e: any) {
-            setError(e.message || "Save failed")
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : "Save failed")
         } finally {
             setSaving(false)
         }
+    }
+
+    const toggleTool = (toolName: string) => {
+        setSelectedTools(current => current.includes(toolName)
+            ? current.filter(name => name !== toolName)
+            : [...current, toolName])
     }
 
     return (
@@ -99,9 +111,7 @@ export default function SkillEditor({ skill, onSave, onClose }: SkillEditorProps
 
                 {/* Form */}
                 <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
-                    {/* Name + Scope */}
-                    <div className="grid grid-cols-3 gap-3">
-                        <div className="col-span-2">
+                    <div>
                             <label className="block text-xs font-medium text-charcoal mb-1">Name *</label>
                             <input
                                 type="text"
@@ -111,19 +121,6 @@ export default function SkillEditor({ skill, onSave, onClose }: SkillEditorProps
                                 disabled={isEdit}
                                 className="w-full text-sm border border-hairline rounded-lg px-3 py-2 focus:ring-2 focus:ring-softnix-blue focus:border-softnix-blue disabled:bg-off-white disabled:text-mute-gray"
                             />
-                            <p className="text-[10px] text-mute-gray mt-0.5">lowercase, hyphens only (agentskills.io format)</p>
-                        </div>
-                        <div>
-                            <label className="block text-xs font-medium text-charcoal mb-1">Scope</label>
-                            <select
-                                value={scope}
-                                onChange={e => setScope(e.target.value as "user" | "system")}
-                                className="w-full text-sm border border-hairline rounded-lg px-3 py-2 focus:ring-2 focus:ring-softnix-blue"
-                            >
-                                <option value="user">User</option>
-                                <option value="system">System</option>
-                            </select>
-                        </div>
                     </div>
 
                     {/* Description */}
@@ -164,27 +161,33 @@ export default function SkillEditor({ skill, onSave, onClose }: SkillEditorProps
                         />
                     </div>
 
-                    {/* Tools */}
-                    <div className="grid grid-cols-2 gap-3">
-                        <div>
-                            <label className="block text-xs font-medium text-charcoal mb-1">Tools Used</label>
-                            <input
-                                type="text"
-                                value={toolsUsed}
-                                onChange={e => setToolsUsed(e.target.value)}
-                                placeholder="list_documents, approve_document"
-                                className="w-full text-sm border border-hairline rounded-lg px-3 py-2 focus:ring-2 focus:ring-softnix-blue"
-                            />
+                    <div>
+                        <div className="mb-2 flex items-center gap-1.5 text-xs font-medium text-charcoal">
+                            <Wrench className="h-3.5 w-3.5" /> Allowed tools
                         </div>
-                        <div>
-                            <label className="block text-xs font-medium text-charcoal mb-1">Allowed Tools</label>
-                            <input
-                                type="text"
-                                value={allowedTools}
-                                onChange={e => setAllowedTools(e.target.value)}
-                                placeholder="Bash(git:*) Read"
-                                className="w-full text-sm border border-hairline rounded-lg px-3 py-2 focus:ring-2 focus:ring-softnix-blue"
-                            />
+                        <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
+                            {tools.map(tool => {
+                                const selected = selectedTools.includes(tool.name)
+                                return (
+                                    <label key={tool.name} className={`flex cursor-pointer items-start gap-2 rounded-lg border px-2.5 py-2 text-xs ${selected ? "border-softnix-blue bg-[#F0F8FD]" : "border-hairline hover:bg-off-white"}`}>
+                                        <input
+                                            type="checkbox"
+                                            checked={selected}
+                                            onChange={() => toggleTool(tool.name)}
+                                            className="mt-0.5 accent-softnix-blue"
+                                        />
+                                        <span className="min-w-0">
+                                            <span className="block font-medium text-charcoal">{tool.name}</span>
+                                            <span
+                                                className="block truncate text-[10px] text-mute-gray"
+                                                title={tool.description}
+                                            >
+                                                {tool.category}{tool.requires_confirmation ? " · confirmation" : ""}
+                                            </span>
+                                        </span>
+                                    </label>
+                                )
+                            })}
                         </div>
                     </div>
 

@@ -4,10 +4,11 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 from uuid import UUID
 import os
+import re
 from urllib.parse import quote
 
 from app.api import deps
-from app.api.permissions import ensure_job_access
+from app.api.permissions import ensure_job_access, is_admin_user
 from app.api.v1.endpoints.integrations import _integration_api_key, _llm_base_url_for_integration
 from app.agent.loop import AgentLoop
 from app.crud.crud_agent_conversation import agent_conversation as crud_conv
@@ -30,6 +31,8 @@ from app.schemas.agent import (
     ResolveCredentialRequest,
 )
 from app.services.storage import get_storage_service
+from app.agent.tools.registry import tool_registry
+from app.agent.tools.skill_tools import _normalize_allowed_tools, _strict_skill_metadata
 
 router = APIRouter()
 
@@ -289,6 +292,11 @@ async def confirm_pending_action(
         raise HTTPException(status_code=404)
     if action.status != "pending":
         raise HTTPException(status_code=400, detail=f"Action is {action.status}")
+    if action.tool_name == "create_skill" and data.approved and not data.explicit_confirmation:
+        raise HTTPException(
+            status_code=400,
+            detail="Creating a Skill requires explicit user confirmation",
+        )
     crud_pending.resolve(db, pending_action_id, "confirmed" if data.approved else "rejected")
     return {"ok": True}
 
@@ -431,6 +439,14 @@ async def list_skills(
     }
 
 
+@router.get("/skills/tool-catalog")
+async def get_skill_tool_catalog(
+    current_user=Depends(deps.get_current_user),
+):
+    """List the InsightDOC tools that can be assigned to a personal skill."""
+    return {"tools": tool_registry.tool_catalog()}
+
+
 @router.post("/skills", status_code=201)
 async def create_skill(
     data: AgentSkillCreate,
@@ -439,13 +455,16 @@ async def create_skill(
 ):
     """Create a new agent skill."""
     name = data.name.strip().lower()
-    if not name or "--" in name or name.startswith("-") or name.endswith("-"):
+    if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", name):
         raise HTTPException(status_code=400, detail="Invalid skill name format")
-    scope = data.scope or "user"
-    if scope not in ("user", "system"):
-        raise HTTPException(status_code=400, detail="scope must be 'user' or 'system'")
-
-    user_id = current_user.id if scope == "user" else None
+    if data.scope not in (None, "user"):
+        raise HTTPException(status_code=403, detail="Skills must be created as personal skills")
+    scope = "user"
+    user_id = current_user.id
+    try:
+        tool_names, allowed_tools = _normalize_allowed_tools(data.allowed_tools)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     existing = crud_skill.get_by_name(db, user_id=user_id, name=name, scope=scope)
     if existing:
         raise HTTPException(status_code=409, detail=f"Skill '{name}' already exists")
@@ -454,10 +473,11 @@ async def create_skill(
         skill = crud_skill.create(
             db, user_id=user_id, scope=scope,
             name=name, description=data.description, procedure=data.procedure,
-            trigger_hint=data.trigger_hint, tools_used=data.tools_used,
-            allowed_tools=data.allowed_tools,
+            trigger_hint=data.trigger_hint,
+            allowed_tools=allowed_tools,
+            tools_used=tool_names,
             license_=data.license, compatibility=data.compatibility,
-            metadata_=data.metadata, created_by="user",
+            metadata_=_strict_skill_metadata(data.metadata), created_by="user",
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to create skill: {str(e)}")
@@ -493,14 +513,34 @@ async def update_skill(
     skill = db.query(AgentSkill).filter(AgentSkill.id == skill_id).first()
     if not skill:
         raise HTTPException(status_code=404, detail="Skill not found")
+    if skill.source == "file":
+        raise HTTPException(status_code=403, detail="File-backed system skills are read-only")
     if skill.scope == "user" and skill.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="Skill not found")
+    if skill.scope == "system" and not is_admin_user(current_user):
+        raise HTTPException(status_code=403, detail="Only admins can update shared skills")
 
+    current_metadata = getattr(skill, "metadata_", None)
+    strict_policy = (
+        isinstance(current_metadata, dict) and current_metadata.get("tool_policy") == "strict"
+    ) or (
+        getattr(skill, "source", None) == "file"
+        and bool(getattr(skill, "allowed_tools", None))
+    )
     updates = data.model_dump(exclude_unset=True)
     if "metadata" in updates:
-        updates["metadata_"] = updates.pop("metadata")
+        metadata = updates.pop("metadata")
+        updates["metadata_"] = _strict_skill_metadata(metadata) if strict_policy else metadata
     if "license" in updates:
         updates["license_"] = updates.pop("license")
+    if "allowed_tools" in updates:
+        try:
+            tool_names, allowed_tools = _normalize_allowed_tools(updates["allowed_tools"])
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        updates["allowed_tools"] = allowed_tools
+        updates["tools_used"] = tool_names
+        updates["metadata_"] = _strict_skill_metadata(getattr(skill, "metadata_", None))
 
     for k, v in updates.items():
         if hasattr(skill, k) and v is not None:
@@ -521,10 +561,58 @@ async def delete_skill(
     skill = db.query(AgentSkill).filter(AgentSkill.id == skill_id).first()
     if not skill:
         raise HTTPException(status_code=404, detail="Skill not found")
+    if skill.source == "file":
+        raise HTTPException(status_code=403, detail="File-backed system skills are read-only")
     if skill.scope == "user" and skill.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="Skill not found")
+    if skill.scope == "system" and not is_admin_user(current_user):
+        raise HTTPException(status_code=403, detail="Only admins can delete shared skills")
     db.delete(skill)
     db.commit()
+
+
+@router.post("/skills/{skill_id}/publish", status_code=201)
+async def publish_skill(
+    skill_id: UUID,
+    db: Session = Depends(deps.get_db),
+    current_user=Depends(deps.get_current_user),
+):
+    """Publish an admin's own personal skill as a shared System Skill."""
+    from app.models.agent_skill import AgentSkill
+
+    if not is_admin_user(current_user):
+        raise HTTPException(status_code=403, detail="Only admins can publish skills")
+
+    skill = db.query(AgentSkill).filter(AgentSkill.id == skill_id).first()
+    if not skill or skill.scope != "user" or skill.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Personal skill not found")
+
+    try:
+        tool_names, allowed_tools = _normalize_allowed_tools(skill.allowed_tools)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    existing = crud_skill.get_by_name(db, user_id=None, name=skill.name, scope="system")
+    if existing:
+        raise HTTPException(status_code=409, detail=f"A shared skill named '{skill.name}' already exists")
+
+    published = crud_skill.create(
+        db,
+        user_id=None,
+        scope="system",
+        name=skill.name,
+        description=skill.description,
+        procedure=skill.procedure,
+        trigger_hint=skill.trigger_hint,
+        tools_used=tool_names,
+        allowed_tools=allowed_tools,
+        license_=getattr(skill, "license", None),
+        compatibility=getattr(skill, "compatibility", None),
+        metadata_=_strict_skill_metadata(getattr(skill, "metadata_", None)),
+        created_by=skill.created_by,
+        source="db",
+    )
+    return _skill_to_response(published)
 
 
 @router.post("/skills/import")
@@ -550,8 +638,15 @@ async def import_skill(
     if errors:
         raise HTTPException(status_code=400, detail=f"Validation failed: {errors}")
 
-    scope = data.scope or "user"
-    user_id = current_user.id if scope == "user" else None
+    if data.scope not in (None, "user"):
+        raise HTTPException(status_code=403, detail="Imported skills must be personal skills")
+    scope = "user"
+    user_id = current_user.id
+
+    try:
+        tool_names, allowed_tools = _normalize_allowed_tools(skill_data.get("allowed_tools"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
     existing = crud_skill.get_by_name(db, user_id=user_id, name=skill_data["name"], scope=scope)
     if existing and not data.overwrite:
@@ -563,10 +658,11 @@ async def import_skill(
         db, user_id=user_id, scope=scope,
         name=skill_data["name"], description=skill_data["description"],
         procedure=skill_data["body"],
-        allowed_tools=skill_data.get("allowed_tools"),
+        tools_used=tool_names,
+        allowed_tools=allowed_tools,
         license_=skill_data.get("license"),
         compatibility=skill_data.get("compatibility"),
-        metadata_=skill_data.get("metadata_"),
+        metadata_=_strict_skill_metadata(skill_data.get("metadata_")),
         created_by="imported", source="imported",
         file_path=str(path.resolve()),
     )

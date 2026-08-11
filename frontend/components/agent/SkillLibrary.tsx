@@ -1,10 +1,11 @@
 "use client"
 
 import { useState, useEffect, useCallback } from "react"
-import { Plus, Loader2, Search, Upload, Download, Globe, User } from "lucide-react"
+import { Plus, Loader2, Search, Upload, Globe, User } from "lucide-react"
 import { getApiBaseUrl } from "@/lib/api"
+import { useAuth } from "@/components/auth-provider"
 import SkillCard from "./SkillCard"
-import SkillEditor from "./SkillEditor"
+import SkillEditor, { type SkillDraft, type SkillTool } from "./SkillEditor"
 
 interface Skill {
     id: string
@@ -28,11 +29,10 @@ interface Skill {
 }
 
 interface SkillLibraryProps {
-    jobId: string
     onClose: () => void
 }
 
-export default function SkillLibrary({ jobId, onClose }: SkillLibraryProps) {
+export default function SkillLibrary({ onClose }: SkillLibraryProps) {
     const [skills, setSkills] = useState<Skill[]>([])
     const [loading, setLoading] = useState(true)
     const [error, setError] = useState<string | null>(null)
@@ -43,6 +43,8 @@ export default function SkillLibrary({ jobId, onClose }: SkillLibraryProps) {
     const [showImport, setShowImport] = useState(false)
     const [importPath, setImportPath] = useState("")
     const [importing, setImporting] = useState(false)
+    const [toolCatalog, setToolCatalog] = useState<SkillTool[]>([])
+    const { user } = useAuth()
 
     const apiBase = getApiBaseUrl()
     const getToken = () => typeof window !== "undefined" ? localStorage.getItem("token") : null
@@ -65,7 +67,20 @@ export default function SkillLibrary({ jobId, onClose }: SkillLibraryProps) {
 
     useEffect(() => { loadSkills() }, [loadSkills])
 
-    const handleSave = async (data: any) => {
+    useEffect(() => {
+        const loadToolCatalog = async () => {
+            try {
+                const res = await fetch(`${apiBase}/agent/skills/tool-catalog`, { headers: headers() })
+                if (res.ok) {
+                    const data = await res.json()
+                    setToolCatalog(data.tools || [])
+                }
+            } catch { }
+        }
+        loadToolCatalog()
+    }, [apiBase, headers])
+
+    const handleSave = async (data: SkillDraft) => {
         const isEdit = !!editingSkill?.id
         const url = isEdit
             ? `${apiBase}/agent/skills/${editingSkill.id}`
@@ -95,6 +110,24 @@ export default function SkillLibrary({ jobId, onClose }: SkillLibraryProps) {
             headers: headers(),
         })
         loadSkills()
+    }
+
+    const handlePublish = async (skill: Skill) => {
+        if (!confirm(`Publish skill "${skill.name}" for all users?`)) return
+        setError(null)
+        try {
+            const res = await fetch(`${apiBase}/agent/skills/${skill.id}/publish`, {
+                method: "POST",
+                headers: headers(),
+            })
+            if (!res.ok) {
+                const err = await res.json().catch(() => null)
+                throw new Error(err?.detail || "Publish failed")
+            }
+            loadSkills()
+        } catch (e) {
+            setError(e instanceof Error ? e.message : "Publish failed")
+        }
     }
 
     const handleExport = async (skill: Skill) => {
@@ -132,8 +165,8 @@ export default function SkillLibrary({ jobId, onClose }: SkillLibraryProps) {
             setShowImport(false)
             setImportPath("")
             loadSkills()
-        } catch (e: any) {
-            setError(e.message)
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : "Import failed")
         } finally { setImporting(false) }
     }
 
@@ -147,6 +180,7 @@ export default function SkillLibrary({ jobId, onClose }: SkillLibraryProps) {
 
     const userSkills = filtered.filter(s => s.scope === "user")
     const systemSkills = filtered.filter(s => s.scope === "system")
+    const isAdmin = Boolean(user?.is_superuser || user?.role === "admin")
 
     return (
         <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" onClick={onClose}>
@@ -225,6 +259,7 @@ export default function SkillLibrary({ jobId, onClose }: SkillLibraryProps) {
                                         onEdit={(s) => { setEditingSkill(s); setShowCreate(true) }}
                                         onDelete={handleDelete}
                                         onExport={handleExport}
+                                        onPublish={isAdmin ? handlePublish : undefined}
                                     />
                                 ))}
                             </div>
@@ -241,8 +276,8 @@ export default function SkillLibrary({ jobId, onClose }: SkillLibraryProps) {
                                     <SkillCard
                                         key={skill.id}
                                         skill={skill}
-                                        onEdit={(s) => { setEditingSkill(s); setShowCreate(true) }}
-                                        onDelete={handleDelete}
+                                        onEdit={isAdmin && skill.source !== "file" ? (s) => { setEditingSkill(s); setShowCreate(true) } : undefined}
+                                        onDelete={isAdmin && skill.source !== "file" ? handleDelete : undefined}
                                         onExport={handleExport}
                                     />
                                 ))}
@@ -263,6 +298,7 @@ export default function SkillLibrary({ jobId, onClose }: SkillLibraryProps) {
             {showCreate && (
                 <SkillEditor
                     skill={editingSkill}
+                    tools={toolCatalog}
                     onSave={handleSave}
                     onClose={() => { setShowCreate(false); setEditingSkill(null) }}
                 />

@@ -2,7 +2,7 @@ def requires_confirmation(tool_name: str, args: dict) -> bool:
     DESTRUCTIVE_TOOLS = {
         "approve_document", "reject_document", "bulk_approve",
         "update_document_field", "delete_file", "forget_memory",
-        "delete_skill", "send_to_workflow",
+        "create_skill", "delete_skill", "send_to_workflow",
         "save_workflow",  # final commit of an AI-designed workflow
     }
     if tool_name in DESTRUCTIVE_TOOLS:
@@ -26,6 +26,8 @@ def describe_action(tool_name: str, args: dict) -> str:
         return f"ลบ memory key='{args.get('key')}' scope={args.get('scope', 'user')}"
     if tool_name == "delete_skill":
         return f"ลบ skill '{args.get('name')}'"
+    if tool_name == "create_skill":
+        return f"บันทึก Personal Skill '{args.get('name')}'"
     if tool_name == "delete_file":
         return f"ลบไฟล์ '{args.get('path')}' จาก job storage"
     if tool_name == "send_to_workflow":

@@ -32,6 +32,15 @@ def test_contract_comparison_skill_file_is_valid():
     assert "web_search" in skill["allowed_tools"]
     assert "outputs/contract_comparison_report.html" in skill["body"]
     assert "qualified legal reviewer" in skill["body"]
+
+
+def test_create_skill_file_is_valid():
+    skill = parse_skill_md(_repo_root() / ".agents/skills/create-skill/SKILL.md")
+
+    assert skill["name"] == "create-skill"
+    assert skill["allowed_tools"] == "list_skills create_skill"
+    assert "explicitly approved" in skill["body"]
+    assert validate_skill(skill) == []
     assert validate_skill(skill) == []
 
 
@@ -57,6 +66,16 @@ def test_thai_contract_request_matches_contract_skill():
         skill,
         "ช่วยวิเคราะห์และเปรียบเทียบสัญญาฉบับเก่าและใหม่สำหรับการต่ออายุสัญญา",
     ) is True
+
+
+def test_create_skill_request_matches_create_skill():
+    skill = MagicMock()
+    skill.name = "create-skill"
+    skill.description = "Create and design reusable InsightDOC skills."
+    skill.trigger_hint = None
+
+    assert _skill_matches_query(skill, "ช่วยสร้าง Skill สำหรับตรวจใบแจ้งหนี้") is True
+    assert _skill_matches_query(skill, "Please create a skill for invoice checks") is True
 
 
 def test_sync_system_agent_skills_upserts_file_backed_system_skill():
@@ -136,4 +155,3 @@ def test_sync_system_agent_skills_upserts_multiple_file_backed_system_skills():
         {"name": "cross-document-html-report", "scope": "system", "source": "file"},
         {"name": "contract-comparison-html-report", "scope": "system", "source": "file"},
     ]
-
