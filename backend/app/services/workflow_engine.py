@@ -298,6 +298,8 @@ NODE_TYPES: List[Dict[str, Any]] = [
              "placeholder": "1AbC...xyz",
              "hint": "ต้องแชร์โฟลเดอร์ให้อีเมล service account (สิทธิ์อ่าน)"},
             {"name": "job_id", "label": "นำเข้าไปยัง Job", "type": "job_select", "required": True},
+            {"name": "schema_id", "label": "Schema สำหรับประมวลผล", "type": "schema_select", "required": False,
+             "hint": "เว้นว่าง = ใช้ Schema ของ Job; เลือกเพื่อกำหนด Schema ให้เอกสารที่นำเข้า"},
             {"name": "name_filter", "label": "กรองชื่อไฟล์ (optional)", "type": "text", "required": False,
              "placeholder": ".pdf",
              "hint": "เว้นว่าง = ทุกไฟล์; ใส่นามสกุล/คำเช่น .pdf เพื่อกรอง"},
@@ -1147,6 +1149,13 @@ def _exec_cloud_import(db: Session, config: dict, context: dict, log, provider: 
     if not job:
         raise NodeExecutionError(f"ไม่พบ Job: {job_id}")
 
+    schema_id = config.get("schema_id") or None
+    if schema_id:
+        from app.models.schema import DocumentSchema
+        schema = db.query(DocumentSchema).filter(DocumentSchema.id == schema_id).first()
+        if not schema:
+            raise NodeExecutionError(f"ไม่พบ Schema: {schema_id}")
+
     name_filter = (config.get("name_filter") or "").strip().lower()
     limit = int(config.get("limit") or 20)
 
@@ -1188,7 +1197,13 @@ def _exec_cloud_import(db: Session, config: dict, context: dict, log, provider: 
 
             data = client.download(fid)
             res = ingest_file_into_job(
-                db, str(job_id), data, fname, f.get("mimeType"), source_file_id=fid
+                db,
+                str(job_id),
+                data,
+                fname,
+                f.get("mimeType"),
+                schema_id=str(schema_id) if schema_id else None,
+                source_file_id=fid,
             )
             imported.append({"document_id": res["document_id"], "filename": fname, "drive_file_id": fid})
             log(f"นำเข้า '{fname}' → document {res['document_id']}")

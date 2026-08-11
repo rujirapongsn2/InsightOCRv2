@@ -98,3 +98,21 @@ def test_missing_job_reference_warns():
     }
     issues = validate_workflow_definition(_FakeSession(), definition, _User())
     assert any(i["node_id"] == "j1" and i["field"] == "job_id" and i["level"] == "warning" for i in issues)
+
+
+def test_gdrive_import_schema_override_is_optional_but_validated():
+    definition = {
+        "nodes": [
+            _node("t1", "trigger_manual"),
+            _node("g1", "gdrive_import", {
+                "integration_id": str(uuid.uuid4()),
+                "folder_id": "drive-folder",
+                "job_id": str(uuid.uuid4()),
+                "schema_id": str(uuid.uuid4()),
+            }),
+        ],
+        "edges": [{"id": "e1", "source": "t1", "target": "g1"}],
+    }
+    issues = validate_workflow_definition(_FakeSession(), definition, _User())
+    assert not any(i["field"] == "schema_id" and i["level"] == "error" for i in issues)
+    assert any(i["node_id"] == "g1" and i["field"] == "schema_id" and i["level"] == "warning" for i in issues)

@@ -22,6 +22,7 @@ from app.api.permissions import can_access_job
 from app.models.ai_settings import AISettings
 from app.models.integration import Integration
 from app.models.job import Job
+from app.models.schema import DocumentSchema
 from app.models.user import User
 from app.services.workflow_engine import (
     EXECUTORS,
@@ -128,6 +129,13 @@ def validate_workflow_definition(
                 issues.append(_issue(nid, "warning", "job_id", "ไม่พบ Job ที่อ้างถึง — โปรดเลือกใหม่"))
             elif not can_access_job(owner, job):
                 issues.append(_issue(nid, "error", "job_id", "ไม่มีสิทธิ์เข้าถึง Job ที่อ้างถึง"))
+
+        # An optional schema override on cloud-import nodes. Empty means the
+        # destination Job's schema remains authoritative for compatibility.
+        if config.get("schema_id"):
+            schema = db.query(DocumentSchema).filter(DocumentSchema.id == config["schema_id"]).first()
+            if not schema:
+                issues.append(_issue(nid, "warning", "schema_id", "ไม่พบ Schema ที่อ้างถึง — โปรดเลือกใหม่"))
 
         # Referenced Integration must exist, be owned, and match provider type.
         provider = _INTEGRATION_FIELDS.get(ntype)

@@ -31,9 +31,9 @@ import {
 } from "lucide-react"
 import {
     Workflow, WorkflowRun, NodeTypeDef, JobSummary,
-    getWorkflow, updateWorkflow, runWorkflow, getRun, getWorkflowRuns, getNodeTypes, getJobs, testNode,
+    getWorkflow, updateWorkflow, runWorkflow, getRun, getWorkflowRuns, getNodeTypes, getJobs, getSchemas, testNode,
     downloadRunOutput, rotateWorkflowWebhookSecret, disableWorkflowWebhookSecret,
-    suggestVariables, type VariableCandidate, type VariableSuggestion,
+    suggestVariables, type VariableCandidate, type VariableSuggestion, type SchemaSummary,
 } from "@/lib/workflows-api"
 import { Integration, getActiveIntegrations } from "@/lib/integrations-api"
 import { listAIProviders, type AIProviderSetting } from "@/lib/ai-settings-api"
@@ -779,8 +779,8 @@ function InsertVariableButton({ upstream, onInsert }: { upstream: UpstreamNode[]
 
 // ── Config panel field renderer ──────────────────────────────────────
 function ConfigField({
-    field, value, onChange, jobs, upstream, integrations, aiProviders,
-}: { field: NodeTypeDef["config_fields"][0]; value: any; onChange: (v: any) => void; jobs: JobSummary[]; upstream: UpstreamNode[]; integrations: Integration[]; aiProviders: AIProviderSetting[] }) {
+    field, value, onChange, jobs, schemas, upstream, integrations, aiProviders,
+}: { field: NodeTypeDef["config_fields"][0]; value: any; onChange: (v: any) => void; jobs: JobSummary[]; schemas: SchemaSummary[]; upstream: UpstreamNode[]; integrations: Integration[]; aiProviders: AIProviderSetting[] }) {
     const base = "w-full border border-[#E2E8F0] rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-[#2786C2]/30"
     const inputRef = useRef<HTMLInputElement | HTMLTextAreaElement | null>(null)
     const supportsTemplate = ["text", "textarea", "code"].includes(field.type)
@@ -853,6 +853,20 @@ function ConfigField({
                 <option value="">— เลือก Job —</option>
                 {jobs.map((j) => (
                     <option key={j.id} value={j.id}>{(j.name || "(ไม่มีชื่อ)") + ` · ${j.status}`}</option>
+                ))}
+                {value && !known && <option value={value}>{`${value} (ไม่พบในรายการ)`}</option>}
+            </select>
+        )
+    }
+    if (field.type === "schema_select") {
+        const known = schemas.some((s) => s.id === value)
+        return (
+            <select className={base} value={value ?? ""} onChange={(e) => onChange(e.target.value)}>
+                <option value="">ใช้ Schema ของ Job</option>
+                {schemas.map((s) => (
+                    <option key={s.id} value={s.id}>
+                        {s.name}{s.document_type ? ` · ${s.document_type}` : ""}
+                    </option>
                 ))}
                 {value && !known && <option value={value}>{`${value} (ไม่พบในรายการ)`}</option>}
             </select>
@@ -1110,6 +1124,7 @@ function Builder() {
     const [workflow, setWorkflow] = useState<Workflow | null>(null)
     const [nodeDefs, setNodeDefs] = useState<NodeTypeDef[]>([])
     const [jobs, setJobs] = useState<JobSummary[]>([])
+    const [schemas, setSchemas] = useState<SchemaSummary[]>([])
     const [integrations, setIntegrations] = useState<Integration[]>([])
     const [aiProviders, setAiProviders] = useState<AIProviderSetting[]>([])
     const [nodes, setNodes, onNodesChange] = useNodesState<Node>([])
@@ -1147,6 +1162,7 @@ function Builder() {
             })
             .catch((e) => setNotice(e.message))
         getJobs(token).then(setJobs).catch(() => { /* picker falls back to manual id */ })
+        getSchemas(token).then(setSchemas).catch(() => { /* select shows the fallback option */ })
         getActiveIntegrations(token).then(setIntegrations).catch(() => { /* select shows empty hint */ })
         listAIProviders(token).then(setAiProviders).catch(() => { /* select shows empty hint */ })
         loadLatestOutputs()
@@ -1715,6 +1731,7 @@ function Builder() {
                                         value={(selectedNode.data as WfNodeData).config?.[f.name]}
                                         onChange={(v) => updateSelectedConfig(f.name, v)}
                                         jobs={jobs}
+                                        schemas={schemas}
                                         upstream={upstreamVars}
                                         integrations={integrations}
                                         aiProviders={aiProviders}

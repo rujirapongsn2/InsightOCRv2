@@ -251,8 +251,17 @@ export interface JobSummary {
   status: string
 }
 
+export interface SchemaSummary {
+  id: string
+  name: string
+  document_type?: string | null
+}
+
 export const getJobs = (token: string) =>
   request<JobSummary[]>(token, "/jobs/")
+
+export const getSchemas = (token: string) =>
+  request<SchemaSummary[]>(token, "/schemas/")
 
 // ── Export / Import ──────────────────────────────────────────────────
 export interface WorkflowExport {
