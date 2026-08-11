@@ -50,6 +50,29 @@ class Settings(BaseSettings):
     TEST_ENDPOINT: Optional[str] = None
     MISTRAL_API_KEY: Optional[str] = None
     OCR_SSE_IDLE_TIMEOUT_SECONDS: int = 180
+    # The external OCR service can accept a job and keep its event stream open
+    # indefinitely. Keep an explicit wall-clock deadline so a single document
+    # never holds a Celery worker until the global task limit is reached.
+    OCR_EXTERNAL_JOB_TIMEOUT_SECONDS: int = 300
+    OCR_EXTERNAL_QUEUE_TIMEOUT_SECONDS: int = 60
+    OCR_STATUS_POLL_INTERVAL_SECONDS: int = 2
+    OCR_STATUS_REQUEST_TIMEOUT_SECONDS: int = 20
+    ANYDOC_MAX_PAGES: int = 100
+    ANYDOC_MAX_OCR_PAGES: int = 50
+    # Image inputs use the same AnyDoc hybrid orchestration, but are routed
+    # straight to the configured OCR providers. Keep their decoded size bounded
+    # before Pillow loads them to avoid expensive or malicious image payloads.
+    ANYDOC_MAX_IMAGE_PIXELS: int = 40_000_000
+    ANYDOC_MAX_IMAGE_DIMENSION: int = 10_000
+    # Keep AnyDoc work well inside the Celery 30-minute soft limit so a stuck
+    # provider cannot leave a worker blocked until the task is killed.
+    ANYDOC_DOCUMENT_TIMEOUT_SECONDS: int = 1200
+    TESSERACT_OCR_LANGUAGE: str = "tha+eng"
+    TESSERACT_OCR_TIMEOUT_SECONDS: int = 30
+    # Softnix OCR is asynchronous. Do not let one stalled provider job delay
+    # the configured OCR fallback for a whole document page.
+    ANYDOC_PRIMARY_OCR_TIMEOUT_SECONDS: int = 30
+    ANYDOC_FALLBACK_REQUEST_TIMEOUT_SECONDS: int = 120
 
     # Cloud storage OAuth. Keep provider secrets server-side; users connect
     # their own accounts through the integrations UI.

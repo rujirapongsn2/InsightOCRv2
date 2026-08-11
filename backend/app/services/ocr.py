@@ -1,10 +1,98 @@
+from __future__ import annotations
+
 import requests
 import os
+import logging
+import time
+from urllib.parse import urlsplit
 from sqlalchemy.orm import Session
 from app.models.setting import Setting
+from app.core.config import settings
 from app.services.tls import get_verify_ssl
 from pypdf import PdfReader
-from datetime import datetime
+
+logger = logging.getLogger(__name__)
+
+
+_PROCESSING_STATUSES = {"queued", "queueing", "pending", "processing", "running"}
+_FAILED_STATUSES = {"failed", "error", "cancelled", "canceled"}
+
+
+def _result_url(ocr_api_url: str, result_path: str) -> str:
+    """Resolve the provider's relative result path against the API origin."""
+    if result_path.startswith(("http://", "https://")):
+        return result_path
+
+    endpoint = urlsplit(ocr_api_url)
+    if not endpoint.scheme or not endpoint.netloc:
+        raise ValueError("OCR endpoint must be an absolute URL")
+    return f"{endpoint.scheme}://{endpoint.netloc}/{result_path.lstrip('/')}"
+
+
+def _has_ocr_payload(result: object) -> bool:
+    if not isinstance(result, dict):
+        return False
+    if isinstance(result.get("ocr_text"), str) and result["ocr_text"].strip():
+        return True
+    pages = result.get("results", {}).get("pages") if isinstance(result.get("results"), dict) else result.get("pages")
+    return isinstance(pages, list)
+
+
+def _wait_for_ocr_result(
+    submitted_result: dict,
+    *,
+    ocr_api_url: str,
+    headers: dict[str, str],
+    verify_ssl: bool,
+    timeout: int | float,
+) -> dict:
+    """Wait for an asynchronous Softnix OCR job and return its final payload.
+
+    The provider acknowledges uploads immediately and exposes the final result
+    at ``get_result``. Returning that acknowledgement as OCR output caused the
+    caller to see an empty extraction and unnecessarily advance to fallback.
+    """
+    if _has_ocr_payload(submitted_result):
+        return submitted_result
+
+    result_path = submitted_result.get("get_result")
+    if not isinstance(result_path, str) or not result_path.strip():
+        return submitted_result
+
+    result_url = _result_url(ocr_api_url, result_path)
+    deadline = time.monotonic() + max(0, timeout)
+    poll_interval = max(1, settings.OCR_STATUS_POLL_INTERVAL_SECONDS)
+    request_timeout = max(1, settings.OCR_STATUS_REQUEST_TIMEOUT_SECONDS)
+    job_id = submitted_result.get("job_id")
+
+    while time.monotonic() < deadline:
+        remaining = max(1, int(deadline - time.monotonic()))
+        response = requests.get(
+            result_url,
+            headers=headers,
+            verify=verify_ssl,
+            timeout=min(request_timeout, remaining),
+        )
+        if response.status_code == 202:
+            time.sleep(min(poll_interval, max(0, deadline - time.monotonic())))
+            continue
+
+        response.raise_for_status()
+        result = response.json()
+        if not isinstance(result, dict):
+            raise ValueError("OCR result response is not a JSON object")
+
+        status = str(result.get("status") or "").lower()
+        if status in _FAILED_STATUSES:
+            raise RuntimeError(f"Softnix OCR job {job_id or 'unknown'} failed")
+        if status in _PROCESSING_STATUSES:
+            time.sleep(min(poll_interval, max(0, deadline - time.monotonic())))
+            continue
+        return result
+
+    raise TimeoutError(
+        f"Softnix OCR job {job_id or 'unknown'} did not complete within {timeout} seconds"
+    )
 
 def count_pdf_pages(file_path: str) -> int:
     """
@@ -29,7 +117,14 @@ def count_pdf_pages(file_path: str) -> int:
     except Exception as e:
         raise ValueError(f"Failed to read PDF: {str(e)}")
 
-def process_ocr(file_path: str, db: Session, page_number: int = 1, filename: str = None, mime_type: str = None) -> dict:
+def process_ocr(
+    file_path: str,
+    db: Session,
+    page_number: int = 1,
+    filename: str = None,
+    mime_type: str = None,
+    timeout: int | float = 180,
+) -> dict:
     """
     Process a specific page of a file using the external OCR service.
 
@@ -96,16 +191,8 @@ def process_ocr(file_path: str, db: Session, page_number: int = 1, filename: str
             file_ext = os.path.splitext(file_path)[1].lower()
             content_type = 'application/pdf' if file_ext == '.pdf' else f'image/{file_ext[1:]}' if file_ext else 'application/octet-stream'
 
-        # Debug logging
         upload_filename = filename if filename else os.path.basename(file_path)
-        print("=" * 80)
-        print("OCR REQUEST DEBUG:")
-        print(f"URL: {ocr_api_url}")
-        print(f"Upload Filename: {upload_filename}")
-        print(f"Content-Type: {content_type}")
-        print(f"Headers: {headers}")
-        print(f"Data: {data}")
-        print("=" * 80)
+        logger.info("Submitting OCR request for %s (%s)", upload_filename, content_type)
 
         with open(file_path, 'rb') as f:
             # Use original filename if available, otherwise use temp file path
@@ -120,54 +207,31 @@ def process_ocr(file_path: str, db: Session, page_number: int = 1, filename: str
                 headers=headers,
                 data=data,
                 files=files,
-                verify=verify_ssl
+                verify=verify_ssl,
+                timeout=timeout,
             )
 
-            # Log response details before raising error
-            print("=" * 80)
-            print("OCR RESPONSE DEBUG:")
-            print(f"Status Code: {response.status_code}")
-            print(f"Response Headers: {dict(response.headers)}")
-            print(f"Response Body: {response.text[:500]}")  # First 500 chars
-            print("=" * 80)
-
             response.raise_for_status()
-            result = response.json()
-            
-            # Debug: Print the API response
-            print("=" * 80)
-            print("OCR API Response:")
-            print(f"Status: {result.get('status')}")
-            print(f"Filename: {result.get('filename')}")
-            if 'results' in result:
-                print(f"Results keys: {result['results'].keys()}")
-                if 'pages' in result['results']:
-                    print(f"Number of pages: {len(result['results']['pages'])}")
-                    if result['results']['pages']:
-                        first_page = result['results']['pages'][0]
-                        print(f"First page keys: {first_page.keys()}")
+            submitted_result = response.json()
+            if not isinstance(submitted_result, dict):
+                raise ValueError("OCR submit response is not a JSON object")
 
-                        # Check ai_processing type and content
-                        ai_proc = first_page.get('ai_processing')
-                        print(f"AI Processing type: {type(ai_proc)}, value: {ai_proc}")
-
-                        # Check ocr_text content
-                        ocr_text = first_page.get('ocr_text', '')
-                        print(f"OCR Text type: {type(ocr_text)}, length: {len(ocr_text)}")
-                        print(f"OCR Text preview (first 200 chars): {ocr_text[:200]}")
-
-                        if isinstance(ai_proc, dict):
-                            print(f"AI Processing Success: {ai_proc.get('success')}")
-                            content = ai_proc.get('content', '')
-                            print(f"AI Content length: {len(content)}")
-                            print(f"AI Content preview (first 200 chars): {content[:200]}")
-            print("=" * 80)
-            
+            result = _wait_for_ocr_result(
+                submitted_result,
+                ocr_api_url=ocr_api_url,
+                headers=headers,
+                verify_ssl=verify_ssl,
+                timeout=timeout,
+            )
+            logger.info("OCR request completed for %s (status=%s)", upload_filename, result.get("status"))
             return result
             
+    except TimeoutError as e:
+        logger.warning("Softnix OCR did not complete: %s", e)
+        raise
     except requests.exceptions.RequestException as e:
-        print(f"OCR API Request failed: {e}")
+        logger.warning("OCR API request failed: %s", e)
         raise
     except Exception as e:
-        print(f"An error occurred during OCR processing: {e}")
+        logger.exception("OCR processing failed: %s", e)
         raise
