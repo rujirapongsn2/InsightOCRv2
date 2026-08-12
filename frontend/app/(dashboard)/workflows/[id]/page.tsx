@@ -132,6 +132,210 @@ const TRIGGER_TYPE_LABEL: Record<string, string> = {
     node_test: "ทดสอบโหนด",
 }
 
+type NodeHelpContent = {
+    purpose: string
+    steps: string[]
+    example: string
+    caution?: string
+}
+
+const NODE_HELP_CONTENT: Record<string, NodeHelpContent> = {
+    trigger_manual: {
+        purpose: "ใช้เริ่ม workflow ด้วยตนเองจากปุ่ม Run ด้านบน เหมาะกับงานที่ต้องการตรวจผลก่อนรันทุกครั้ง",
+        steps: [
+            "วาง node นี้ไว้ต้นทาง แล้วเชื่อมต่อไปยัง node ที่ต้องการทำงานต่อ",
+            "กด Run และใส่ Trigger input เป็น JSON เฉพาะเมื่อ node ถัดไปต้องรับข้อมูลจากภายนอก",
+        ],
+        example: "ตัวอย่าง: Manual Trigger → Jobs เพื่อดึงเอกสารจาก Job ที่เลือก",
+    },
+    trigger_schedule: {
+        purpose: "ใช้เริ่ม workflow อัตโนมัติตามวันและเวลาที่กำหนด โดยไม่ต้องเปิดหน้าเว็บค้างไว้",
+        steps: [
+            "เปิดใช้งาน Schedule แล้วเลือกความถี่และเวลาให้ตรงกับรอบงาน",
+            "กด Save หลังตั้งค่า ระบบจึงบันทึกตารางและเริ่มรันตามรอบที่เลือก",
+        ],
+        example: "ตัวอย่าง: ตั้งเป็นทุกวัน 09:00 เพื่อประมวลผลข้อมูลประจำวัน",
+        caution: "หนึ่ง workflow ใช้ Schedule Trigger ได้เพียงหนึ่ง node",
+    },
+    trigger_webhook: {
+        purpose: "ใช้รับคำสั่งหรือข้อมูลจากระบบภายนอก แล้วเริ่ม workflow ทันทีเมื่อมี HTTP request เข้ามา",
+        steps: [
+            "กด Generate เพื่อสร้าง Webhook URL และคัดลอกไปตั้งค่าที่ระบบต้นทาง",
+            "อ้างข้อมูลที่ส่งเข้ามาด้วย {{trigger.body.<field>}} ใน node ถัดไป",
+        ],
+        example: "ตัวอย่าง: ส่ง POST พร้อม { \"job_id\": \"...\" } จากระบบต้นทาง",
+        caution: "เก็บ Webhook URL เป็นความลับ และ Regenerate ทันทีเมื่อสงสัยว่าลิงก์รั่ว",
+    },
+    job_source: {
+        purpose: "ใช้ดึงข้อมูลเอกสารจาก Job หนึ่งชุด เพื่อส่งให้ LLM, Mapping หรือ API ใน workflow เดียวกัน",
+        steps: [
+            "เลือก Job ที่ต้องการเป็นแหล่งข้อมูล",
+            "เลือก reviewed สำหรับข้อมูลที่ผู้ใช้ตรวจแล้ว; เลือก extracted เมื่อต้องการผลสกัดล่าสุด; เลือก ocr_text เมื่อต้องการข้อความเอกสารดิบ",
+            "กำหนดสถานะ, เฉพาะงานที่ประมวลผลเสร็จ และจำนวนสูงสุด เพื่อลดข้อมูลที่ไม่จำเป็น",
+        ],
+        example: "ตัวอย่าง: เลือก Job และใช้ reviewed เพื่อส่งเฉพาะข้อมูลที่ตรวจแล้ว",
+    },
+    document_source: {
+        purpose: "ใช้ส่งรายการเอกสารพร้อมข้อความ OCR และข้อมูลสกัดไปยัง node ถัดไป โดยเลือกได้จาก Job เดียว",
+        steps: [
+            "เลือก Job ที่ต้องการอ่านเอกสาร",
+            "ใช้ตัวกรองสถานะและจำนวนสูงสุดเพื่อเลือกเฉพาะเอกสารที่พร้อมใช้งาน",
+            "เปิดรวมข้อความ OCR เมื่อต้องส่งเนื้อหาเอกสารให้ LLM วิเคราะห์",
+        ],
+        example: "ตัวอย่าง: กรองเฉพาะเอกสารที่สถานะ Reviewed ก่อนวิเคราะห์",
+    },
+    llm: {
+        purpose: "ใช้ให้ AI วิเคราะห์ สรุป จัดหมวดหมู่ หรือสร้างข้อความจากข้อมูลของ node ก่อนหน้า",
+        steps: [
+            "เลือก AI Provider เฉพาะกรณีที่ต้องใช้ model อื่น; เว้นว่างเพื่อใช้ Agent Provider กลางของระบบ",
+            "ใส่ System prompt เพื่อกำหนดบทบาทและรูปแบบคำตอบ แล้วใส่คำสั่งจริงใน Prompt",
+            "แทรกตัวแปรจาก node ก่อนหน้าใน Prompt แทนการคัดลอกข้อมูลเอง",
+            "เปิด JSON output เฉพาะเมื่อ Prompt สั่งให้ตอบ JSON ที่ถูกต้องและ node ถัดไปต้องอ้างฟิลด์ภายใน",
+        ],
+        example: "ตัวอย่าง: ใช้ {{job.documents}} ใน prompt เพื่อสรุปประเด็นสำคัญ",
+        caution: "ระบุรูปแบบผลลัพธ์ให้ชัดเจน เช่น หัวข้อ ตาราง หรือ JSON เพื่อให้ node ถัดไปใช้งานต่อได้แน่นอน",
+    },
+    condition: {
+        purpose: "ใช้ตัดสินใจและส่งงานต่อคนละเส้นทางตามผล True หรือ False",
+        steps: [
+            "ใส่ค่าที่ต้องการตรวจใน ค่าที่ตรวจ โดยแทรกตัวแปรจาก node ก่อนหน้า",
+            "เลือกเงื่อนไขให้ตรงชนิดข้อมูล เช่น greater_than สำหรับตัวเลข หรือ contains สำหรับข้อความ",
+            "ใส่ค่าที่ใช้เทียบ ยกเว้นเงื่อนไข is_empty และ is_not_empty",
+        ],
+        example: "ตัวอย่าง: ถ้า {{job.total}} > 100000 ให้ส่งไปตรวจสอบเพิ่มเติม",
+    },
+    transform: {
+        purpose: "ใช้จัดรูปแบบข้อมูลใหม่และเปลี่ยนชื่อฟิลด์ก่อนส่งต่อให้ API, ไฟล์ หรือ node อื่น",
+        steps: [
+            "เพิ่ม mapping หนึ่งแถวต่อหนึ่งฟิลด์ผลลัพธ์",
+            "ตั้งชื่อฟิลด์ใหม่ทางซ้าย และแทรกค่าจาก node ก่อนหน้าทางขวา",
+            "ใช้ข้อความคงที่ร่วมกับตัวแปรได้ เช่น INV-{{job.invoice_number}}",
+        ],
+        example: "ตัวอย่าง: map {{job.invoice_number}} ไปเป็น invoiceNo",
+    },
+    python_code: {
+        purpose: "ใช้คำนวณหรือแปลงข้อมูลที่ทำด้วย Mapping ปกติไม่ได้ โดยรันใน sandbox",
+        steps: [
+            "ใส่ข้อมูลจาก node ก่อนหน้าใน Input ซึ่งจะถูกส่งให้โค้ดในตัวแปร inputs",
+            "เขียนโค้ดและกำหนดตัวแปร result เพื่อส่งผลให้ node ถัดไป",
+            "กำหนด Timeout ให้พอกับงาน แต่ไม่สูงเกินความจำเป็น",
+        ],
+        example: "ตัวอย่าง: รวมยอด line items แล้วคืนค่าเป็น { \"total\": 1250 }",
+        caution: "โค้ดทำงานใน sandbox; อย่าใส่ secret หรือพึ่งพาไฟล์/เครือข่ายภายนอกโดยไม่จำเป็น",
+    },
+    http_request: {
+        purpose: "ใช้ส่งข้อมูลไปยัง REST API หรือ Webhook ภายนอก และรับผลตอบกลับเข้าสู่ workflow",
+        steps: [
+            "เลือก Method ให้ตรงกับ API และใส่ URL แบบ HTTPS ที่เชื่อถือได้",
+            "ใส่ Headers เป็น JSON ที่ถูกต้อง เช่น Content-Type และ Authorization ตามเอกสาร API",
+            "แทรกข้อมูลจาก node ก่อนหน้าใน Body แล้วทดสอบ node ก่อนใช้กับข้อมูลจริง",
+        ],
+        example: "ตัวอย่าง: POST {{job.reviewed}} ไปยังระบบบัญชีหลังตรวจเอกสาร",
+        caution: "ตรวจปลายทางและข้อมูลใน Body ทุกครั้ง เพราะ node นี้สามารถส่งข้อมูลออกนอกระบบได้",
+    },
+    write_output: {
+        purpose: "ใช้สร้างไฟล์ผลลัพธ์จากข้อมูลใน workflow เพื่อดาวน์โหลดหรืออัปโหลดต่อไปยัง storage",
+        steps: [
+            "ตั้งชื่อไฟล์และเลือกรูปแบบให้เหมาะกับข้อมูล",
+            "ใส่เนื้อหาจาก node ก่อนหน้า; xlsx และ docx เหมาะกับรายการ object ที่ต้องการแสดงเป็นตาราง",
+            "นำ output ของ node นี้ไปเชื่อมกับ Google Drive หรือ OneDrive upload ได้",
+        ],
+        example: "ตัวอย่าง: เขียนสรุปเป็น report.md จากผลของ node LLM",
+    },
+    webhook_response: {
+        purpose: "ใช้กำหนดข้อมูลที่ระบบภายนอกจะอ่านได้เมื่อเรียก Workflow ผ่าน Webhook",
+        steps: [
+            "เปิด ใช้เป็น result ของ webhook แล้วกำหนด HTTP status ที่ต้องการ",
+            "ใส่ Result body โดยแทรกผลจาก node ก่อนหน้า",
+            "กำหนดเงื่อนไขเฉพาะเมื่อ response นี้ควรใช้เฉพาะบางเส้นทาง",
+        ],
+        example: "ตัวอย่าง: คืน { \"status\": \"ok\", \"result\": {{llm}} }",
+    },
+    gdrive_upload: {
+        purpose: "ใช้บันทึกไฟล์ผลลัพธ์ของ workflow ลง Google Drive",
+        steps: [
+            "เลือกบัญชี Google Drive ที่ตั้งค่าไว้ใน Integration",
+            "ใส่ Folder ID ปลายทางและตรวจว่า service account มีสิทธิ์เข้าถึงโฟลเดอร์นั้น",
+            "กำหนดชื่อ, MIME type และเนื้อหาจาก node ก่อนหน้า",
+        ],
+        example: "ตัวอย่าง: บันทึก report.pdf ลงโฟลเดอร์รายงานประจำเดือน",
+    },
+    gdrive_import: {
+        purpose: "ใช้ดึงไฟล์จาก Google Drive เข้า Job แล้วให้ระบบประมวลผลเอกสารต่อ",
+        steps: [
+            "เลือกบัญชี Google Drive และใส่ Folder ID ต้นทางที่แชร์ให้ service account อ่านได้",
+            "เลือก Job ปลายทาง และเลือก Schema เมื่อต้องการบังคับรูปแบบการสกัดข้อมูล",
+            "ใส่ตัวกรองชื่อไฟล์ เช่น .pdf และจำกัดจำนวนไฟล์ต่อรอบเพื่อควบคุมปริมาณงาน",
+        ],
+        example: "ตัวอย่าง: เลือกโฟลเดอร์ใบแจ้งหนี้และนำเข้าเฉพาะไฟล์ .pdf",
+    },
+    onedrive_upload: {
+        purpose: "ใช้บันทึกไฟล์ผลลัพธ์ของ workflow ลง OneDrive หรือ SharePoint",
+        steps: [
+            "เลือกบัญชี OneDrive ที่ตั้งค่าไว้ใน Integration",
+            "ใส่ Folder item ID หรือเว้นว่างเพื่อบันทึกที่ root ของ drive",
+            "กำหนดชื่อ, MIME type และเนื้อหาจาก node ก่อนหน้า",
+        ],
+        example: "ตัวอย่าง: เก็บไฟล์ผลตรวจไว้ในโฟลเดอร์ทีมที่กำหนด",
+    },
+    onedrive_import: {
+        purpose: "ใช้ดึงไฟล์จาก OneDrive หรือ SharePoint เข้า Job แล้วประมวลผลเอกสารต่อ",
+        steps: [
+            "เลือกบัญชี OneDrive และ Folder item ID; เว้นว่างเพื่ออ่านจาก root",
+            "เลือก Job ปลายทางและ Schema เมื่อต้องการบังคับรูปแบบการสกัดข้อมูล",
+            "กรองชื่อไฟล์และกำหนดจำนวนสูงสุดให้เหมาะกับรอบงาน",
+        ],
+        example: "ตัวอย่าง: นำเข้าไฟล์จากโฟลเดอร์รับเอกสารของทีมอัตโนมัติ",
+    },
+}
+
+const FIELD_HELP: Record<string, string> = {
+    "job_source.job_id": "เลือก Job ที่จะอ่านข้อมูลเอกสารที่ประมวลผลแล้ว",
+    "document_source.job_id": "เลือก Job ที่เป็นแหล่งเอกสารสำหรับส่งต่อไปยัง node ถัดไป",
+    "gdrive_import.job_id": "เลือก Job ปลายทางสำหรับเก็บไฟล์ที่นำเข้าจาก Google Drive",
+    "onedrive_import.job_id": "เลือก Job ปลายทางสำหรับเก็บไฟล์ที่นำเข้าจาก OneDrive",
+    data_source: "reviewed เหมาะกับข้อมูลที่ตรวจแล้ว, extracted คือผลสกัดล่าสุด, ocr_text คือข้อความเอกสารดิบ",
+    status: "เลือก reviewed หรือ extraction_completed เพื่อกรองเพิ่ม; เว้นว่างเมื่อไม่ต้องการจำกัดสถานะ",
+    only_completed: "เปิดไว้เพื่อไม่ให้ส่งเอกสารที่ยังประมวลผลไม่เสร็จเข้า workflow",
+    limit: "กำหนดจำนวนสูงสุดต่อรอบเพื่อควบคุมเวลาและปริมาณข้อมูล",
+    include_ocr_text: "เปิดเมื่อต้องส่งข้อความเต็มของเอกสารให้ node ถัดไป เช่น LLM",
+    ai_provider_id: "เว้นว่างเพื่อใช้ Agent Provider กลาง หรือเลือก model เฉพาะสำหรับ node นี้",
+    system_prompt: "กำหนดบทบาท, ภาษา และกติกาคงที่ของ AI เช่น ห้ามเดาข้อมูลที่ไม่มีในเอกสาร",
+    prompt: "คำสั่งงานหลักของ AI; ใช้ปุ่มแทรกข้อมูลเพื่อเลือกตัวแปรจาก node ก่อนหน้า",
+    json_output: "เปิดเมื่อ Prompt ระบุให้ตอบ JSON ที่ถูกต้องและต้องใช้ฟิลด์ผลลัพธ์ต่อ",
+    left: "ค่าหรือตัวแปรที่ต้องการตรวจ เช่น {{jobs_1.count}}",
+    operator: "เลือกวิธีเปรียบเทียบให้ตรงกับข้อความหรือตัวเลข",
+    right: "ค่าที่นำมาเทียบ; เว้นว่างได้เมื่อใช้ is_empty หรือ is_not_empty",
+    mappings: "เพิ่มหนึ่งแถวต่อหนึ่งฟิลด์ผลลัพธ์: ชื่อฟิลด์ใหม่ = ค่าหรือตัวแปรจาก node ก่อนหน้า",
+    code: "เขียนโค้ดโดยอ่านข้อมูลจาก inputs และกำหนด result เป็นผลลัพธ์สุดท้าย",
+    input: "ข้อมูลที่ส่งให้โค้ด Python ในตัวแปร inputs; ใช้ตัวแปรจาก node ก่อนหน้าได้",
+    timeout: "เวลาสูงสุดของโค้ด; งานทั่วไปใช้ค่าเริ่มต้นก่อนแล้วค่อยเพิ่มเมื่อจำเป็น",
+    method: "เลือก HTTP method ตามเอกสารของ API ปลายทาง",
+    url: "URL ของ API ปลายทาง ควรเป็น HTTPS และตรวจสอบโดเมนก่อนบันทึก",
+    headers: "ใส่ JSON ที่ถูกต้อง เช่น { \"Content-Type\": \"application/json\" }",
+    body: "ข้อมูลที่จะส่งไปยัง API หรือใช้เป็นผลลัพธ์; แทรกตัวแปรจาก node ก่อนหน้าได้",
+    filename: "ชื่อไฟล์รวมถึงนามสกุล เพื่อให้ผู้รับรู้ประเภทไฟล์ได้ชัดเจน",
+    format: "เลือกรูปแบบไฟล์ให้เหมาะกับข้อมูล: json สำหรับระบบ, csv/xlsx สำหรับตาราง, docx สำหรับเอกสาร",
+    content: "เนื้อหาที่จะบันทึกหรืออัปโหลด; ใช้ปุ่มแทรกข้อมูลเพื่อเลือกผลจาก node ก่อนหน้า",
+    visible: "เปิดเมื่อต้องการให้ node นี้เป็นผลลัพธ์ที่ผู้เรียก Webhook อ่านได้",
+    status_code: "HTTP status ที่จะตอบกลับ เช่น 200 เมื่อสำเร็จ หรือ 400 เมื่อข้อมูลไม่ครบ",
+    condition_left: "ค่าที่ใช้ตรวจว่า response นี้ควรถูกส่งหรือไม่",
+    condition_operator: "วิธีเปรียบเทียบสำหรับการเลือก response",
+    condition_right: "ค่าที่ใช้เทียบกับเงื่อนไข response",
+    integration_id: "เลือกบัญชีที่สร้างไว้ในเมนู Integration; ต้องเป็นชนิดเดียวกับ node ที่ใช้",
+    folder_id: "ระบุโฟลเดอร์ต้นทางหรือปลายทางตามระบบ storage ที่เลือก และตรวจสิทธิ์ของบัญชี",
+    schema_id: "เว้นว่างเพื่อใช้ Schema ของ Job หรือเลือก Schema เพื่อกำหนดให้ไฟล์ที่นำเข้า",
+    name_filter: "ใส่คำหรือนามสกุลไฟล์ เช่น .pdf; เว้นว่างเมื่อต้องการรับทุกไฟล์",
+    mime_type: "ระบุ MIME type ให้ตรงกับไฟล์ เช่น application/json หรือ text/csv",
+}
+
+function getFieldHelp(nodeType: string, field: NodeTypeDef["config_fields"][number]): string {
+    return FIELD_HELP[`${nodeType}.${field.name}`]
+        || FIELD_HELP[field.name]
+        || field.hint
+        || (field.required ? "ต้องระบุก่อนบันทึกและรัน workflow" : "ตั้งค่าได้ตามความต้องการของ workflow")
+}
+
 const WEEKDAY_OPTIONS = [
     { value: "1", label: "จันทร์" },
     { value: "2", label: "อังคาร" },
@@ -1142,6 +1346,7 @@ function Builder() {
     const [runInput, setRunInput] = useState("")
     const [starting, setStarting] = useState(false)
     const [testing, setTesting] = useState(false)
+    const [helpOpen, setHelpOpen] = useState(false)
     const [webhookUrl, setWebhookUrl] = useState<string | null>(null)
     const [webhookBusy, setWebhookBusy] = useState(false)
     // output จริงของแต่ละโหนดจากการรันเต็มล่าสุด — ใช้เติมฟิลด์ใน variable picker
@@ -1325,6 +1530,17 @@ function Builder() {
     const selectedNode = nodes.find((n) => n.id === selectedId) || null
     const selectedDef = selectedNode ? nodeDefs.find((d) => d.type === (selectedNode.data as WfNodeData).nodeType) : null
     const selectedNodeType = selectedNode ? (selectedNode.data as WfNodeData).nodeType : null
+    const selectedHelp = selectedNodeType
+        ? NODE_HELP_CONTENT[selectedNodeType] || {
+            purpose: selectedDef?.description || "ตั้งค่าข้อมูลของ node นี้แล้วส่งต่อให้ node ถัดไป",
+            steps: ["กรอกฟิลด์ที่มีเครื่องหมาย * ให้ครบ", "เชื่อมต่อ node กับขั้นตอนถัดไป แล้วทดสอบก่อนใช้งานจริง"],
+            example: "ตัวอย่าง: ตั้งค่าฟิลด์ที่จำเป็น แล้วเชื่อมต่อกับ node ถัดไปบน canvas",
+        }
+        : null
+
+    useEffect(() => {
+        setHelpOpen(false)
+    }, [selectedId])
 
     const updateSelectedConfig = (name: string, value: any) => {
         setNodes((nds) => nds.map((n) => n.id === selectedId
@@ -1742,17 +1958,72 @@ function Builder() {
                         </div>
                         )}
 
-                        <div className="mt-5 p-3 rounded-lg bg-[#F8F9FA] text-[10px] text-[#778DA9] leading-relaxed">
-                            <p className="font-semibold text-[#0D1B2A] mb-1">💡 เคล็ดลับ</p>
-                            {selectedNodeType === "trigger_schedule" ? (
-                                <>ตั้งเวลาที่นี่แล้วกด <span className="text-[#2786C2]">Save</span> ระบบจะรัน workflow นี้ตามรอบที่กำหนด</>
-                            ) : (
-                                <>
-                                    กดปุ่ม <span className="text-[#2786C2]">“+ แทรกข้อมูลจากโหนดก่อนหน้า”</span> เพื่อเลือกค่าจากโหนดอื่นโดยไม่ต้องพิมพ์เอง<br />
-                                    กด <span className="text-emerald-600">“ทดสอบโหนดนี้”</span> เพื่อดูผลเฉพาะโหนดนี้ (ต้องรัน workflow เต็มอย่างน้อย 1 ครั้งก่อน)
-                                </>
-                            )}
-                        </div>
+                        {selectedHelp && (
+                            <div className="mt-5 rounded-lg border border-[#E2E8F0] bg-[#F8F9FA] text-[10px] text-[#778DA9]">
+                                <button
+                                    type="button"
+                                    onClick={() => setHelpOpen((open) => !open)}
+                                    aria-expanded={helpOpen}
+                                    className="flex w-full items-center justify-between gap-2 px-3 py-2.5 text-left hover:bg-white rounded-lg"
+                                >
+                                    <span className="font-semibold text-[#0D1B2A]">วิธีใช้งาน node นี้</span>
+                                    {helpOpen
+                                        ? <ChevronDown className="h-3.5 w-3.5 shrink-0 text-[#778DA9]" />
+                                        : <ChevronRight className="h-3.5 w-3.5 shrink-0 text-[#778DA9]" />}
+                                </button>
+                                {helpOpen && (
+                                    <div className="space-y-3 border-t border-[#E2E8F0] px-3 py-3 leading-relaxed">
+                                        <section>
+                                            <p className="font-semibold text-[#0D1B2A]">ใช้เมื่อไร</p>
+                                            <p className="mt-0.5">{selectedHelp.purpose}</p>
+                                        </section>
+
+                                        {selectedDef.config_fields.length > 0 && selectedNodeType && (
+                                            <section>
+                                                <p className="font-semibold text-[#0D1B2A]">ตั้งค่าฟอร์ม</p>
+                                                <ol className="mt-1 space-y-1 list-decimal list-outside pl-4">
+                                                    {selectedDef.config_fields.map((field) => (
+                                                        <li key={field.name}>
+                                                            <span className="font-medium text-[#0D1B2A]">{field.label}{field.required ? " *" : ""}</span>
+                                                            {": "}{getFieldHelp(selectedNodeType, field)}
+                                                        </li>
+                                                    ))}
+                                                </ol>
+                                            </section>
+                                        )}
+
+                                        {selectedNodeType === "trigger_schedule" && (
+                                            <section>
+                                                <p className="font-semibold text-[#0D1B2A]">ตั้งค่าฟอร์ม</p>
+                                                <ol className="mt-1 space-y-1 list-decimal list-outside pl-4">
+                                                    <li><span className="font-medium text-[#0D1B2A]">เปิด:</span> ต้องเปิดก่อนระบบจะรันตามตาราง</li>
+                                                    <li><span className="font-medium text-[#0D1B2A]">ความถี่:</span> เลือกรอบที่เหมาะกับงาน เช่น ทุกวันหรือทุกวันทำงาน</li>
+                                                    <li><span className="font-medium text-[#0D1B2A]">เวลา:</span> ระบุเวลาตามเขตเวลาของระบบ</li>
+                                                    <li><span className="font-medium text-[#0D1B2A]">วัน/วันที่:</span> ตั้งค่าเพิ่มเติมเมื่อเลือกแบบรายสัปดาห์หรือรายเดือน</li>
+                                                    <li><span className="font-medium text-[#0D1B2A]">Cron ขั้นสูง:</span> ใช้เฉพาะเมื่อต้องการตารางที่ preset ไม่รองรับ</li>
+                                                </ol>
+                                            </section>
+                                        )}
+
+                                        <section>
+                                            <p className="font-semibold text-[#0D1B2A]">ลำดับการใช้งาน</p>
+                                            <ol className="mt-1 space-y-1 list-decimal list-outside pl-4">
+                                                {selectedHelp.steps.map((step) => <li key={step}>{step}</li>)}
+                                            </ol>
+                                        </section>
+
+                                        <section>
+                                            <p className="font-semibold text-[#0D1B2A]">ตัวอย่าง</p>
+                                            <p className="mt-0.5 text-[#2786C2]">{selectedHelp.example}</p>
+                                        </section>
+
+                                        {selectedHelp.caution && (
+                                            <p className="rounded-md bg-amber-50 px-2 py-1.5 text-amber-700">ข้อควรระวัง: {selectedHelp.caution}</p>
+                                        )}
+                                    </div>
+                                )}
+                            </div>
+                        )}
                     </aside>
                 )}
             </div>
