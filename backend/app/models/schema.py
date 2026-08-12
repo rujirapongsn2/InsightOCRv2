@@ -12,6 +12,8 @@ class DocumentSchema(Base):
     description = Column(String, nullable=True)
     document_type = Column(String, nullable=False) # e.g., "invoice", "receipt"
     ocr_engine = Column(String, default="tesseract")
+    # Internal compatibility metadata. Supported documents use AnyDoc hybrid.
+    extraction_profile = Column(String, nullable=False, default="anydoc_hybrid")
     
     # List of fields definition
     # [

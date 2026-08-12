@@ -3,12 +3,43 @@ import logging
 import re
 from typing import List, Dict, Any, Optional
 import httpx
+from openai import AsyncOpenAI
 from sqlalchemy.orm import Session
 
 from app.models.ai_settings import AISettings
 from app.schemas.ai_settings import SuggestedField, FieldSuggestionResponse
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_openai_base_url(api_url: str) -> str:
+    """Accept either an OpenAI base URL or a full chat-completions URL."""
+    normalized = api_url.rstrip("/")
+    suffix = "/chat/completions"
+    if normalized.lower().endswith(suffix):
+        normalized = normalized[: -len(suffix)]
+    return normalized
+
+
+def _schema_suggestion_messages(ocr_content: str, document_type: Optional[str]) -> list[dict[str, str]]:
+    type_hint = document_type or "the document"
+    system_prompt = (
+        "You design extraction schemas for an OCR document platform. "
+        "Return JSON only, with no markdown or explanation. The JSON must have "
+        "a top-level `fields` array. Each item must contain `name`, `type`, "
+        "`description`, `required`, and optional `example_value`. Use snake_case "
+        "names and only these types: text, number, date, currency, boolean. "
+        "Suggest stable business fields visible in the document; do not invent fields."
+    )
+    user_prompt = (
+        f"Suggest fields for {type_hint}.\n\n"
+        "OCR/Markdown document:\n"
+        f"{ocr_content}"
+    )
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
 
 
 class AISuggestionService:
@@ -62,53 +93,30 @@ class AISuggestionService:
         # Get AI settings
         settings = self._get_ai_settings(provider_name)
 
-        # Prepare request payload
-        payload = {
-            "inputs": {
-                "ocr_content": ocr_content
-            },
-            "user": "insightocr_system",
-            "citation": True,
-            "response_mode": "blocking"
-        }
-
-        # Add document type to inputs if provided
-        if document_type:
-            payload["inputs"]["document_type"] = document_type
-
         # Call external API
         try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                response = await client.post(
-                    settings.api_url,
-                    json=payload,
-                    headers={
-                        "Authorization": f"Bearer {settings.api_key}",
-                        "Content-Type": "application/json"
-                    }
-                )
-                response.raise_for_status()
-                result = response.json()
+            if settings.provider_type == "openai_compatible":
+                result = await self._call_openai_compatible(settings, ocr_content, document_type)
+            else:
+                result = await self._call_completion_messages(settings, ocr_content, document_type)
 
         except httpx.HTTPError as e:
             error_msg = f"Error calling AI API: {str(e)}"
             if hasattr(e, 'response') and e.response:
-                error_msg += f" | Status: {e.response.status_code} | Body: {e.response.text}"
+                error_msg += f" | Status: {e.response.status_code}"
             logger.error(error_msg)
             raise ValueError(f"Failed to call AI provider: {str(e)}")
         except Exception as e:
             logger.error(f"Unexpected error: {str(e)}")
             raise ValueError(f"Unexpected error calling AI provider: {str(e)}")
 
-        # Log the raw response for debugging
-        logger.info(f"AI API Response: {json.dumps(result, indent=2)}")
-        print("=" * 80)
-        print("AI API RAW RESPONSE:")
-        print(json.dumps(result, indent=2))
-        print("=" * 80)
-
         # Parse response and extract suggested fields
         suggested_fields = self._parse_ai_response(result, ocr_content)
+        logger.info(
+            "AI schema suggestion completed with provider '%s' (%s fields)",
+            settings.display_name,
+            len(suggested_fields),
+        )
 
         # Calculate overall confidence
         if suggested_fields:
@@ -123,6 +131,64 @@ class AISuggestionService:
             provider_used=settings.display_name
         )
 
+    async def _call_openai_compatible(
+        self,
+        settings: AISettings,
+        ocr_content: str,
+        document_type: Optional[str],
+    ) -> Dict[str, Any]:
+        """Call providers exposing the standard /chat/completions contract."""
+        client_kwargs: dict[str, Any] = {
+            "api_key": settings.api_key,
+            "base_url": _normalize_openai_base_url(settings.api_url),
+            "timeout": 60.0,
+            "max_retries": 0,
+        }
+        async with AsyncOpenAI(**client_kwargs) as client:
+            response = await client.chat.completions.create(
+                model=settings.model or "gpt-4o-mini",
+                messages=_schema_suggestion_messages(ocr_content, document_type),
+                temperature=0.1,
+            )
+
+        content = ""
+        if response.choices:
+            content = (response.choices[0].message.content or "").strip()
+        if not content:
+            raise ValueError("AI provider returned an empty response")
+        return {"answer": content}
+
+    async def _call_completion_messages(
+        self,
+        settings: AISettings,
+        ocr_content: str,
+        document_type: Optional[str],
+    ) -> Dict[str, Any]:
+        """Call legacy completion-messages providers without changing their contract."""
+        payload = {
+            "inputs": {"ocr_content": ocr_content},
+            "user": "insightocr_system",
+            "citation": True,
+            "response_mode": "blocking",
+        }
+        if document_type:
+            payload["inputs"]["document_type"] = document_type
+
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                settings.api_url,
+                json=payload,
+                headers={
+                    "Authorization": f"Bearer {settings.api_key}",
+                    "Content-Type": "application/json",
+                },
+            )
+            response.raise_for_status()
+            try:
+                return response.json()
+            except ValueError as exc:
+                raise ValueError("AI provider returned a non-JSON response") from exc
+
     def _parse_ai_response(self, ai_response: Dict[str, Any], ocr_content: str) -> List[SuggestedField]:
         """
         Parse the AI response and extract suggested fields
@@ -135,11 +201,6 @@ class AISuggestionService:
         try:
             # Get the answer from AI response
             answer = ai_response.get("answer", "")
-            logger.info(f"Parsing AI answer: {answer[:500]}...")  # Log first 500 chars
-            print("-" * 80)
-            print(f"ANSWER FIELD VALUE: {answer}")
-            print("-" * 80)
-
             # Strip markdown code blocks if present
             if "```json" in answer:
                 answer = answer.split("```json")[1].split("```")[0].strip()

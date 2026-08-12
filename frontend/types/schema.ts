@@ -3,6 +3,7 @@
 export type FieldType = "text" | "number" | "date" | "currency" | "boolean" | "array"
 
 export type DocumentType = "invoice" | "receipt" | "contract" | "po" | "other"
+export type ExtractionProfile = "legacy" | "anydoc_hybrid"
 
 export type WizardStep = 1 | 2
 
@@ -39,6 +40,7 @@ export interface SchemaData {
   description: string
   document_type: DocumentType
   ocr_engine?: string
+  extraction_profile?: ExtractionProfile
   template_id?: string
 }
 
@@ -112,6 +114,7 @@ export interface CreateSchemaRequest {
   description?: string
   document_type: DocumentType
   ocr_engine: string
+  extraction_profile: ExtractionProfile
   fields: SchemaField[]
   template_id?: string
 }
@@ -122,6 +125,7 @@ export interface CreateSchemaResponse {
   description?: string
   document_type: DocumentType
   ocr_engine: string
+  extraction_profile: ExtractionProfile
   fields: SchemaField[]
   template_id?: string
   created_by?: string

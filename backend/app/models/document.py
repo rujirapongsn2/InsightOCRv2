@@ -30,6 +30,9 @@ class Document(Base):
     processing_error = Column(String, nullable=True)
 
     extracted_data = Column(JSON, nullable=True)
+    # Route, parser version, per-page source and field evidence for the
+    # opt-in AnyDoc pilot. The existing extraction fields remain unchanged.
+    extraction_metadata = Column(JSON, nullable=True)
     reviewed_data = Column(JSON, nullable=True)
     review_decision = Column(String, nullable=True)
     reviewed_at = Column(DateTime(timezone=True), nullable=True)

@@ -1,4 +1,4 @@
-from typing import List, Optional, Any, Dict
+from typing import List, Optional, Any, Dict, Literal
 from pydantic import BaseModel
 from uuid import UUID
 from datetime import datetime
@@ -10,11 +10,15 @@ class SchemaField(BaseModel):
     required: bool = False
     validation_rules: Optional[Dict[str, Any]] = None
 
+ExtractionProfile = Literal["legacy", "anydoc_hybrid"]
+
+
 class DocumentSchemaBase(BaseModel):
     name: str
     description: Optional[str] = None
     document_type: str
     ocr_engine: Optional[str] = "tesseract"
+    extraction_profile: ExtractionProfile = "anydoc_hybrid"
     fields: List[SchemaField] = []
 
 class DocumentSchemaCreate(DocumentSchemaBase):
@@ -25,6 +29,7 @@ class DocumentSchemaUpdate(DocumentSchemaBase):
     description: Optional[str] = None
     document_type: Optional[str] = None
     ocr_engine: Optional[str] = None
+    extraction_profile: Optional[ExtractionProfile] = None
     fields: Optional[List[SchemaField]] = None
 
 class DocumentSchema(DocumentSchemaBase):

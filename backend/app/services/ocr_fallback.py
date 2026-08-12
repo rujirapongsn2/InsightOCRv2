@@ -7,6 +7,7 @@ the temporary upload is deleted after processing when possible.
 from __future__ import annotations
 
 import os
+import time
 from typing import Any
 
 import requests
@@ -14,6 +15,18 @@ import requests
 
 API_BASE_URL = "https://api.mistral.ai/v1"
 OCR_MODEL = "mistral-ocr-latest"
+
+
+def _request_timeout(
+    default_timeout: int | float,
+    deadline_monotonic: float | None,
+) -> int | float:
+    if deadline_monotonic is None:
+        return default_timeout
+    remaining = deadline_monotonic - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("OCR fallback exceeded the document processing budget")
+    return max(1, min(default_timeout, int(remaining)))
 
 
 def resolve_fallback_api_key(setting: Any = None) -> tuple[str, str]:
@@ -34,6 +47,8 @@ def process_fallback_ocr(
     filename: str,
     mime_type: str,
     verify_ssl: bool = True,
+    request_timeout: int | float = 180,
+    deadline_monotonic: float | None = None,
 ) -> dict[str, Any]:
     """OCR a local document and normalize the response for InsightDOC."""
     headers = {"Authorization": f"Bearer {api_key}", "Accept": "application/json"}
@@ -46,7 +61,7 @@ def process_fallback_ocr(
                 headers=headers,
                 data={"purpose": "ocr"},
                 files={"file": (filename or os.path.basename(file_path), file_stream, mime_type)},
-                timeout=180,
+                timeout=_request_timeout(request_timeout, deadline_monotonic),
                 verify=verify_ssl,
             )
         upload_response.raise_for_status()
@@ -59,7 +74,7 @@ def process_fallback_ocr(
             f"{API_BASE_URL}/files/{uploaded_file_id}/url",
             headers=headers,
             params={"expiry": 1},
-            timeout=30,
+            timeout=_request_timeout(min(30, request_timeout), deadline_monotonic),
             verify=verify_ssl,
         )
         signed_url_response.raise_for_status()
@@ -75,7 +90,7 @@ def process_fallback_ocr(
                 "document": {"type": "document_url", "document_url": signed_url},
                 "table_format": "html",
             },
-            timeout=300,
+            timeout=_request_timeout(request_timeout, deadline_monotonic),
             verify=verify_ssl,
         )
         ocr_response.raise_for_status()
@@ -113,8 +128,8 @@ def process_fallback_ocr(
                 requests.delete(
                     f"{API_BASE_URL}/files/{uploaded_file_id}",
                     headers=headers,
-                    timeout=30,
+                    timeout=_request_timeout(min(30, request_timeout), deadline_monotonic),
                     verify=verify_ssl,
                 )
-            except requests.RequestException:
+            except (requests.RequestException, TimeoutError):
                 pass

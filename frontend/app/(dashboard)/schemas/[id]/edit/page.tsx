@@ -16,12 +16,15 @@ interface SchemaField {
   required: boolean
 }
 
+type ExtractionProfile = "legacy" | "anydoc_hybrid"
+
 interface SchemaDetail {
   id: string
   name: string
   description: string
   document_type: string
   ocr_engine: string
+  extraction_profile: ExtractionProfile
   fields: SchemaField[]
   created_by?: string
 }
@@ -57,7 +60,7 @@ export default function EditSchemaPage() {
         })
         if (res.ok) {
           const data = await res.json()
-          setSchema(data)
+          setSchema({ ...data, extraction_profile: "anydoc_hybrid" })
           setFields(data.fields || [])
         }
       } catch (error) {
@@ -91,11 +94,13 @@ export default function EditSchemaPage() {
 
     try {
       const token = typeof window !== "undefined" ? localStorage.getItem("token") : null
+      const selectedProfile: ExtractionProfile = "anydoc_hybrid"
       const payload = {
         name: schema.name,
         description: schema.description,
         document_type: schema.document_type,
         ocr_engine: schema.ocr_engine,
+        extraction_profile: selectedProfile,
         fields,
       }
 
@@ -108,10 +113,11 @@ export default function EditSchemaPage() {
         body: JSON.stringify(payload)
       })
 
-      if (res.ok) {
+      const responsePayload = await res.json().catch(() => null)
+      if (res.ok && responsePayload?.extraction_profile === selectedProfile) {
         router.push("/schemas")
       } else {
-        alert("Failed to update schema")
+        alert(responsePayload?.detail || "The extraction pipeline was not saved. Please refresh and try again.")
       }
     } catch (error) {
       console.error("Error updating schema", error)
@@ -184,10 +190,13 @@ export default function EditSchemaPage() {
             </div>
             <div className="space-y-2">
               <label className="text-sm font-medium">Document Type</label>
-              <select
-                className="flex h-10 w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm"
-                value={schema.document_type}
-                onChange={(e) => setSchema({ ...schema, document_type: e.target.value })}
+                <select
+                  className="flex h-10 w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm"
+                  value={schema.document_type}
+                  onChange={(e) => {
+                    const documentType = e.target.value
+                    setSchema({ ...schema, document_type: documentType, extraction_profile: "anydoc_hybrid" })
+                  }}
               >
                 <option value="invoice">Invoice</option>
                 <option value="receipt">Receipt</option>

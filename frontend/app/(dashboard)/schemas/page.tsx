@@ -18,6 +18,7 @@ interface Schema {
     created_by?: string
     created_at?: string
     updated_at: string
+    extraction_profile?: "legacy" | "anydoc_hybrid"
 }
 
 interface SchemaField {
@@ -26,6 +27,8 @@ interface SchemaField {
     description: string
     required: boolean
 }
+
+type ExtractionProfile = "legacy" | "anydoc_hybrid"
 
 const getDocumentTypeIcon = (type: string) => {
     switch (type.toLowerCase()) {
@@ -48,7 +51,7 @@ function EditSchemaModal({ schemaId, onClose, onSaved }: { schemaId: string; onC
     const [loading, setLoading] = useState(true)
     const [saving, setSaving] = useState(false)
     const [deleting, setDeleting] = useState(false)
-    const [schema, setSchema] = useState<{ id: string; name: string; description: string; document_type: string; ocr_engine: string } | null>(null)
+    const [schema, setSchema] = useState<{ id: string; name: string; description: string; document_type: string; ocr_engine: string; extraction_profile: ExtractionProfile } | null>(null)
     const [fields, setFields] = useState<SchemaField[]>([])
 
     useEffect(() => {
@@ -57,7 +60,12 @@ function EditSchemaModal({ schemaId, onClose, onSaved }: { schemaId: string; onC
             headers: token ? { Authorization: `Bearer ${token}` } : undefined,
         })
             .then(r => r.ok ? r.json() : null)
-            .then(data => { if (data) { setSchema(data); setFields(data.fields || []) } })
+            .then(data => {
+                if (data) {
+                    setSchema({ ...data, extraction_profile: "anydoc_hybrid" })
+                    setFields(data.fields || [])
+                }
+            })
             .finally(() => setLoading(false))
     }, [schemaId])
 
@@ -71,13 +79,24 @@ function EditSchemaModal({ schemaId, onClose, onSaved }: { schemaId: string; onC
         setSaving(true)
         try {
             const token = typeof window !== "undefined" ? localStorage.getItem("token") : null
+            const selectedProfile: ExtractionProfile = "anydoc_hybrid"
             const res = await fetch(`${getApiBaseUrl()}/schemas/${schemaId}`, {
                 method: "PUT",
                 headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-                body: JSON.stringify({ name: schema.name, description: schema.description, document_type: schema.document_type, ocr_engine: schema.ocr_engine, fields }),
+                body: JSON.stringify({ name: schema.name, description: schema.description, document_type: schema.document_type, ocr_engine: schema.ocr_engine, extraction_profile: selectedProfile, fields }),
             })
-            if (res.ok) { onSaved(); onClose() } else alert("Failed to save schema")
-        } catch { alert("Error saving schema") } finally { setSaving(false) }
+            const payload = await res.json().catch(() => null)
+            if (!res.ok) {
+                throw new Error(payload?.detail || "Failed to save schema")
+            }
+            if (payload?.extraction_profile !== selectedProfile) {
+                throw new Error("The extraction pipeline was not saved. Please refresh and try again.")
+            }
+            onSaved()
+            onClose()
+        } catch (error) {
+            alert(error instanceof Error ? error.message : "Error saving schema")
+        } finally { setSaving(false) }
     }
 
     const handleDelete = async () => {
@@ -124,7 +143,10 @@ function EditSchemaModal({ schemaId, onClose, onSaved }: { schemaId: string; onC
                             <div className="space-y-1.5">
                                 <label className="text-sm font-medium text-slate-700">Document Type</label>
                                 <select className="flex h-10 w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                    value={schema.document_type} onChange={e => setSchema({ ...schema, document_type: e.target.value })}>
+                                    value={schema.document_type} onChange={e => {
+                                        const documentType = e.target.value
+                                        setSchema({ ...schema, document_type: documentType, extraction_profile: "anydoc_hybrid" })
+                                    }}>
                                     <option value="invoice">Invoice</option>
                                     <option value="receipt">Receipt</option>
                                     <option value="contract">Contract</option>

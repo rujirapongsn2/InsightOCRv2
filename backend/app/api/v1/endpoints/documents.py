@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from typing import List, Any, Optional
+from typing import List, Any, Optional, Literal
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from app.models.user import User
@@ -14,6 +14,10 @@ from app.services.ocr import process_ocr
 from app.services.structure import extract_structure
 from app.models.setting import Setting
 from app.models.schema import DocumentSchema as SchemaModel
+from app.services.extraction_profiles import (
+    supports_anydoc_source,
+    validate_extraction_profile,
+)
 from app.services.storage import get_storage_service
 from app.utils.activity_logger import log_activity, Actions
 from app.utils.job_logger import get_job_logger
@@ -264,12 +268,35 @@ async def upload_document(
 
 class ProcessRequest(BaseModel):
     schema_id: Optional[uuid.UUID] = None
+    # Kept for older API clients. The UI no longer exposes a pipeline choice.
+    extraction_profile: Optional[Literal["legacy", "anydoc_hybrid"]] = None
 
 class ProcessResponse(BaseModel):
     document_id: str
     task_id: str
     status: str
     message: str
+
+
+def _validate_requested_extraction_profile(
+    selected_schema: SchemaModel | None,
+    requested_profile: str | None,
+    document: Document | None = None,
+) -> str | None:
+    # AnyDoc hybrid is the standard route for supported inputs. Legacy is only
+    # retained behind the service boundary for unsupported or parser-fallback
+    # documents, so a legacy request from an older UI cannot opt out.
+    if document is not None and supports_anydoc_source(document.filename, document.mime_type):
+        return "anydoc_hybrid"
+    if not requested_profile:
+        return "legacy"
+    try:
+        return validate_extraction_profile(
+            selected_schema.document_type if selected_schema else None,
+            requested_profile,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 @router.post("/{document_id}/process", response_model=ProcessResponse)
 def process_document(
@@ -280,13 +307,25 @@ def process_document(
     current_user: User = Depends(deps.get_current_active_user),
 ) -> Any:
     """
-    Queue a document for background processing: Page Counting -> Multi-Page OCR -> Structure Extraction.
+    Queue a document for background processing and canonical AI text extraction.
     Returns immediately with task_id for status polling.
     """
     document = db.query(Document).filter(Document.id == document_id).first()
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
     ensure_document_access(current_user, document)
+
+    selected_schema = None
+    if process_request.schema_id:
+        selected_schema = db.query(SchemaModel).filter(SchemaModel.id == process_request.schema_id).first()
+        if not selected_schema:
+            raise HTTPException(status_code=404, detail="Selected schema not found")
+
+    validated_profile = _validate_requested_extraction_profile(
+        selected_schema,
+        process_request.extraction_profile,
+        document,
+    )
 
     # Atomically claim the document so concurrent /process calls cannot
     # dispatch two Celery tasks for the same document.
@@ -313,6 +352,13 @@ def process_document(
         )
     db.refresh(document)
 
+    if validated_profile:
+        metadata = dict(document.extraction_metadata or {})
+        metadata["requested_pipeline"] = validated_profile
+        document.extraction_metadata = metadata
+        db.add(document)
+        db.commit()
+
     # Import and dispatch Celery task
     from app.tasks.document_tasks import process_document_task
 
@@ -320,6 +366,7 @@ def process_document(
         task = process_document_task.delay(
             str(document.id),
             str(process_request.schema_id) if process_request.schema_id else None,
+            validated_profile,
         )
     except Exception:
         # Broker unavailable — release the claim so the user can retry.

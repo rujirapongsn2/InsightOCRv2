@@ -344,16 +344,16 @@ export default function SettingsPage() {
       <Card>
         <CardHeader>
           <div className="flex items-center gap-2">
-            <CardTitle>External API Configuration</CardTitle>
+          <CardTitle>Softnix OCR Configuration</CardTitle>
             {isLoadingConfig && <Loader2 className="h-4 w-4 animate-spin text-slate-400" />}
           </div>
           <p className="text-sm text-slate-600 mt-1">
-            Configure connection to your external AI service
+            Connection used after TesseractOCR cannot read a page.
           </p>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="space-y-2">
-            <label className="text-sm font-medium">OCR Processing Endpoint</label>
+            <label className="text-sm font-medium">Softnix OCR Endpoint</label>
             <Input
               value={ocrEndpoint}
               onChange={(e) => setOcrEndpoint(e.target.value)}
@@ -361,7 +361,7 @@ export default function SettingsPage() {
               disabled={isLoadingConfig}
             />
             <p className="text-xs text-slate-500">
-              Used for extracting text from documents (POST with file upload)
+              Used as the second OCR provider for scanned pages.
             </p>
           </div>
 
@@ -405,7 +405,7 @@ export default function SettingsPage() {
           </div>
 
           <div className="space-y-2">
-            <label className="text-sm font-medium">Bearer Token</label>
+            <label className="text-sm font-medium">Softnix OCR API Token</label>
             <div className="relative">
               <Input
                 value={token}
@@ -457,13 +457,23 @@ export default function SettingsPage() {
       <Card>
         <CardHeader>
           <div className="flex items-center justify-between gap-3">
-            <CardTitle>OCR Fallback Provider</CardTitle>
+            <CardTitle>TesseractOCR</CardTitle>
+            <span className="rounded-full bg-emerald-50 px-2 py-1 text-xs font-medium text-emerald-700">Local OCR</span>
+          </div>
+          <p className="text-sm text-slate-600 mt-1">Runs in this deployment first with Thai and English language data.</p>
+        </CardHeader>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between gap-3">
+            <CardTitle>OCR fallback</CardTitle>
             <span className={`rounded-full px-2 py-1 text-xs font-medium ${ocrFallbackConfigured ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
               {ocrFallbackConfigured ? "Ready" : "Key required"}
             </span>
           </div>
           <p className="text-sm text-slate-600 mt-1">
-            Use the configured fallback when the primary OCR service is unavailable.
+            Used only after TesseractOCR and Softnix OCR cannot return text.
           </p>
         </CardHeader>
         <CardContent className="space-y-3">
@@ -732,11 +742,11 @@ export default function SettingsPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle>OCR Engine</CardTitle>
+          <CardTitle>Softnix OCR Options</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="space-y-2">
-            <label className="text-sm font-medium">Engine</label>
+            <label className="text-sm font-medium">Engine requested from Softnix OCR</label>
             <div className="relative">
               <select
                 aria-label="Select OCR Engine"

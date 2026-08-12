@@ -3,6 +3,28 @@
 
 Date: 2026-07-14
 
+## Manual Verification - AnyDoc Invoice/Receipt Pilot
+
+1. Migration and configuration
+   - Run `alembic upgrade head` and confirm `document_schemas.extraction_profile` defaults to `anydoc_hybrid` and `documents.extraction_metadata` exists.
+   - Create or edit a Schema and confirm extraction is standardized as AnyDoc hybrid for supported PDF and image uploads; there is no user-facing pipeline selection on Schema.
+   - Confirm old `anydoc_shadow` requests are rejected and previous Schema values are migrated to `anydoc_hybrid`.
+
+2. Standard extraction processing
+   - Process a text-layer PDF; confirm the reviewer sees AI Extract with an `AnyDoc Text Layer` chip and no Structured Data panel.
+   - Confirm `ocr_text` is Markdown and the Document list has an `AnyDoc` chip. Schema selection only supplies document context during this phase.
+   - Confirm Preview contains only AI Extract; Structured Data and field evidence are deferred to the future mapping phase.
+   - Process a mixed or scanned Receipt PDF; confirm only rendered pages invoke OCR. Verify the chips show `TesseractOCR`, then `Softnix OCR`, then `OCR fallback` only when the preceding provider returns no usable text.
+
+3. Failure and rollback
+   - Process an encrypted PDF or simulate both OCR providers returning no text; confirm the document is `failed`, never `extraction_completed`.
+   - Upload an unsupported source and confirm the internal Legacy fallback is recorded without exposing a pipeline choice to the user.
+
+4. Automated checks
+   - Run `python -m pytest test/test_anydoc_pipeline.py test/test_schema_suggestion_upload.py -q` inside the backend container.
+   - Run `npm run build` from `frontend/`.
+   - Build the backend image to verify the pinned AnyDoc wheel and `poppler-utils` are present.
+
 ## Manual Verification - OCR Fallback Provider
 
 1. Configuration
@@ -16,8 +38,8 @@ Date: 2026-07-14
 2. Fallback adapter
    - Uploads the local document to the provider file API, requests a short-lived signed URL, calls OCR, and deletes the temporary upload when possible.
    - Normalizes `pages[].markdown` into InsightDOC page OCR data so existing extraction and review screens continue to work.
-   - Runs only when the primary OCR flow fails, the setting is enabled, and the backend key is configured.
-   - Added a configurable SSE idle timeout (`OCR_SSE_IDLE_TIMEOUT_SECONDS`, default 180 seconds). If the primary provider produces no SSE event or progress within that window, the task raises a timeout and enters the configured fallback path.
+   - Runs after TesseractOCR and Softnix OCR cannot return text, when the setting is enabled and the backend key is configured.
+   - Added a configurable SSE idle timeout (`OCR_SSE_IDLE_TIMEOUT_SECONDS`, default 180 seconds). If Softnix OCR produces no SSE event or progress within that window, the task raises a timeout and enters the configured fallback path.
    - Added worker-restart recovery: every 5 minutes, maintenance inspects live Celery document tasks. A `processing` document older than 10 minutes with no active task is marked failed with an auto-reconciled error so it can be retried safely; inspection failures leave the document untouched.
 
 3. Verification commands
@@ -1102,3 +1124,11 @@ Date: 2026-06-30
    - Automated verification:
      - Frontend `npm run build` passed.
      - Backend OAuth and OCR fallback tests passed (`7 passed`).
+
+18. AnyDoc hybrid image extraction
+   - Upload a PNG, JPEG, WEBP, TIFF, or BMP file to a Job.
+   - Select `Auto (default)` or a Schema, then process the document.
+   - Confirm the result displays the `Image OCR` chip and only the AI Extract editor in Preview.
+   - Select an Invoice or Receipt Schema and repeat; confirm only AI Extract is shown while Structured Data is deferred.
+   - Temporarily make Softnix OCR unavailable with OCR fallback enabled and use an image TesseractOCR cannot read; confirm the document completes with the `OCR fallback` chip.
+   - Try an oversized or unsupported image; confirm processing fails safely with a clear error and does not remain processing.

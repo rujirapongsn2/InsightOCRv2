@@ -1,7 +1,6 @@
 "use client"
 
-import { Wand2, FileJson } from "lucide-react"
-import { InfoCard } from "@/components/ui/info-card"
+import { FileJson, ScanText } from "lucide-react"
 import { useSchemaWizard } from "@/contexts/SchemaWizardContext"
 
 export function WizardStep1() {
@@ -13,34 +12,29 @@ export function WizardStep1() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-5">
       <div>
-        <h2 className="text-xl font-semibold text-slate-900">Choose How to Create Schema</h2>
-        <p className="text-sm text-slate-600 mt-1">Pick the starting method that fits your workflow.</p>
+        <h2 className="text-xl font-semibold text-slate-900">Create Schema</h2>
       </div>
 
-      <InfoCard type="tip" dismissible>
-        <strong>Tip:</strong> Use AI-Assisted mode — upload a document and AI will suggest schema fields automatically.
-      </InfoCard>
-
-      <div className="grid gap-4">
+      <div className="grid gap-3">
         {/* AI-Assisted */}
         <button
           onClick={() => handleSelect("ai")}
-          className="relative text-left border-2 rounded-lg p-6 transition-all border-purple-200 bg-purple-50 hover:border-purple-300 hover:shadow-md"
+          className="relative text-left border rounded-lg p-5 transition-colors border-blue-200 bg-blue-50 hover:border-blue-400"
         >
           <div className="absolute top-4 right-4">
-            <span className="inline-flex items-center px-3 py-1 rounded-full text-xs font-medium bg-green-100 text-green-800">
-              Recommended
+              <span className="inline-flex items-center px-2 py-1 rounded text-xs font-medium bg-blue-100 text-blue-700">
+                Suggested
             </span>
           </div>
           <div className="flex items-start gap-4">
-            <div className="p-3 rounded-lg bg-purple-100">
-              <Wand2 className="h-6 w-6 text-purple-600" />
+            <div className="p-2 rounded-md bg-blue-100">
+              <ScanText className="h-5 w-5 text-blue-700" />
             </div>
             <div className="flex-1">
-              <h3 className="font-semibold text-slate-900 text-lg">AI-Assisted</h3>
-              <p className="text-slate-600 mt-1">Upload a sample document and let AI generate schema fields automatically</p>
+              <h3 className="font-semibold text-slate-900">Upload sample document</h3>
+              <p className="text-sm text-slate-600 mt-1">Generate editable fields from a PDF or image.</p>
             </div>
           </div>
         </button>
@@ -48,15 +42,15 @@ export function WizardStep1() {
         {/* Import Schema */}
         <button
           onClick={() => handleSelect("import")}
-          className="relative text-left border-2 rounded-lg p-6 transition-all border-slate-200 bg-white hover:border-slate-300 hover:shadow-md"
+          className="relative text-left border rounded-lg p-5 transition-colors border-slate-200 bg-white hover:border-slate-400"
         >
           <div className="flex items-start gap-4">
-            <div className="p-3 rounded-lg bg-slate-100">
-              <FileJson className="h-6 w-6 text-slate-600" />
+            <div className="p-2 rounded-md bg-slate-100">
+              <FileJson className="h-5 w-5 text-slate-600" />
             </div>
             <div className="flex-1">
-              <h3 className="font-semibold text-slate-900 text-lg">Import Schema</h3>
-              <p className="text-slate-600 mt-1">Upload a JSON Schema file or paste JSON to import and validate</p>
+              <h3 className="font-semibold text-slate-900">Import JSON schema</h3>
+              <p className="text-sm text-slate-600 mt-1">Upload or paste an existing JSON schema.</p>
             </div>
           </div>
         </button>

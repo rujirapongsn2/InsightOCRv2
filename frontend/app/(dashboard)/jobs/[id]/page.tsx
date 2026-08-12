@@ -3,10 +3,9 @@
 import { useEffect, useState, useRef, useMemo } from "react"
 import { useParams, useRouter } from "next/navigation"
 import Link from "next/link"
-import { ArrowLeft, Upload, FileText, Loader2, Eye, X, Trash2, AlertTriangle, Bot, ChevronDown, Pencil, Check, Plug, Workflow, Cloud, Send } from "lucide-react"
+import { ArrowLeft, Upload, FileText, Loader2, Eye, X, Trash2, AlertTriangle, Bot, ChevronDown, Pencil, Check, Plug, Workflow, Cloud, Send, Braces } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Modal } from "@/components/ui/modal"
-import { Textarea } from "@/components/ui/textarea"
 import { Input } from "@/components/ui/input"
 import dynamic from "next/dynamic"
 import { getApiBaseUrl } from "@/lib/api"
@@ -33,26 +32,42 @@ interface Job {
     user_id?: string
 }
 
+const anyDocImageMimeTypes = new Set([
+    "image/bmp",
+    "image/jpeg",
+    "image/jpg",
+    "image/png",
+    "image/tiff",
+    "image/webp",
+])
+const anyDocImageExtensions = ["bmp", "jpeg", "jpg", "png", "tif", "tiff", "webp"]
+const previewImageExtensions = new Set([...anyDocImageExtensions, "gif"])
 interface Document {
     id: string
     filename: string
     status: string
+    mime_type?: string
     schema_id?: string | null
     extracted_data?: Record<string, any> | Record<string, any>[]
     reviewed_data?: Record<string, any> | Record<string, any>[]
     ocr_text?: string
     uploaded_at?: string
     processing_error?: string
+    extraction_metadata?: {
+        pipeline?: string
+        source?: "image"
+        text_layer_pages?: number[]
+        tesseract_pages?: number[]
+        softnix_ocr_pages?: number[]
+        fallback_pages?: number[]
+        legacy_fallback?: { reason?: string }
+        mapping?: "not_requested" | "pending" | "deferred" | {
+            status?: "completed" | "failed"
+            schema?: string
+            reason?: string
+        }
+    }
 }
-type ExtractedEntry = Record<string, any>
-type FieldPathSegment = string | number
-
-interface EditableField {
-    path: FieldPathSegment[]
-    label: string
-    value: any
-}
-
 type IntegrationType = "api" | "workflow" | "llm" | "softnix_genai" | "gdrive" | "onedrive"
 
 interface IntegrationConfig {
@@ -83,6 +98,7 @@ interface Integration {
 interface Schema {
     id: string
     name: string
+    document_type: string
     fields: Array<{
         name: string
         type: string
@@ -105,7 +121,11 @@ export default function JobDetailPage() {
     const [docProgress, setDocProgress] = useState<Record<string, { percent: number; stage: string }>>({})
     const [reviewDoc, setReviewDoc] = useState<Document | null>(null)
     const [editedOcrText, setEditedOcrText] = useState("")
-    const [editedData, setEditedData] = useState<ExtractedEntry[]>([])
+    const [editedStructuredData, setEditedStructuredData] = useState<Record<string, any> | Record<string, any>[] | null>(null)
+    const [arrayDrafts, setArrayDrafts] = useState<Record<string, string>>({})
+    const [structuredDataTab, setStructuredDataTab] = useState<"fields" | "advanced">("fields")
+    const [structuredJsonDraft, setStructuredJsonDraft] = useState("{}")
+    const [structuredJsonError, setStructuredJsonError] = useState<string | null>(null)
     const fileInputRef = useRef<HTMLInputElement>(null)
     const pollingIntervalsRef = useRef<Map<string, AbortController>>(new Map())
     const [showIntegrationModal, setShowIntegrationModal] = useState(false)
@@ -346,11 +366,16 @@ export default function JobDetailPage() {
     const handleSchemaChange = (docId: string, schemaId: string) => {
         const nextSchemaId = schemaId === "auto" ? null : schemaId
         setDocuments(prev => prev.map(doc =>
-            doc.id === docId ? { ...doc, schema_id: nextSchemaId } : doc
+            doc.id === docId ? {
+                ...doc,
+                schema_id: nextSchemaId,
+            } : doc
         ))
     }
 
-    const MAX_POLL_MS = 35 * 60 * 1000  // 35 minutes — matches backend hard cap
+    // AnyDoc may use the backend's 20-minute document budget. Keep observing
+    // long enough for its OCR fallback and avoid clearing a live job early.
+    const MAX_POLL_MS = 25 * 60 * 1000
 
     const startPolling = (docId: string) => {
         const token = typeof window !== "undefined" ? localStorage.getItem("token") : null
@@ -445,7 +470,9 @@ export default function JobDetailPage() {
                     "Content-Type": "application/json",
                     ...(token ? { Authorization: `Bearer ${token}` } : {})
                 },
-                body: JSON.stringify({ schema_id: doc.schema_id || null })
+                body: JSON.stringify({
+                    schema_id: doc.schema_id || null,
+                })
             })
 
             if (!res.ok) {
@@ -600,134 +627,102 @@ export default function JobDetailPage() {
 
     const canDeleteJob = user && job && (user.is_superuser || user.role === "admin" || user.id === job.user_id)
     const canEditJob = canDeleteJob
+    const reviewSchema = reviewDoc?.schema_id
+        ? schemas.find((schema) => schema.id === reviewDoc.schema_id)
+        : undefined
+    const reviewMappingFailed = Boolean(
+        reviewDoc?.extraction_metadata?.mapping
+        && typeof reviewDoc.extraction_metadata.mapping !== "string"
+        && reviewDoc.extraction_metadata.mapping.status === "failed"
+    )
 
-    const getSchemaSourceLabel = (doc: Document) => {
-        if (!doc.schema_id) return "auto"
-        const selectedSchema = schemas.find((schema) => schema.id === doc.schema_id)
-        return selectedSchema ? selectedSchema.name : "selected schema"
+    const updateStructuredField = (fieldName: string, value: unknown) => {
+        setEditedStructuredData((previous) => ({
+            ...(previous && !Array.isArray(previous) ? previous : {}),
+            [fieldName]: value,
+        }))
     }
 
-    const normalizeExtractedData = (data: unknown): ExtractedEntry[] => {
-        if (!data) return []
-
-        // Handle 'answer' wrapper from some API responses
-        if (typeof data === "object" && data !== null && 'answer' in data) {
-            console.log("[normalizeExtractedData] Unwrapping 'answer' field")
-            return normalizeExtractedData((data as any).answer)
-        }
-
-        // Handle 'structured_output' wrapper
-        if (typeof data === "object" && data !== null && 'structured_output' in data) {
-            console.log("[normalizeExtractedData] Unwrapping 'structured_output' field")
-            return normalizeExtractedData((data as any).structured_output)
-        }
-
-        // Handle API structured wrapper with metadata + data payload
-        if (
-            typeof data === "object" &&
-            data !== null &&
-            'data' in data &&
-            (
-                'schema_source' in data ||
-                'success' in data ||
-                'schema' in data ||
-                'structure_model' in data
-            )
-        ) {
-            console.log("[normalizeExtractedData] Unwrapping structured metadata envelope")
-            return normalizeExtractedData((data as any).data)
-        }
-
-        // Handle 'data' wrapper
-        if (typeof data === "object" && data !== null && 'data' in data && Object.keys(data).length === 1) {
-            console.log("[normalizeExtractedData] Unwrapping 'data' field")
-            return normalizeExtractedData((data as any).data)
-        }
-
-        if (Array.isArray(data)) {
-            return data
-                .filter((entry) => entry && typeof entry === "object" && !Array.isArray(entry) && Object.keys(entry).length > 0)
-                .map((entry) => entry as ExtractedEntry)
-        }
-
-        if (typeof data === "string") {
-            try {
-                const parsed = JSON.parse(data)
-                return normalizeExtractedData(parsed)
-            } catch {
-                return [{ extracted_text: data }]
+    const parseStructuredJsonDraft = (): Record<string, any> | Record<string, any>[] | null => {
+        try {
+            const parsed = JSON.parse(structuredJsonDraft)
+            if (!parsed || typeof parsed !== "object") {
+                throw new Error("Structured Data must be a JSON object or array")
             }
+            setStructuredJsonError(null)
+            return parsed
+        } catch (error) {
+            setStructuredJsonError(error instanceof Error ? error.message : "Invalid JSON")
+            return null
         }
+    }
 
-        if (typeof data === "object") {
-            if (Object.keys(data as object).length === 0) {
-                return []
+    const handleStructuredDataTabChange = (nextTab: "fields" | "advanced") => {
+        if (nextTab === "fields" && structuredDataTab === "advanced") {
+            const parsed = parseStructuredJsonDraft()
+            if (!parsed) return
+            setEditedStructuredData(parsed)
+            setArrayDrafts({})
+        }
+        if (nextTab === "advanced") {
+            let nextData: Record<string, any> | Record<string, any>[] = editedStructuredData || {}
+            if (!Array.isArray(nextData) && Object.keys(arrayDrafts).length > 0) {
+                nextData = { ...nextData }
+                for (const [fieldName, draft] of Object.entries(arrayDrafts)) {
+                    try {
+                        nextData[fieldName] = JSON.parse(draft)
+                    } catch {
+                        setStructuredJsonError(`The ${fieldName} list must be valid JSON before opening Advanced JSON`)
+                        return
+                    }
+                }
+                setEditedStructuredData(nextData)
+                setArrayDrafts({})
             }
-            return [data as ExtractedEntry]
+            setStructuredJsonDraft(JSON.stringify(nextData, null, 2))
+            setStructuredJsonError(null)
         }
-
-        return []
-    }
-
-    const formatFieldPathLabel = (path: FieldPathSegment[]): string => {
-        return path.reduce<string>((acc, segment) => {
-            if (typeof segment === "number") {
-                return `${acc}[${segment}]`
-            }
-            return acc ? `${acc}.${segment}` : segment
-        }, "")
-    }
-
-    const collectEditableFields = (value: any, currentPath: FieldPathSegment[] = []): EditableField[] => {
-        if (Array.isArray(value)) {
-            return value.flatMap((item, idx) => collectEditableFields(item, [...currentPath, idx]))
-        }
-
-        if (value && typeof value === "object") {
-            return Object.entries(value).flatMap(([key, nestedValue]) =>
-                collectEditableFields(nestedValue, [...currentPath, key])
-            )
-        }
-
-        return [{
-            path: currentPath,
-            label: formatFieldPathLabel(currentPath),
-            value,
-        }]
-    }
-
-    const setValueAtPath = (source: any, path: FieldPathSegment[], nextValue: any): any => {
-        if (path.length === 0) {
-            return nextValue
-        }
-
-        const [head, ...tail] = path
-
-        if (Array.isArray(source)) {
-            const index = Number(head)
-            const cloned = [...source]
-            cloned[index] = setValueAtPath(cloned[index], tail, nextValue)
-            return cloned
-        }
-
-        const safeSource = source && typeof source === "object" ? source : {}
-        return {
-            ...safeSource,
-            [head]: setValueAtPath((safeSource as Record<string, any>)[String(head)], tail, nextValue),
-        }
+        setStructuredDataTab(nextTab)
     }
 
     const handleReview = (doc: Document) => {
         setReviewDoc(doc)
         setRejectConfirm(false)
         setEditedOcrText(doc.ocr_text || "")
-        // Normalize extracted data so multi-page/JSON-string responses display correctly
-        const normalizedData = normalizeExtractedData(doc.reviewed_data || doc.extracted_data)
-        setEditedData(normalizedData)
+        const structuredData = doc.reviewed_data || doc.extracted_data
+        setEditedStructuredData(
+            structuredData && typeof structuredData === "object"
+                ? structuredData
+                : null
+        )
+        setArrayDrafts({})
+        setStructuredDataTab("fields")
+        setStructuredJsonDraft(JSON.stringify(structuredData && typeof structuredData === "object" ? structuredData : {}, null, 2))
+        setStructuredJsonError(null)
     }
 
     const handleSaveReview = async () => {
         if (!reviewDoc) return
+
+        let reviewedData: Record<string, any> | Record<string, any>[] | undefined = editedStructuredData || undefined
+        if (structuredDataTab === "advanced") {
+            const parsed = parseStructuredJsonDraft()
+            if (!parsed) {
+                alert("Structured Data must be valid JSON before saving")
+                return
+            }
+            reviewedData = parsed
+        }
+        if (reviewedData) {
+            for (const [fieldName, draft] of Object.entries(arrayDrafts)) {
+                try {
+                    reviewedData = { ...reviewedData, [fieldName]: JSON.parse(draft) }
+                } catch {
+                    alert(`The ${fieldName} list must be valid JSON before saving`)
+                    return
+                }
+            }
+        }
 
         try {
             const token = typeof window !== "undefined" ? localStorage.getItem("token") : null
@@ -739,8 +734,8 @@ export default function JobDetailPage() {
                 },
                 body: JSON.stringify({
                     ocr_text: editedOcrText,
-                    extracted_data: editedData,
-                    status: "reviewed"
+                    status: "reviewed",
+                    ...(reviewedData !== undefined ? { reviewed_data: reviewedData } : {}),
                 })
             })
 
@@ -754,14 +749,6 @@ export default function JobDetailPage() {
             console.error("Save error", error)
             alert("Save error")
         }
-    }
-
-    const handleDataFieldChange = (index: number, fieldPath: FieldPathSegment[], value: string) => {
-        setEditedData(prev => {
-            const next = [...prev]
-            next[index] = setValueAtPath(next[index] || {}, fieldPath, value)
-            return next
-        })
     }
 
     const handleSendToIntegration = async () => {
@@ -1279,35 +1266,65 @@ export default function JobDetailPage() {
                                 {documents.map(doc => {
                                     const isProcessing = processingDocs.has(doc.id) || doc.status === "processing"
                                     const canReview = doc.status === "extraction_completed" || doc.status === "reviewed"
+                                    const pipeline = doc.extraction_metadata?.pipeline
 
                                     return (
                                         <div key={doc.id} className="p-4 border rounded-md bg-slate-50">
-                                            <div className="flex items-center gap-3 mb-3">
-                                                <FileText className="h-5 w-5 text-slate-500" />
-                                                <span className="font-medium text-sm flex-1">{doc.filename}</span>
-                                                {doc.processing_error && doc.status !== "failed" && (
-                                                    <span className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded-full bg-amber-50 text-amber-700 border border-amber-200" title={doc.processing_error}>
-                                                        <AlertTriangle className="h-3 w-3" />
-                                                        OCR Degraded
+                                            <div className="mb-3 flex items-center gap-3">
+                                                <FileText className="h-5 w-5 shrink-0 text-slate-500" />
+                                                <span className="min-w-0 flex-1 truncate text-sm font-medium">{doc.filename}</span>
+                                                <div className="flex shrink-0 items-center gap-2">
+                                                    {doc.processing_error && doc.status !== "failed" && (
+                                                        <span className="inline-flex items-center gap-1 rounded-full border border-amber-200 bg-amber-50 px-2 py-1 text-xs text-amber-700" title={doc.processing_error}>
+                                                            <AlertTriangle className="h-3 w-3" />
+                                                            {doc.extraction_metadata?.mapping && typeof doc.extraction_metadata.mapping !== "string" && doc.extraction_metadata.mapping.status === "failed"
+                                                                ? "Mapping failed"
+                                                                : "OCR degraded"}
+                                                        </span>
+                                                    )}
+                                                    <span className={`rounded-full border px-2.5 py-1 text-xs font-medium capitalize ${getStatusColor(doc.status)}`}>
+                                                        {doc.status.replace(/_/g, ' ')}
                                                     </span>
-                                                )}
-                                                <span className={`text-xs px-2.5 py-1 rounded-full border font-medium capitalize ${getStatusColor(doc.status)}`}>
-                                                    {doc.status.replace(/_/g, ' ')}
-                                                </span>
+                                                    {canReview && (
+                                                        <Button
+                                                            onClick={() => handleReview(doc)}
+                                                            size="sm"
+                                                            variant="outline"
+                                                            className="h-8"
+                                                        >
+                                                            <Eye className="mr-2 h-4 w-4" />
+                                                            Preview
+                                                        </Button>
+                                                    )}
+                                                </div>
                                             </div>
 
-                                            <div className="flex items-center gap-2">
-                                                <select
-                                                    className="flex h-9 w-full rounded-md border border-slate-200 bg-white px-3 py-1 text-sm"
-                                                    value={doc.schema_id || "auto"}
-                                                    onChange={(e) => handleSchemaChange(doc.id, e.target.value)}
-                                                    disabled={doc.status !== "uploaded"}
-                                                >
-                                                    <option value="auto">Auto (default)</option>
-                                                    {schemas.map(schema => (
-                                                        <option key={schema.id} value={schema.id}>{schema.name}</option>
-                                                    ))}
-                                                </select>
+                                            {pipeline && (
+                                                <div className="mb-3 flex flex-wrap items-center gap-2 text-xs">
+                                                    {pipeline === "anydoc_hybrid" && doc.extraction_metadata?.source === "image" && <span className="rounded-full bg-slate-100 px-2 py-1 font-medium text-slate-700">Image</span>}
+                                                    {pipeline === "anydoc_hybrid" && (doc.extraction_metadata?.text_layer_pages?.length ?? 0) > 0 && <span className="rounded-full bg-sky-50 px-2 py-1 font-medium text-sky-700">AnyDoc Text Layer</span>}
+                                                    {(doc.extraction_metadata?.tesseract_pages?.length ?? 0) > 0 && <span className="rounded-full bg-violet-50 px-2 py-1 font-medium text-violet-700">TesseractOCR</span>}
+                                                    {(doc.extraction_metadata?.softnix_ocr_pages?.length ?? 0) > 0 && <span className="rounded-full bg-blue-50 px-2 py-1 font-medium text-blue-700">Softnix OCR</span>}
+                                                    {(pipeline === "ocr_fallback" || doc.extraction_metadata?.fallback_pages?.length) ? <span className="rounded-full bg-amber-50 px-2 py-1 font-medium text-amber-700">OCR fallback</span> : null}
+                                                    {pipeline === "legacy_fallback" && <span className="rounded-full bg-amber-50 px-2 py-1 font-medium text-amber-700" title={doc.extraction_metadata?.legacy_fallback?.reason}>Legacy fallback</span>}
+                                                </div>
+                                            )}
+
+                                            <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_auto]">
+                                                <div className="min-w-0 space-y-1">
+                                                    <label className="text-xs font-medium text-slate-500">Schema</label>
+                                                    <select
+                                                        className="flex h-9 w-full rounded-md border border-slate-200 bg-white px-3 py-1 text-sm"
+                                                        value={doc.schema_id || "auto"}
+                                                        onChange={(e) => handleSchemaChange(doc.id, e.target.value)}
+                                                        disabled={doc.status !== "uploaded"}
+                                                    >
+                                                        <option value="auto">Auto (default)</option>
+                                                        {schemas.map(schema => (
+                                                            <option key={schema.id} value={schema.id}>{schema.name}</option>
+                                                        ))}
+                                                    </select>
+                                                </div>
 
                                                 {(doc.status === "uploaded" || doc.status === "queued" || doc.status === "failed") && (
                                                     <>
@@ -1340,16 +1357,6 @@ export default function JobDetailPage() {
                                                     </>
                                                 )}
 
-                                                {canReview && (
-                                                    <Button
-                                                        onClick={() => handleReview(doc)}
-                                                        size="sm"
-                                                        variant="outline"
-                                                    >
-                                                        <Eye className="mr-2 h-4 w-4" />
-                                                        Preview
-                                                    </Button>
-                                                )}
                                             </div>
 
                                             {/* Progress bar shown while processing */}
@@ -1390,10 +1397,10 @@ export default function JobDetailPage() {
             {/* Review Modal - Full Screen */}
             {reviewDoc && (
                 <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
-                    <div className="bg-white rounded-lg shadow-xl w-full h-full max-w-[95vw] max-h-[95vh] flex flex-col">
+                    <div className="bg-white rounded-lg shadow-xl w-full h-[calc(100dvh-2rem)] max-w-[min(96vw,1600px)] flex flex-col">
                         {/* Header */}
                         <div className="flex items-center justify-between px-6 py-4 border-b">
-                            <h2 className="text-xl font-semibold">Preview: {reviewDoc.filename}</h2>
+                            <h2 className="min-w-0 truncate text-xl font-semibold">Preview: {reviewDoc.filename}</h2>
                             <Button
                                 variant="ghost"
                                 size="icon"
@@ -1403,15 +1410,15 @@ export default function JobDetailPage() {
                             </Button>
                         </div>
 
-                        {/* Content - 2 Columns */}
-                        <div className="flex-1 overflow-hidden grid grid-cols-2 gap-4 p-4">
+                        {/* Content - document preview and a full-height extraction editor */}
+                        <div className="grid flex-1 min-h-0 grid-cols-1 gap-4 overflow-y-auto p-4 lg:grid-cols-[minmax(0,0.9fr)_minmax(34rem,1.1fr)] lg:overflow-hidden">
                             {/* Left Column - Document Viewer (PDF or Image) */}
-                            <div className="bg-slate-50 rounded-lg overflow-hidden">
+                            <div className="min-h-[22rem] overflow-hidden rounded-lg bg-slate-50 lg:min-h-0">
                                 {(() => {
                                     const fileExt = reviewDoc.filename.toLowerCase().split('.').pop() || ''
-                                    const imageExtensions = ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'tiff', 'webp']
+                                    const imageExtensions = previewImageExtensions
 
-                                    if (imageExtensions.includes(fileExt)) {
+                                    if (imageExtensions.has(fileExt) || reviewDoc.mime_type?.startsWith('image/')) {
                                         // Display Image
                                         return (
                                             <div className="h-full overflow-auto bg-slate-900 p-4">
@@ -1442,16 +1449,20 @@ export default function JobDetailPage() {
                                 })()}
                             </div>
 
-                            {/* Right Column - Editable Data */}
-                            <div className="flex flex-col space-y-4 overflow-y-auto pr-2">
+                            {/* Right Column - Editable extraction */}
+                            <div className="flex min-h-0 flex-col gap-4 lg:overflow-hidden">
                                 {/* AI Processing Warning Banner */}
                                 {reviewDoc.processing_error && (
-                                    <div className="flex items-start gap-3 p-4 rounded-lg border border-amber-300 bg-amber-50">
+                                    <div className="flex shrink-0 items-start gap-3 rounded-lg border border-amber-300 bg-amber-50 p-4">
                                         <AlertTriangle className="h-5 w-5 text-amber-600 flex-shrink-0 mt-0.5" />
                                         <div>
-                                            <p className="text-sm font-semibold text-amber-800">OCR Quality Warning</p>
-                                            <p className="text-xs text-amber-700 mt-1">
-                                                AI text enhancement failed during OCR processing. The extracted text may contain errors, resulting in incomplete or inaccurate data extraction.
+                                            <p className="text-sm font-semibold text-amber-800">
+                                                {reviewMappingFailed ? "Schema Mapping Warning" : "OCR Quality Warning"}
+                                            </p>
+                                            <p className="mt-1 text-xs text-amber-700">
+                                                {reviewMappingFailed
+                                                    ? "AI Extract is available, but Structured Data was not created."
+                                                    : "The extracted text may need review."}
                                             </p>
                                             <details className="mt-2">
                                                 <summary className="text-xs text-amber-600 cursor-pointer hover:underline">Show details</summary>
@@ -1462,59 +1473,126 @@ export default function JobDetailPage() {
                                 )}
 
                                 {/* OCR Text Section */}
-                                <div className="bg-white border rounded-lg p-4">
-                                    <label className="text-sm font-semibold mb-3 block text-slate-700">
+                                <div className="flex min-h-0 flex-1 flex-col rounded-lg border bg-white p-4">
+                                    <label className="mb-3 block text-sm font-semibold text-slate-700">
                                         AI Extract
                                     </label>
-                                    <p className="text-xs text-slate-500 mb-3">
-                                        Schema Source: {getSchemaSourceLabel(reviewDoc)}
-                                    </p>
-                                    <Textarea
+                                    <textarea
                                         value={editedOcrText}
                                         onChange={(e) => setEditedOcrText(e.target.value)}
-                                        className="h-48 font-mono text-xs resize-none"
+                                        aria-label="AI Extract"
+                                        className="min-h-[26rem] w-full flex-1 resize-y rounded-md border border-slate-200 bg-white px-3 py-2 font-mono text-sm leading-6 text-slate-900 outline-none transition-colors placeholder:text-slate-400 focus:border-blue-500 focus:ring-2 focus:ring-blue-100 lg:min-h-0 lg:resize-none"
                                         placeholder="AI extracted text..."
                                     />
                                 </div>
 
-                                {/* Structured Data Section */}
-                                <div className="bg-white border rounded-lg p-4 flex-1">
-                                    <label className="text-sm font-semibold mb-3 block text-slate-700">
-                                        Structured Data
-                                    </label>
-                                    <div className="space-y-3">
-                                        {editedData.length === 0 && reviewDoc?.processing_error ? (
-                                            <div className="text-sm text-amber-700 bg-amber-50 p-4 rounded border border-amber-200">
-                                                <p className="font-medium mb-2">⚠️ Extraction Issue Detected:</p>
-                                                <code className="text-xs break-all whitespace-pre-wrap">{reviewDoc.processing_error}</code>
+                                {reviewDoc.schema_id && (
+                                    <div className="flex min-h-0 flex-1 flex-col rounded-lg border bg-white p-4">
+                                        <div className="mb-3 flex items-center justify-between gap-3">
+                                            <label className="text-sm font-semibold text-slate-700">Structured Data</label>
+                                            <div className="inline-flex rounded-md border border-slate-200 bg-slate-50 p-0.5" role="tablist" aria-label="Structured Data view">
+                                                <button
+                                                    type="button"
+                                                    role="tab"
+                                                    aria-selected={structuredDataTab === "fields"}
+                                                    onClick={() => handleStructuredDataTabChange("fields")}
+                                                    className={`rounded px-2.5 py-1 text-xs font-medium transition-colors ${structuredDataTab === "fields" ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}
+                                                >
+                                                    Fields
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    role="tab"
+                                                    aria-selected={structuredDataTab === "advanced"}
+                                                    onClick={() => handleStructuredDataTabChange("advanced")}
+                                                    className={`inline-flex items-center gap-1 rounded px-2.5 py-1 text-xs font-medium transition-colors ${structuredDataTab === "advanced" ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}
+                                                >
+                                                    <Braces className="h-3.5 w-3.5" /> Advanced JSON
+                                                </button>
                                             </div>
-                                        ) : editedData.length === 0 ? (
-                                            <p className="text-sm text-slate-500 text-center py-8">
-                                                No structured data available
-                                            </p>
-                                        ) : (
-                                            editedData.map((entry, idx) => (
-                                                <div key={idx} className="border rounded-md p-3 space-y-2">
-                                                    <div className="text-xs font-semibold text-slate-500 uppercase">
-                                                        Record {idx + 1}
-                                                    </div>
-                                                    {collectEditableFields(entry).map((field) => (
-                                                        <div key={`${idx}-${field.label}`} className="space-y-1.5">
-                                                            <label className="text-xs font-mono font-medium text-slate-500">
-                                                                {field.label}
+                                        </div>
+                                        {structuredDataTab === "advanced" ? (
+                                            <div className="flex min-h-0 flex-1 flex-col">
+                                                <textarea
+                                                    value={structuredJsonDraft}
+                                                    onChange={(event) => {
+                                                        setStructuredJsonDraft(event.target.value)
+                                                        setStructuredJsonError(null)
+                                                    }}
+                                                    aria-label="Advanced Structured Data JSON"
+                                                    spellCheck={false}
+                                                    className="min-h-64 w-full flex-1 resize-y rounded-md border border-slate-200 bg-slate-950 px-3 py-2 font-mono text-xs leading-5 text-slate-100 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100 lg:min-h-0 lg:resize-none"
+                                                />
+                                                {structuredJsonError && <p className="mt-2 text-xs text-red-600">{structuredJsonError}</p>}
+                                            </div>
+                                        ) : reviewDoc.extraction_metadata?.mapping && typeof reviewDoc.extraction_metadata.mapping !== "string" && reviewDoc.extraction_metadata.mapping.status === "failed" ? (
+                                            <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                                                Mapping failed. Review the AI Extract or use Advanced JSON to enter the fields manually.
+                                            </div>
+                                        ) : reviewSchema && editedStructuredData && !Array.isArray(editedStructuredData) ? (
+                                            <div className="space-y-3 overflow-y-auto pr-1">
+                                                {reviewSchema.fields.map((field) => {
+                                                    const value = editedStructuredData[field.name]
+                                                    const label = field.required ? `${field.name} *` : field.name
+                                                    if (field.type === "boolean") {
+                                                        return (
+                                                            <label key={field.name} className="block text-sm font-medium text-slate-700">
+                                                                {label}
+                                                                <select
+                                                                    value={value === true ? "true" : value === false ? "false" : ""}
+                                                                    onChange={(event) => updateStructuredField(field.name, event.target.value === "" ? null : event.target.value === "true")}
+                                                                    className="mt-1.5 flex h-10 w-full rounded-md border border-slate-200 bg-white px-3 text-sm font-normal"
+                                                                >
+                                                                    <option value="">Not provided</option>
+                                                                    <option value="true">Yes</option>
+                                                                    <option value="false">No</option>
+                                                                </select>
                                                             </label>
+                                                        )
+                                                    }
+                                                    if (field.type === "array") {
+                                                        const draft = arrayDrafts[field.name] ?? JSON.stringify(value ?? [], null, 2)
+                                                        return (
+                                                            <label key={field.name} className="block text-sm font-medium text-slate-700">
+                                                                {label}
+                                                                <textarea
+                                                                    value={draft}
+                                                                    onChange={(event) => setArrayDrafts((previous) => ({ ...previous, [field.name]: event.target.value }))}
+                                                                    aria-label={field.name}
+                                                                    className="mt-1.5 min-h-28 w-full resize-y rounded-md border border-slate-200 bg-white px-3 py-2 font-mono text-xs font-normal leading-5"
+                                                                />
+                                                            </label>
+                                                        )
+                                                    }
+                                                    const stringValue = value === null || value === undefined ? "" : String(value)
+                                                    const inputType = field.type === "date" ? "date" : field.type === "number" || field.type === "currency" ? "number" : "text"
+                                                    return (
+                                                        <label key={field.name} className="block text-sm font-medium text-slate-700">
+                                                            {label}
                                                             <Input
-                                                                value={field.value === null || field.value === undefined ? "" : String(field.value)}
-                                                                onChange={(e) => handleDataFieldChange(idx, field.path, e.target.value)}
-                                                                className="font-medium"
+                                                                type={inputType}
+                                                                value={stringValue}
+                                                                onChange={(event) => {
+                                                                    const nextValue = event.target.value
+                                                                    updateStructuredField(
+                                                                        field.name,
+                                                                        (field.type === "number" || field.type === "currency") && nextValue !== ""
+                                                                            ? Number(nextValue)
+                                                                            : nextValue || null
+                                                                    )
+                                                                }}
+                                                                className="mt-1.5"
                                                             />
-                                                        </div>
-                                                    ))}
-                                                </div>
-                                            ))
+                                                        </label>
+                                                    )
+                                                })}
+                                            </div>
+                                        ) : (
+                                            <p className="text-sm text-slate-500">No structured fields were returned for this document.</p>
                                         )}
                                     </div>
-                                </div>
+                                )}
+
                             </div>
                         </div>
 

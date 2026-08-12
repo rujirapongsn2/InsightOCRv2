@@ -7,8 +7,10 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
+from starlette.concurrency import run_in_threadpool
 import requests
 from app.api import deps
+from app.db.session import SessionLocal
 from app.models.schema import DocumentSchema
 from app.models.document import Document
 from app.models.job import Job
@@ -17,12 +19,81 @@ from app.schemas.schema import DocumentSchema as DocumentSchemaSchema
 from app.schemas.schema import DocumentSchemaCreate, DocumentSchemaUpdate
 from app.models.user import User
 from app.services.ai_suggestion_service import AISuggestionService
-from app.services.ocr import process_ocr
 from app.services.schema_suggestion_service import SchemaSuggestionService
+from app.services.anydoc_pipeline import (
+    AnydocFallbackToLegacy,
+    AnydocTerminalError,
+    extract_schema_sample,
+)
+from app.services.extraction_profiles import validate_extraction_profile
+from app.core.config import settings
 from app.utils.activity_logger import log_activity, Actions
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+def _validate_suggestion_upload(file: UploadFile) -> None:
+    if not file.filename:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Filename is required")
+
+    extension = os.path.splitext(file.filename)[1].lower()
+    allowed_extensions = {
+        value.strip().lower()
+        for value in settings.ALLOWED_UPLOAD_EXTENSIONS.split(",")
+        if value.strip()
+    }
+    if extension not in allowed_extensions:
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail=f"File type '{extension or 'unknown'}' is not allowed",
+        )
+
+    file.file.seek(0, os.SEEK_END)
+    file_size = file.file.tell()
+    file.file.seek(0)
+    max_bytes = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
+    if file_size > max_bytes:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"File is too large. Maximum is {settings.MAX_UPLOAD_SIZE_MB} MB",
+        )
+    if file_size == 0:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Uploaded file is empty")
+
+
+def _ensure_valid_extraction_profile(document_type: str | None, profile: str | None) -> str:
+    try:
+        return validate_extraction_profile(document_type, profile)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+
+
+def _schema_update_values(schema_in: DocumentSchemaUpdate, schema: DocumentSchema) -> dict[str, Any]:
+    """Return normalized values for a schema update before writing them to the DB."""
+    effective_document_type = schema_in.document_type or schema.document_type
+    effective_profile = schema_in.extraction_profile or schema.extraction_profile or "anydoc_hybrid"
+    normalized_profile = _ensure_valid_extraction_profile(effective_document_type, effective_profile)
+
+    if hasattr(schema_in, "model_dump"):
+        values = schema_in.model_dump(exclude_unset=True)
+    else:  # pragma: no cover - compatibility with Pydantic v1
+        values = schema_in.dict(exclude_unset=True)
+
+    # A schema created before the extraction-profile migration may have a null
+    # value. Normalize it while saving, so the API never silently falls back.
+    values["extraction_profile"] = normalized_profile
+    if "fields" in values:
+        normalized_fields = []
+        for field in values["fields"] or []:
+            if hasattr(field, "model_dump"):
+                normalized_fields.append(field.model_dump())
+            elif hasattr(field, "dict"):  # pragma: no cover - Pydantic v1
+                normalized_fields.append(field.dict())
+            else:
+                normalized_fields.append(field)
+        values["fields"] = normalized_fields
+    return values
 
 def _normalize_role(role: str | None) -> str:
     if not role:
@@ -40,6 +111,25 @@ def _ensure_can_manage(schema: DocumentSchema, current_user: User) -> None:
         status_code=status.HTTP_403_FORBIDDEN,
         detail="Insufficient permissions to manage this schema.",
     )
+
+
+def _ensure_can_create_schema(current_user: User) -> None:
+    normalized = _normalize_role(current_user.role)
+    if current_user.is_superuser or normalized in {"admin", "manager"}:
+        return
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Insufficient permissions to create schema.",
+    )
+
+
+def _extract_schema_sample_in_worker(file_path: str):
+    """Run CPU and OCR work with a session owned by the worker thread."""
+    worker_db = SessionLocal()
+    try:
+        return extract_schema_sample(file_path, worker_db)
+    finally:
+        worker_db.close()
 
 @router.get("/", response_model=List[DocumentSchemaSchema])
 def read_schemas(
@@ -79,15 +169,18 @@ def create_schema(
     Create new schema.
     Only Admins and Managers (documents_admin) can create schemas.
     """
-    normalized = _normalize_role(current_user.role)
-    if not (current_user.is_superuser or normalized in ["admin", "manager"]):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient permissions to create schema.")
+    _ensure_can_create_schema(current_user)
 
+    extraction_profile = _ensure_valid_extraction_profile(
+        schema_in.document_type,
+        schema_in.extraction_profile,
+    )
     db_schema = DocumentSchema(
         name=schema_in.name,
         description=schema_in.description,
         document_type=schema_in.document_type,
         ocr_engine=schema_in.ocr_engine,
+        extraction_profile=extraction_profile,
         fields=[field.dict() for field in schema_in.fields], # Store as JSON
         created_by=current_user.id,
     )
@@ -118,35 +211,17 @@ async def suggest_schema_from_file(
 ) -> Any:
     """
     Suggest JSON schema fields from an uploaded document.
-    Uses configured schema_suggestion_endpoint + api_token from Settings.
+    AnyDoc reads text-layer documents locally. Scanned pages use TesseractOCR
+    and then the configured OCR fallback before the active AI provider suggests
+    editable fields.
     """
-    del current_user
+    _ensure_can_create_schema(current_user)
 
-    if not file.filename:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Filename is required")
+    _validate_suggestion_upload(file)
 
     file_bytes = await file.read()
     if not file_bytes:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Uploaded file is empty")
-
-    service = SchemaSuggestionService(db)
-    legacy_error: Exception | None = None
-    try:
-        result = service.suggest_from_file(
-            file_bytes=file_bytes,
-            filename=file.filename,
-            content_type=file.content_type,
-            document_type=document_type,
-        )
-        if result.get("suggested_fields"):
-            return result
-        legacy_error = ValueError("Schema suggestion API returned no fields")
-    except ValueError as exc:
-        legacy_error = exc
-    except Exception as exc:
-        legacy_error = exc
-
-    logger.warning("Legacy schema suggestion failed; falling back to OCR + AI provider: %s", legacy_error)
 
     suffix = os.path.splitext(file.filename)[1]
     tmp_path = ""
@@ -155,14 +230,13 @@ async def suggest_schema_from_file(
             tmp_file.write(file_bytes)
             tmp_path = tmp_file.name
 
-        ocr_result = process_ocr(tmp_path, db, filename=file.filename, mime_type=file.content_type)
-        ocr_content = _extract_ocr_content(ocr_result)
-        if not ocr_content:
+        extraction = await run_in_threadpool(_extract_schema_sample_in_worker, tmp_path)
+        if not extraction.markdown.strip():
             raise ValueError("No text could be extracted from the document")
 
         ai_service = AISuggestionService(db)
         suggestion = await ai_service.suggest_fields_from_ocr(
-            ocr_content=ocr_content,
+            ocr_content=extraction.markdown,
             document_type=document_type,
         )
 
@@ -185,46 +259,33 @@ async def suggest_schema_from_file(
             "schema": _fields_to_schema(suggested_fields),
             "suggested_fields": suggested_fields,
             "raw_result": {
-                "source": "ocr_ai_provider",
+                "source": "anydoc_schema_sample",
                 "provider_used": suggestion.provider_used,
                 "confidence_score": suggestion.confidence_score,
                 "document_preview": suggestion.document_preview,
-                "legacy_error": str(legacy_error) if legacy_error else None,
+                "extraction": {
+                    "pipeline": extraction.metadata.get("pipeline"),
+                    "parser": extraction.metadata.get("parser"),
+                    "page_count": extraction.metadata.get("page_count"),
+                    "page_sources": extraction.metadata.get("page_sources", []),
+                    "provider_counts": extraction.metadata.get("provider_counts", {}),
+                },
             },
         }
-    except ValueError as exc:
-        detail = str(exc)
-        if legacy_error:
-            detail = f"{detail} (legacy schema suggestion also failed: {legacy_error})"
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail)
+    except (AnydocFallbackToLegacy, AnydocTerminalError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
     except Exception as exc:
+        logger.exception("Schema suggestion failed")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Schema suggestion request failed: {str(exc)}",
-        )
+            detail="Schema suggestion request failed. Check the active AI provider and try again.",
+        ) from exc
     finally:
         if tmp_path:
             try:
                 os.unlink(tmp_path)
             except OSError:
                 logger.warning("Failed to remove temporary schema suggestion file: %s", tmp_path)
-
-
-def _extract_ocr_content(ocr_result: dict[str, Any]) -> str:
-    if ocr_result.get("status") != "success":
-        return ""
-
-    chunks: list[str] = []
-    pages = ocr_result.get("results", {}).get("pages", [])
-    for page in pages:
-        ai_processing = page.get("ai_processing") or {}
-        if ai_processing.get("success") and ai_processing.get("content"):
-            chunks.append(str(ai_processing["content"]))
-        elif page.get("ocr_text"):
-            chunks.append(str(page["ocr_text"]))
-
-    return "\n\n".join(chunk.strip() for chunk in chunks if chunk and chunk.strip())
-
 
 def _fields_to_schema(fields: list[dict[str, Any]]) -> dict[str, Any]:
     properties: dict[str, Any] = {}
@@ -435,17 +496,9 @@ def update_schema(
 
     _ensure_can_manage(schema, current_user)
 
-    for field, value in schema_in.dict(exclude_unset=True).items():
-        if field == "fields":
-            normalized_fields = []
-            for f in value or []:
-                if hasattr(f, "dict"):
-                    normalized_fields.append(f.dict())
-                else:
-                    normalized_fields.append(f)
-            setattr(schema, field, normalized_fields)
-        else:
-            setattr(schema, field, value)
+    update_values = _schema_update_values(schema_in, schema)
+    for field, value in update_values.items():
+        setattr(schema, field, value)
 
     db.add(schema)
     db.commit()
@@ -461,6 +514,12 @@ def update_schema(
         details={"schema_name": schema.name}
     )
 
+    logger.info(
+        "Updated schema %s: extraction_profile=%s document_type=%s",
+        schema.id,
+        schema.extraction_profile,
+        schema.document_type,
+    )
     return schema
 
 @router.delete("/{schema_id}", response_model=DocumentSchemaSchema)

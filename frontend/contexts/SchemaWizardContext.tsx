@@ -28,7 +28,8 @@ const initialSchemaData: SchemaData = {
   name: "",
   description: "",
   document_type: "invoice",
-  ocr_engine: "tesseract"
+  ocr_engine: "tesseract",
+  extraction_profile: "anydoc_hybrid"
 }
 
 const initialState: SchemaWizardState = {
@@ -155,6 +156,7 @@ export function SchemaWizardProvider({ children, onSaved }: { children: ReactNod
         description: state.schemaData.description,
         document_type: state.schemaData.document_type,
         ocr_engine: state.schemaData.ocr_engine || "tesseract",
+        extraction_profile: "anydoc_hybrid",
         fields: state.fields.map(({ id, ...field }) => {
           // For array type, ensure items is included in payload
           if (field.type === "array" && field.items) {

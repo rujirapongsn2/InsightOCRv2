@@ -1,8 +1,11 @@
 import requests
 import json
+import logging
 from sqlalchemy.orm import Session
 from app.models.setting import Setting
 from app.services.tls import get_verify_ssl
+
+logger = logging.getLogger(__name__)
 
 def extract_structure(context: str, schema_json: str, db: Session, prompt: str = "Please return the extracted information in JSON format that matches the schema.") -> dict:
     """
@@ -25,17 +28,18 @@ def extract_structure(context: str, schema_json: str, db: Session, prompt: str =
             "- API Token"
         )
     
-    if not setting.api_endpoint or not setting.api_token:
+    if not setting.api_token:
         raise ValueError(
             "API Endpoint and Token are required. Please configure them in /settings page."
         )
     
-    base_api_url = setting.api_endpoint
     api_key = setting.api_token
     verify_ssl = get_verify_ssl(setting, "structured extraction provider requests")
-    
-    # Replace /ai-process-file with /structured-output
-    structure_api_url = base_api_url.replace('/ai-process-file', '/structured-output')
+    structure_api_url = setting.structured_output_endpoint
+    if not structure_api_url and setting.api_endpoint:
+        structure_api_url = setting.api_endpoint.replace('/ai-process-file', '/structured-output')
+    if not structure_api_url:
+        raise ValueError("Structured Output Endpoint and API Token are required. Please configure them in Settings.")
 
     headers = {
         'accept': 'application/json',
@@ -54,15 +58,16 @@ def extract_structure(context: str, schema_json: str, db: Session, prompt: str =
             structure_api_url,
             headers=headers,
             data=data,
-            verify=verify_ssl
+            verify=verify_ssl,
+            timeout=120,
         )
         
         response.raise_for_status()
         return response.json()
 
     except requests.exceptions.RequestException as e:
-        print(f"Structure API Request failed: {e}")
+        logger.warning("Structured extraction request failed: %s", e)
         raise
     except Exception as e:
-        print(f"An error occurred during structure extraction: {e}")
+        logger.exception("Structured extraction failed: %s", e)
         raise

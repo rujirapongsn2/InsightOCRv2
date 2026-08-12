@@ -129,7 +129,10 @@ export function WizardStep2() {
         <select
           id="document-type"
           value={schemaData.document_type}
-          onChange={(e) => updateSchemaData({ document_type: e.target.value as DocumentType })}
+          onChange={(e) => {
+            const documentType = e.target.value as DocumentType
+            updateSchemaData({ document_type: documentType, extraction_profile: "anydoc_hybrid" })
+          }}
           className={`w-full px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 ${
             documentTypeErrors.some(e => e.severity === "error")
               ? "border-red-300 focus:ring-red-500"

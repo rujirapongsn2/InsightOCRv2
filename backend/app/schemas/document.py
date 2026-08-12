@@ -15,6 +15,7 @@ class DocumentCreate(DocumentBase):
 class DocumentUpdate(BaseModel):
     status: Optional[str] = None
     schema_id: Optional[UUID] = None
+    ocr_text: Optional[str] = None
     extracted_data: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]] = None
     reviewed_data: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]] = None
     review_decision: Optional[str] = None
@@ -30,6 +31,7 @@ class DocumentListItem(DocumentBase):
     schema_id: Optional[UUID] = None
     ocr_text: Optional[str] = None
     extracted_data: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]] = None
+    extraction_metadata: Optional[Dict[str, Any]] = None
     reviewed_data: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]] = None
     review_decision: Optional[str] = None
     reviewed_at: Optional[datetime] = None

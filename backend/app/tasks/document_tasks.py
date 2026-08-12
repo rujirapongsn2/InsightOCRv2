@@ -14,8 +14,15 @@ from app.core.config import settings
 from app.db.session import SessionLocal
 from app.models import Document, DocumentSchema as SchemaModel, Setting
 from app.services.storage import get_storage_service
+from app.services.structure import extract_structure
 from app.services.tls import get_verify_ssl
 from app.services.ocr_fallback import process_fallback_ocr, resolve_fallback_api_key
+from app.services.anydoc_pipeline import (
+    AnydocFallbackToLegacy,
+    AnydocTerminalError,
+    extract_anydoc_document,
+)
+from app.services.extraction_profiles import supports_anydoc_source, validate_extraction_profile
 from app.utils.activity_logger import log_activity, Actions
 from app.utils.job_logger import get_job_logger
 import requests
@@ -485,10 +492,19 @@ def build_schema_json(schema: SchemaModel | None) -> str:
         if not field_name:
             continue
 
-        properties[field_name] = map_field_type_to_json_schema(
+        field_schema = map_field_type_to_json_schema(
             field.get("type", "text"),
             field.get("description", ""),
         )
+        validation_rules = field.get("validation_rules") or {}
+        if isinstance(validation_rules, dict):
+            if "min" in validation_rules:
+                field_schema["minimum"] = validation_rules["min"]
+            if "max" in validation_rules:
+                field_schema["maximum"] = validation_rules["max"]
+            if "pattern" in validation_rules:
+                field_schema["pattern"] = validation_rules["pattern"]
+        properties[field_name] = field_schema
         if field.get("required"):
             required_fields.append(field_name)
 
@@ -499,6 +515,145 @@ def build_schema_json(schema: SchemaModel | None) -> str:
     }
 
     return json.dumps(json_schema)
+
+
+def _normalize_schema_value(value: Any, field_schema: dict[str, Any], field_name: str) -> Any:
+    """Validate and normalize a provider value to the Schema field type."""
+    expected_type = field_schema.get("type", "string")
+    if value is None:
+        return None
+
+    if expected_type == "string":
+        if not isinstance(value, str):
+            raise ValueError(f"Field '{field_name}' must be text")
+        if field_schema.get("format") == "date":
+            try:
+                datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError as exc:
+                raise ValueError(f"Field '{field_name}' must use ISO date format") from exc
+        pattern = field_schema.get("pattern")
+        if pattern and not re.fullmatch(str(pattern), value):
+            raise ValueError(f"Field '{field_name}' does not match its validation rule")
+        return value
+
+    if expected_type == "number":
+        if isinstance(value, bool):
+            raise ValueError(f"Field '{field_name}' must be a number")
+        if isinstance(value, str):
+            try:
+                value = float(value.replace(",", "").strip())
+            except ValueError as exc:
+                raise ValueError(f"Field '{field_name}' must be a number") from exc
+        if not isinstance(value, (int, float)):
+            raise ValueError(f"Field '{field_name}' must be a number")
+        if "minimum" in field_schema and value < field_schema["minimum"]:
+            raise ValueError(f"Field '{field_name}' is below its minimum value")
+        if "maximum" in field_schema and value > field_schema["maximum"]:
+            raise ValueError(f"Field '{field_name}' exceeds its maximum value")
+        return value
+
+    if expected_type == "boolean":
+        if not isinstance(value, bool):
+            raise ValueError(f"Field '{field_name}' must be true or false")
+        return value
+
+    if expected_type == "array":
+        if not isinstance(value, list):
+            raise ValueError(f"Field '{field_name}' must be a list")
+        return value
+
+    raise ValueError(f"Field '{field_name}' has unsupported type '{expected_type}'")
+
+
+def validate_mapped_schema_fields(mapped: Any, schema_payload: dict[str, Any]) -> dict[str, Any]:
+    """Reject provider output that is not a faithful instance of the selected Schema."""
+    if not isinstance(mapped, dict):
+        raise ValueError("Structured output must be a JSON object")
+
+    properties = schema_payload.get("properties") or {}
+    unexpected_fields = set(mapped) - set(properties)
+    if unexpected_fields:
+        raise ValueError(
+            "Structured output contains fields outside the selected schema: "
+            + ", ".join(sorted(unexpected_fields))
+        )
+
+    required_fields = schema_payload.get("required") or []
+    missing_fields = [field for field in required_fields if mapped.get(field) in (None, "", [], {})]
+    if missing_fields:
+        raise ValueError("Structured output is missing required fields: " + ", ".join(missing_fields))
+
+    return {
+        field_name: _normalize_schema_value(value, properties[field_name], field_name)
+        for field_name, value in mapped.items()
+    }
+
+
+def map_anydoc_schema_fields(
+    markdown: str,
+    schema: SchemaModel | None,
+    db: Any,
+) -> Any:
+    """Map a completed AnyDoc extraction only when the user selected a Schema."""
+    if not schema:
+        return None
+
+    schema_json = build_schema_json(schema)
+    schema_payload = json.loads(schema_json)
+    if not schema_payload.get("properties"):
+        raise ValueError(f"Selected schema '{schema.name}' has no extraction fields")
+
+    result = extract_structure(
+        markdown,
+        schema_json,
+        db,
+        prompt=(
+            "Extract only values supported by the supplied JSON Schema. "
+            "Return valid JSON and do not invent values that are not present in the document."
+        ),
+    )
+    mapped = parse_extracted_json(result)
+    if mapped in (None, {}, []):
+        raise ValueError("Structured output provider returned no mapped fields")
+    return validate_mapped_schema_fields(mapped, schema_payload)
+
+
+def apply_schema_mapping(
+    document: Document,
+    schema: SchemaModel | None,
+    db: Any,
+    extraction_metadata: dict[str, Any],
+) -> str | None:
+    """Apply selected Schema mapping after any successful text extraction route."""
+    if not schema:
+        document.extracted_data = None
+        extraction_metadata["mapping"] = "not_requested"
+        return None
+
+    try:
+        document.extracted_data = map_anydoc_schema_fields(document.ocr_text or "", schema, db)
+        extraction_metadata["mapping"] = {
+            "status": "completed",
+            "schema": schema.name,
+            "provider": "structured_output",
+        }
+        return None
+    except Exception as exc:
+        document.extracted_data = None
+        mapping_error = str(exc)
+        extraction_metadata["mapping"] = {
+            "status": "failed",
+            "schema": schema.name,
+            "provider": "structured_output",
+            "reason": mapping_error,
+        }
+        logger.warning(
+            "Structured mapping failed for %s with schema %s: %s",
+            document.filename,
+            schema.name,
+            mapping_error,
+        )
+        return mapping_error
 
 
 def extract_job_id(payload: dict[str, Any]) -> str | None:
@@ -668,8 +823,31 @@ def extract_structured_data(result_payload: dict[str, Any]) -> Any:
     return None
 
 
+def should_attempt_ocr_fallback(
+    *,
+    fallback_eligible: bool,
+    document: Document | None,
+    setting: Setting | None,
+    api_key: str,
+) -> bool:
+    """Return whether a Softnix OCR failure may use the cloud fallback."""
+    return bool(
+        fallback_eligible
+        and document
+        and setting
+        and setting.ocr_fallback_enabled
+        and api_key
+        and document.status in {"queued", "processing"}
+    )
+
+
 @celery_app.task(bind=True, max_retries=3)
-def process_document_task(self, document_id: str, schema_id: str | None = None):
+def process_document_task(
+    self,
+    document_id: str,
+    schema_id: str | None = None,
+    requested_extraction_profile: str | None = None,
+):
     """
     Background task to process a document through external AI processing API.
     
@@ -678,6 +856,10 @@ def process_document_task(self, document_id: str, schema_id: str | None = None):
         schema_id: UUID of selected schema, or None for Auto mode
     """
     db = SessionLocal()
+    # Only errors raised while the legacy Softnix OCR provider is in flight may
+    # be recovered by the external OCR fallback. Keep unrelated task failures
+    # (database, storage, activity logging) from exporting a document again.
+    fallback_eligible = False
 
     try:
         # Atomic claim: only a "queued" document may start processing. A
@@ -722,18 +904,31 @@ def process_document_task(self, document_id: str, schema_id: str | None = None):
             raise ValueError("Settings not configured. Please configure OCR endpoint and API token in Settings.")
 
         ocr_endpoint = setting.ocr_endpoint or setting.api_endpoint
-        if not ocr_endpoint or not setting.api_token:
-            raise ValueError("OCR Processing Endpoint and API token are required in Settings.")
-
-        verify_ssl = get_verify_ssl(setting, "document processing provider requests")
-        ocr_engine = setting.ocr_engine if setting.ocr_engine and setting.ocr_engine != "default" else "tesseract"
-        model = "" if not setting.model or setting.model == "default" else setting.model
-
         schema = None
         if schema_id:
             schema = db.query(SchemaModel).filter(SchemaModel.id == schema_id).first()
             if not schema:
                 raise ValueError("Selected schema not found")
+
+        try:
+            extraction_profile = (
+                "anydoc_hybrid"
+                if supports_anydoc_source(document.filename, document.mime_type)
+                else "legacy"
+            )
+            if requested_extraction_profile == "anydoc_hybrid":
+                extraction_profile = validate_extraction_profile(
+                    getattr(schema, "document_type", None),
+                    requested_extraction_profile,
+                )
+        except ValueError as exc:
+            raise ValueError(f"Invalid extraction pipeline for selected schema: {exc}") from exc
+        if extraction_profile != "anydoc_hybrid" and (not setting.api_token or not ocr_endpoint):
+            raise ValueError("Softnix OCR endpoint and API token are required in Settings.")
+
+        verify_ssl = get_verify_ssl(setting, "document processing provider requests")
+        ocr_engine = setting.ocr_engine if setting.ocr_engine and setting.ocr_engine != "default" else "tesseract"
+        model = "" if not setting.model or setting.model == "default" else setting.model
 
         schema_source = "auto" if not schema else f"schema:{schema.name}"
         job_logger.info(
@@ -745,10 +940,76 @@ def process_document_task(self, document_id: str, schema_id: str | None = None):
         db.add(document)
         db.commit()
 
-        json_schema_str = build_schema_json(schema)
-
         storage = get_storage_service()
         with storage.get_local_path(document.file_path) as local_file_path:
+            if extraction_profile == "anydoc_hybrid":
+                try:
+                    anydoc_result = extract_anydoc_document(local_file_path, db, schema)
+                    document.ocr_text = anydoc_result.markdown
+                    document.ocr_pages = anydoc_result.pages
+                    document.page_count = len(anydoc_result.pages)
+                    extraction_metadata = dict(anydoc_result.metadata or {})
+                    mapping_error = apply_schema_mapping(
+                        document,
+                        schema,
+                        db,
+                        extraction_metadata,
+                    )
+                    document.extraction_metadata = extraction_metadata
+                    document.status = "extraction_completed"
+                    document.processing_error = (
+                        f"Structured mapping failed: {mapping_error}"
+                        if mapping_error
+                        else None
+                    )
+                    document.processed_at = datetime.utcnow()
+                    db.add(document)
+                    db.commit()
+
+                    if document.job and document.job.user_id:
+                        log_activity(
+                            db=db,
+                            user_id=document.job.user_id,
+                            action=Actions.PROCESS_DOCUMENT,
+                            resource_type="document",
+                            resource_id=document.id,
+                            details={
+                                "job_name": document.job.name or f"Job-{str(document.job.id)[:8]}",
+                                "filename": document.filename,
+                                "extraction_status": "completed",
+                                "review_status": "pending",
+                                "schema_id": str(schema_id),
+                                "schema_source": schema_source,
+                                "pipeline": "anydoc_hybrid",
+                            },
+                        )
+                    job_logger.info("AnyDoc hybrid extraction completed for %s", document.filename)
+                    return {
+                        "status": document.status,
+                        "document_id": document_id,
+                        "extracted_data": document.extracted_data,
+                        "pipeline": "anydoc_hybrid",
+                    }
+                except AnydocFallbackToLegacy as anydoc_error:
+                    document.extraction_metadata = {
+                        "pipeline": "legacy_fallback",
+                        "legacy_fallback": {"reason": str(anydoc_error), "from": "anydoc_hybrid"},
+                    }
+                    db.add(document)
+                    db.commit()
+                    job_logger.warning("AnyDoc hybrid fell back to legacy for %s: %s", document.filename, anydoc_error)
+                except AnydocTerminalError as anydoc_error:
+                    document.status = "failed"
+                    document.processing_error = str(anydoc_error)
+                    document.extraction_metadata = {
+                        "pipeline": "anydoc_hybrid",
+                        "failure": {"reason": str(anydoc_error), "terminal": True},
+                    }
+                    db.add(document)
+                    db.commit()
+                    job_logger.error("AnyDoc hybrid failed for %s: %s", document.filename, anydoc_error)
+                    return {"status": "failed", "document_id": document_id, "error": str(anydoc_error)}
+
             headers = {
                 "accept": "application/json",
                 "Authorization": f"Bearer {setting.api_token}",
@@ -762,12 +1023,6 @@ def process_document_task(self, document_id: str, schema_id: str | None = None):
                 "callback_url": "",
                 "structure_model": "",
             }
-            if json_schema_str.strip():
-                data["json_schema"] = json_schema_str
-            else:
-                # For Auto mode, keep an explicit empty field to request auto structured output.
-                data["json_schema"] = ""
-
             upload_filename = document.filename or os.path.basename(local_file_path)
             content_type = document.mime_type or "application/octet-stream"
 
@@ -792,18 +1047,15 @@ def process_document_task(self, document_id: str, schema_id: str | None = None):
                     except Exception:
                         pass
 
-            # Simulated progress ticker: advances through stages while submit blocks
+            # The provider only reports real processing progress after it accepts
+            # the upload. Keep the upload indicator modest so the UI never implies
+            # that structured extraction is nearly complete before it has started.
             _stop_ticker = threading.Event()
             def _progress_ticker() -> None:
                 stages = [
                     (5,  "uploading"),
+                    (10, "uploading"),
                     (15, "uploading"),
-                    (25, "ocr"),
-                    (40, "ocr"),
-                    (55, "ai_processing"),
-                    (70, "ai_processing"),
-                    (82, "schema_generation"),
-                    (92, "structured_extraction"),
                 ]
                 for pct, stg in stages:
                     if _stop_ticker.wait(timeout=4.0):
@@ -812,10 +1064,11 @@ def process_document_task(self, document_id: str, schema_id: str | None = None):
 
             _set_progress(0, "queuing")
 
+            # Schema Mapping runs after OCR returns canonical text so legacy and
+            # AnyDoc routes share the same validation path.
             submit_variants = [data]
-            if not json_schema_str.strip():
-                submit_variants.append({k: v for k, v in data.items() if k != "json_schema"})
 
+            fallback_eligible = True
             _ticker_thread = threading.Thread(target=_progress_ticker, daemon=True)
             _ticker_thread.start()
 
@@ -855,18 +1108,12 @@ def process_document_task(self, document_id: str, schema_id: str | None = None):
                 try:
                     submit_response.raise_for_status()
                 except requests.HTTPError:
-                    response_text = submit_response.text.lower()
-                    can_retry = attempt_index < len(submit_variants)
-                    if can_retry and "invalid json schema" in response_text:
-                        job_logger.warning(
-                            "External submit rejected json_schema for Auto mode; retrying without json_schema field"
-                        )
-                        continue
                     raise
 
-                # Stop the progress ticker now that submit has returned
+                # Stop the upload ticker now that the provider has accepted the
+                # document. Completion progress comes from the job status below.
                 _stop_ticker.set()
-                _set_progress(95, "structured_extraction")
+                _set_progress(15, "processing")
 
                 submit_payload = submit_response.json()
                 external_job_id = extract_job_id(submit_payload)
@@ -874,13 +1121,6 @@ def process_document_task(self, document_id: str, schema_id: str | None = None):
                 job_logger.info(f"Submit payload keys: {list(submit_payload.keys()) if isinstance(submit_payload, dict) else type(submit_payload).__name__}; external_job_id={external_job_id}; status={submit_status}")
 
                 if not external_job_id and submit_status in failed_statuses:
-                    payload_text = json.dumps(submit_payload).lower()
-                    can_retry = attempt_index < len(submit_variants)
-                    if can_retry and "invalid json schema" in payload_text:
-                        job_logger.warning(
-                            "External submit failed due to invalid json_schema in Auto mode; retrying without json_schema"
-                        )
-                        continue
                     raise ValueError(f"External OCR submit failed: {submit_payload}")
 
                 final_result = submit_payload
@@ -891,154 +1131,82 @@ def process_document_task(self, document_id: str, schema_id: str | None = None):
 
             if external_job_id:
                 _ocr_base = ocr_endpoint.rstrip('/')
-                stream_url = f"{_ocr_base}/{external_job_id}/stream"
+                status_url = f"{_ocr_base}/{external_job_id}/status"
                 result_url = f"{_ocr_base}/{external_job_id}/result"
+                job_timeout = max(30, settings.OCR_EXTERNAL_JOB_TIMEOUT_SECONDS)
+                queue_timeout = max(10, settings.OCR_EXTERNAL_QUEUE_TIMEOUT_SECONDS)
+                poll_interval = max(1, settings.OCR_STATUS_POLL_INTERVAL_SECONDS)
+                request_timeout = max(5, settings.OCR_STATUS_REQUEST_TIMEOUT_SECONDS)
+                deadline = time.monotonic() + job_timeout
+                queued_since: float | None = None
+                completed = False
 
-                stream_completed = False
-                stream_failed = False
-                sse_idle_timeout = max(30, settings.OCR_SSE_IDLE_TIMEOUT_SECONDS)
-                last_sse_event_at = time.monotonic()
-                # headers has lowercase "accept" from submit; override with proper Accept for SSE
-                stream_headers = {k: v for k, v in headers.items() if k.lower() != "accept"}
-                stream_headers["Accept"] = "text/event-stream"
-
-                # Redis client for writing live progress (bypasses Celery state override)
-                try:
-                    from app.db.redis import get_redis_client
-                    _redis = get_redis_client()
-                    _redis_key = f"doc_progress:{document_id}"
-                except Exception:
-                    _redis = None
-                    _redis_key = None
-
-                job_logger.info(f"SSE stream starting: {stream_url}")
-                try:
-                    with requests.get(
-                        stream_url,
-                        headers=stream_headers,
-                        timeout=(30, sse_idle_timeout),
+                # Polling is deliberate. The upstream SSE endpoint can remain open
+                # without emitting an event, which previously left documents at a
+                # misleading 95% until Celery's 30-minute task limit intervened.
+                job_logger.info(
+                    "Polling external OCR job %s every %ss (deadline %ss)",
+                    external_job_id,
+                    poll_interval,
+                    job_timeout,
+                )
+                while time.monotonic() < deadline:
+                    remaining = max(1, int(deadline - time.monotonic()))
+                    status_response = requests.get(
+                        status_url,
+                        headers=headers,
+                        timeout=min(request_timeout, remaining),
                         verify=verify_ssl,
-                        stream=True,
-                    ) as stream_response:
-                        job_logger.info(f"SSE stream connected: HTTP {stream_response.status_code}")
-                        stream_response.raise_for_status()
-                        event_type = None
-                        data_lines: list[str] = []
-
-                        for raw_line in stream_response.iter_lines(decode_unicode=True):
-                            if time.monotonic() - last_sse_event_at > sse_idle_timeout:
-                                raise TimeoutError(
-                                    f"SSE stream idle for more than {sse_idle_timeout} seconds"
-                                )
-                            if raw_line.startswith("event:"):
-                                event_type = raw_line[6:].strip()
-                            elif raw_line.startswith("data:"):
-                                data_lines.append(raw_line[5:].strip())
-                            elif raw_line == "":
-                                if data_lines:
-                                    last_sse_event_at = time.monotonic()
-                                    raw_data = "\n".join(data_lines)
-                                    try:
-                                        event_obj = json.loads(raw_data)
-                                    except (json.JSONDecodeError, ValueError):
-                                        event_obj = {}
-
-                                    current_status = extract_status(event_obj) if event_obj else ""
-
-                                    # percent/stage may be at top-level OR nested in a "progress" dict
-                                    _prog_dict = event_obj.get("progress") if isinstance(event_obj, dict) else None
-                                    if isinstance(_prog_dict, dict):
-                                        _percent = _prog_dict.get("percent")
-                                        _stage   = _prog_dict.get("stage", "")
-                                        _message = _prog_dict.get("message", "")
-                                    else:
-                                        _percent = event_obj.get("percent") if isinstance(event_obj, dict) else None
-                                        _stage   = event_obj.get("stage", "") if isinstance(event_obj, dict) else ""
-                                        _message = event_obj.get("message", "") if isinstance(event_obj, dict) else ""
-
-                                    if _percent is not None and event_type == "progress":
-                                        _progress_data = json.dumps({
-                                            "percent": int(_percent),
-                                            "stage": _stage,
-                                            "message": _message,
-                                        })
-                                        if _redis and _redis_key:
-                                            try:
-                                                _redis.set(_redis_key, _progress_data, ex=1800)
-                                            except Exception:
-                                                pass
-                                        job_logger.info(
-                                            f"Stream progress: {_percent}% [{_stage}]"
-                                        )
-
-                                    if event_type == "completed" or current_status in {"completed", "success", "done"}:
-                                        stream_completed = True
-                                        break
-
-                                    if event_type == "error" or current_status in {"failed", "error", "cancelled", "canceled"}:
-                                        stream_failed = True
-                                        raise ValueError(f"External OCR processing failed: {event_obj}")
-
-                                event_type = None
-                                data_lines = []
-
-                except (
-                    requests.exceptions.ReadTimeout,
-                    requests.exceptions.ConnectionError,
-                ) as stream_err:
-                    job_logger.warning(
-                        f"SSE stream unavailable or idle after {sse_idle_timeout}s ({stream_err})"
                     )
-                    raise TimeoutError(
-                        f"SSE stream produced no event or progress for {sse_idle_timeout} seconds"
-                    ) from stream_err
-                except requests.exceptions.RequestException as stream_err:
-                    job_logger.warning(f"SSE stream failed ({stream_err}), falling back to polling")
-                    # Fallback: poll /status until done
-                    status_url = f"{ocr_endpoint.rstrip('/')}/{external_job_id}/status"
-                    for _ in range(600):
-                        status_response = requests.get(
-                            status_url, headers=headers, timeout=30, verify=verify_ssl,
+                    status_response.raise_for_status()
+                    status_payload = status_response.json()
+                    current_status = extract_status(status_payload)
+                    ext_progress = status_payload.get("progress") if isinstance(status_payload, dict) else None
+                    if isinstance(ext_progress, dict):
+                        percent = int(ext_progress.get("percent", 15) or 15)
+                        stage = str(ext_progress.get("stage") or "processing")
+                        message = str(ext_progress.get("message") or "")
+                        _set_progress(percent, stage)
+                        self.update_state(
+                            state="PROGRESS",
+                            meta={"percent": percent, "stage": stage, "message": message},
                         )
-                        status_response.raise_for_status()
-                        status_payload = status_response.json()
-                        current_status = extract_status(status_payload)
 
-                        ext_progress = status_payload.get("progress") if isinstance(status_payload, dict) else None
-                        if isinstance(ext_progress, dict):
-                            self.update_state(
-                                state="PROGRESS",
-                                meta={
-                                    "percent": ext_progress.get("percent", 0),
-                                    "stage": ext_progress.get("stage", ""),
-                                    "message": ext_progress.get("message", ""),
-                                },
+                    if current_status in {"queued", "queueing", "pending"}:
+                        queued_since = queued_since or time.monotonic()
+                        queue_wait = time.monotonic() - queued_since
+                        _set_progress(15, "queued")
+                        if queue_wait >= queue_timeout:
+                            raise TimeoutError(
+                                "External OCR job remained queued for more than "
+                                f"{queue_timeout} seconds"
                             )
-
-                        if current_status in {"completed", "success", "done"}:
-                            stream_completed = True
-                            break
-                        if current_status in {"failed", "error", "cancelled", "canceled"}:
-                            raise ValueError(f"External OCR processing failed: {status_payload}")
-                        time.sleep(2)
                     else:
-                        raise TimeoutError("Timeout waiting for external OCR processing result")
+                        queued_since = None
 
-                if not stream_completed and not stream_failed:
-                    raise TimeoutError("SSE stream ended without a completed event")
+                    if current_status in {"completed", "success", "done"}:
+                        completed = True
+                        break
+                    if current_status in failed_statuses:
+                        raise ValueError(f"External OCR processing failed: {status_payload}")
+                    time.sleep(min(poll_interval, max(0, deadline - time.monotonic())))
 
+                if not completed:
+                    raise TimeoutError(
+                        f"External OCR job did not complete within {job_timeout} seconds"
+                    )
+
+                remaining = max(1, int(deadline - time.monotonic()))
                 result_response = requests.get(
                     result_url,
                     headers=headers,
-                    timeout=60,
+                    timeout=min(60, remaining),
                     verify=verify_ssl,
                 )
                 result_response.raise_for_status()
                 final_result = result_response.json()
 
             ai_extract_text = extract_ai_text(final_result)
-            structured_data = extract_structured_data(final_result)
-
             pages = final_result.get("results", {}).get("pages")
             if not isinstance(pages, list):
                 pages = final_result.get("pages") if isinstance(final_result.get("pages"), list) else None
@@ -1059,20 +1227,27 @@ def process_document_task(self, document_id: str, schema_id: str | None = None):
                         ai_processing_errors.append(f"Page {page_no}: {ai_error}")
 
             document.ocr_text = ai_extract_text or ""
-            document.extracted_data = structured_data if structured_data not in ({}, []) else None
+            legacy_metadata = dict(document.extraction_metadata or {})
+            legacy_metadata.update({
+                "pipeline": "legacy_fallback" if legacy_metadata.get("legacy_fallback") else "legacy",
+                "schema_context": schema.name if schema else None,
+            })
+            mapping_error = apply_schema_mapping(document, schema, db, legacy_metadata)
+            document.extraction_metadata = legacy_metadata
             document.status = "extraction_completed"
-            if ai_processing_errors:
-                document.processing_error = "AI processing degraded: " + " | ".join(ai_processing_errors)
-            else:
-                document.processing_error = None
+            processing_errors = ai_processing_errors[:]
+            if mapping_error:
+                processing_errors.append(f"Structured mapping failed: {mapping_error}")
+            document.processing_error = " | ".join(processing_errors) if processing_errors else None
             document.processed_at = datetime.utcnow()
 
             db.add(document)
             db.commit()
+            fallback_eligible = False
 
             job_logger.info(
                 f"External OCR processing completed for {document.filename}; "
-                f"schema_source={schema_source}; extracted_records_type={type(document.extracted_data).__name__}"
+                f"schema_source={schema_source}; mapping={legacy_metadata['mapping']}"
             )
 
         # Log activity
@@ -1127,22 +1302,23 @@ def process_document_task(self, document_id: str, schema_id: str | None = None):
 
     except Exception as e:
         # Use the environment-configured fallback before Celery retries a
-        # transient primary OCR failure. The fallback is opt-in per settings.
+        # transient Softnix OCR failure. The fallback is opt-in per settings.
+        fallback_db = None
         try:
             fallback_db = SessionLocal()
             fallback_document = fallback_db.query(Document).filter(Document.id == document_id).first()
             fallback_setting = fallback_db.query(Setting).first()
             fallback_key, fallback_source = resolve_fallback_api_key(fallback_setting)
-            should_fallback = bool(
-                fallback_document
-                and fallback_setting
-                and fallback_setting.ocr_fallback_enabled
-                and fallback_key
+            should_fallback = should_attempt_ocr_fallback(
+                fallback_eligible=fallback_eligible,
+                document=fallback_document,
+                setting=fallback_setting,
+                api_key=fallback_key,
             )
             if should_fallback:
                 fallback_logger = get_job_logger(str(fallback_document.job_id)) if fallback_document.job_id else logger
                 fallback_logger.warning(
-                    f"Primary OCR failed for {fallback_document.filename}; trying configured fallback provider from {fallback_source}"
+                    f"Softnix OCR failed for {fallback_document.filename}; trying configured OCR fallback from {fallback_source}"
                 )
                 fallback_storage = get_storage_service()
                 with fallback_storage.get_local_path(fallback_document.file_path) as fallback_path:
@@ -1151,15 +1327,37 @@ def process_document_task(self, document_id: str, schema_id: str | None = None):
                         api_key=fallback_key,
                         filename=fallback_document.filename or os.path.basename(fallback_path),
                         mime_type=fallback_document.mime_type or "application/octet-stream",
-                        verify_ssl=True,
+                        verify_ssl=get_verify_ssl(fallback_setting, "OCR fallback requests"),
+                        request_timeout=settings.ANYDOC_FALLBACK_REQUEST_TIMEOUT_SECONDS,
                     )
                 fallback_pages = fallback_result["results"]["pages"]
                 fallback_document.ocr_pages = fallback_pages
                 fallback_document.page_count = len(fallback_pages)
                 fallback_document.ocr_text = extract_ai_text(fallback_result)
-                fallback_document.extracted_data = extract_structured_data(fallback_result) or None
+                fallback_schema = None
+                if fallback_document.schema_id:
+                    fallback_schema = (
+                        fallback_db.query(SchemaModel)
+                        .filter(SchemaModel.id == fallback_document.schema_id)
+                        .first()
+                    )
+                fallback_metadata = {
+                    "pipeline": "ocr_fallback",
+                    "provider": "ocr_fallback",
+                    "key_source": fallback_source,
+                    "recovered_primary_error": str(e),
+                }
+                mapping_error = apply_schema_mapping(
+                    fallback_document,
+                    fallback_schema,
+                    fallback_db,
+                    fallback_metadata,
+                )
+                fallback_document.extraction_metadata = fallback_metadata
                 fallback_document.status = "extraction_completed"
-                fallback_document.processing_error = None
+                fallback_document.processing_error = (
+                    f"Structured mapping failed: {mapping_error}" if mapping_error else None
+                )
                 fallback_document.processed_at = datetime.utcnow()
                 fallback_db.add(fallback_document)
                 fallback_db.commit()

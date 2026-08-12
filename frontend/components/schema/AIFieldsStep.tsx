@@ -24,8 +24,8 @@ export function AIFieldsStep() {
     // For Template/Scratch modes, skip this step and go straight to config
     if (!isAIMode) {
         return (
-            <div className="text-center py-12 space-y-4">
-                <p className="text-slate-600">Skip AI analysis and continue to schema details.</p>
+        <div className="text-center py-12 space-y-4">
+                <p className="text-slate-600">Continue to define fields manually.</p>
                 <Button onClick={nextStep} className="gap-2">
                     Continue <ArrowRight className="h-4 w-4" />
                 </Button>
@@ -107,27 +107,20 @@ export function AIFieldsStep() {
     const canProceed = fields.length > 0 && fields.every((f: SchemaField) => f.name.trim().length > 0)
 
     return (
-        <div className="space-y-6 max-w-4xl mx-auto py-8">
-            <div className="text-center space-y-2">
-                <div className="mx-auto w-12 h-12 bg-purple-100 text-purple-600 rounded-full flex items-center justify-center mb-4">
-                    <Sparkles className="h-6 w-6" />
-                </div>
-                <h2 className="text-2xl font-semibold text-slate-900">Upload Sample Document</h2>
-                <p className="text-slate-500">
-                    Analyze the uploaded file and generate editable JSON schema fields.
-                </p>
+        <div className="space-y-5 max-w-4xl mx-auto py-4">
+            <div>
+                <h2 className="text-xl font-semibold text-slate-900">Upload sample document</h2>
             </div>
 
-            <div className="bg-white border-2 border-dashed border-purple-200 rounded-xl p-8 transition-all hover:border-purple-400">
+            <div className="bg-white border border-dashed border-blue-300 rounded-lg p-6 transition-colors hover:border-blue-500">
                 <div className="flex flex-col items-center gap-4">
-                    <FileText className="h-10 w-10 text-purple-300" />
+                    <FileText className="h-9 w-9 text-blue-300" />
                     <div className="text-center">
                         <label className="cursor-pointer">
-                            <span className="text-purple-600 font-medium hover:text-purple-700">Browse files</span>
-                            <span className="text-slate-500"> or drag and drop</span>
+                            <span className="text-blue-700 font-medium hover:text-blue-800">Choose file</span>
                             <input type="file" className="hidden" accept=".pdf,.jpg,.jpeg,.png" onChange={handleFileSelect} disabled={isAnalyzing || analyzed} />
                         </label>
-                        <p className="text-xs text-slate-400 mt-1">PDF, JPG, PNG up to 10MB</p>
+                        <p className="text-xs text-slate-500 mt-1">PDF, JPG or PNG</p>
                     </div>
 
                     {file && (
@@ -147,15 +140,15 @@ export function AIFieldsStep() {
                     <Button
                         onClick={handleAnalyze}
                         disabled={!file || isAnalyzing || analyzed}
-                        className="w-full mt-2 bg-purple-600 hover:bg-purple-700 text-white shadow-sm"
+                        className="w-full mt-2 bg-blue-600 hover:bg-blue-700 text-white shadow-sm"
                         size="lg"
                     >
                         {isAnalyzing ? (
-                            <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> Analyzing document...</>
+                            <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> Reading document...</>
                         ) : analyzed ? (
-                            <><Sparkles className="h-4 w-4 mr-2" /> Analysis completed ({suggestedFieldsCount} fields)</>
+                            <><Sparkles className="h-4 w-4 mr-2" /> {suggestedFieldsCount} fields suggested</>
                         ) : (
-                            <><Sparkles className="h-4 w-4 mr-2" /> Analyze with AI</>
+                            <><Sparkles className="h-4 w-4 mr-2" /> Suggest fields</>
                         )}
                     </Button>
                 </div>
@@ -173,7 +166,6 @@ export function AIFieldsStep() {
                     <div className="flex items-center justify-between">
                         <div>
                             <h3 className="text-lg font-semibold text-slate-900">Suggested Fields</h3>
-                            <p className="text-sm text-slate-500">Edit suggested fields, or add new fields before continuing.</p>
                         </div>
                         <Button type="button" variant="outline" onClick={handleAddField}>
                             <Plus className="h-4 w-4 mr-1" /> Add Field
@@ -257,7 +249,7 @@ export function AIFieldsStep() {
 
             <div className="text-center pt-4">
                 <Button variant="ghost" className="text-slate-500" onClick={nextStep} disabled={isAnalyzing}>
-                    Skip AI analysis (create fields manually) <ArrowRight className="h-4 w-4 ml-1" />
+                    Enter fields manually <ArrowRight className="h-4 w-4 ml-1" />
                 </Button>
             </div>
         </div>
