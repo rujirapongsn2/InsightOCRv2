@@ -58,6 +58,11 @@ def validate_import_file(filename: str, size_bytes: Optional[int]) -> None:
         )
 
 
+def resolve_ingestion_schema_id(job: Job, schema_id: Optional[str]) -> Optional[str]:
+    """Prefer an explicit import override, then inherit the destination Job schema."""
+    return schema_id or (str(job.schema_id) if job.schema_id else None)
+
+
 def ingest_file_into_job(
     db: Session,
     job_id: str,
@@ -75,6 +80,7 @@ def ingest_file_into_job(
     job = db.query(Job).filter(Job.id == job_id).first()
     if not job:
         raise ValueError(f"Job not found: {job_id}")
+    effective_schema_id = resolve_ingestion_schema_id(job, schema_id)
 
     # Authoritative size/type guard: file_bytes is the real payload, so this
     # catches oversize files even when the source metadata reported no size.
@@ -97,7 +103,7 @@ def ingest_file_into_job(
         file_size=len(file_bytes),
         mime_type=mime_type,
         status="queued",
-        schema_id=schema_id or None,
+        schema_id=effective_schema_id,
         source_file_id=source_file_id or None,
     )
     db.add(document)
@@ -120,7 +126,7 @@ def ingest_file_into_job(
     try:
         task = process_document_task.delay(
             str(document.id),
-            str(schema_id) if schema_id else None,
+            effective_schema_id,
         )
     except Exception:
         # Broker unavailable — don't leave the document stuck in "queued".
@@ -137,4 +143,5 @@ def ingest_file_into_job(
         "document_id": str(document.id),
         "filename": filename,
         "task_id": task.id,
+        "schema_id": effective_schema_id,
     }

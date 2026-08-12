@@ -87,7 +87,7 @@ NODE_TYPES: List[Dict[str, Any]] = [
              "options": ["reviewed", "extracted", "ocr_text"], "default": "reviewed",
              "hint": "reviewed = ข้อมูลที่ตรวจแล้ว (แนะนำ), ocr_text = ข้อความดิบ"},
             {"name": "status", "label": "กรองตามสถานะเอกสาร", "type": "select",
-             "options": ["", "extraction_completed", "reviewed", "ocr_completed"], "required": False,
+             "options": ["", "extraction_completed", "reviewed"], "required": False,
              "hint": "เว้นว่าง = ไม่กรองเพิ่ม"},
             {"name": "only_completed", "label": "เฉพาะเอกสารที่ประมวลผลเสร็จ", "type": "boolean", "default": True},
             {"name": "limit", "label": "จำนวนเอกสารสูงสุด", "type": "number", "default": 50,
@@ -109,15 +109,16 @@ NODE_TYPES: List[Dict[str, Any]] = [
         "config_fields": [
             {"name": "job_id", "label": "เลือก Job", "type": "job_select", "required": True},
             {"name": "status", "label": "กรองตามสถานะเอกสาร", "type": "select",
-             "options": ["", "extraction_completed", "reviewed", "ocr_completed"], "required": False,
+             "options": ["", "extraction_completed", "reviewed"], "required": False,
              "hint": "เว้นว่าง = ไม่กรองเพิ่ม"},
+            {"name": "only_completed", "label": "เฉพาะเอกสารที่ประมวลผลเสร็จ", "type": "boolean", "default": True},
             {"name": "limit", "label": "จำนวนเอกสารสูงสุด", "type": "number", "default": 10,
              "placeholder": "10"},
             {"name": "include_ocr_text", "label": "รวมข้อความ OCR", "type": "boolean", "default": True},
         ],
         "output_fields": [
             {"name": "count", "label": "จำนวนเอกสาร"},
-            {"name": "documents", "label": "รายการเอกสาร (มี ocr_text)"},
+            {"name": "documents", "label": "รายการเอกสาร (มีข้อความและสถานะ extraction)"},
             {"name": "job_name", "label": "ชื่อ Job"},
         ],
     },
@@ -348,6 +349,8 @@ NODE_TYPES: List[Dict[str, Any]] = [
             {"name": "folder_id", "label": "Folder item id (เว้นว่าง = root)", "type": "text", "required": False,
              "placeholder": "root"},
             {"name": "job_id", "label": "นำเข้าไปยัง Job", "type": "job_select", "required": True},
+            {"name": "schema_id", "label": "Schema สำหรับประมวลผล", "type": "schema_select", "required": False,
+             "hint": "เว้นว่าง = ใช้ Schema ของ Job; เลือกเพื่อกำหนด Schema ให้เอกสารที่นำเข้า"},
             {"name": "name_filter", "label": "กรองชื่อไฟล์ (optional)", "type": "text", "required": False,
              "placeholder": ".pdf",
              "hint": "เว้นว่าง = ทุกไฟล์; ใส่นามสกุล/คำเช่น .pdf เพื่อกรอง"},
@@ -416,6 +419,33 @@ def _exec_trigger(db: Session, config: dict, context: dict, log: Callable[[str],
     return context.get("trigger") or {}
 
 
+def _workflow_document_extraction(document: Document) -> Dict[str, Any]:
+    """Return compact, non-sensitive extraction provenance for workflow steps."""
+    metadata = document.extraction_metadata or {}
+    mapping = metadata.get("mapping")
+    if isinstance(mapping, dict):
+        mapping = {
+            key: mapping[key]
+            for key in ("status", "schema", "provider")
+            if key in mapping
+        }
+
+    return {
+        "pipeline": metadata.get("pipeline") or metadata.get("requested_pipeline") or "unknown",
+        "source": metadata.get("source") or "document",
+        "provider_counts": metadata.get("provider_counts") or {},
+        "text_layer_pages": metadata.get("text_layer_pages") or [],
+        "ocr_pages": metadata.get("ocr_pages") or [],
+        "mapping": mapping or "not_requested",
+        "legacy_fallback": bool(metadata.get("legacy_fallback")),
+    }
+
+
+def _workflow_document_status(status: Any) -> Any:
+    """Keep saved workflows using the retired status compatible with AnyDoc."""
+    return "extraction_completed" if status == "ocr_completed" else status
+
+
 def _exec_document_source(db: Session, config: dict, context: dict, log: Callable[[str], None]) -> Any:
     job_id = config.get("job_id")
     if not job_id:
@@ -425,9 +455,11 @@ def _exec_document_source(db: Session, config: dict, context: dict, log: Callabl
         raise NodeExecutionError(f"Job not found: {job_id}")
 
     query = db.query(Document).filter(Document.job_id == job_id)
-    status = config.get("status")
+    status = _workflow_document_status(config.get("status"))
     if status:
         query = query.filter(Document.status == status)
+    elif config.get("only_completed", True):
+        query = query.filter(Document.status.in_(COMPLETED_DOC_STATUSES))
     limit = int(config.get("limit") or 10)
     docs = query.order_by(Document.uploaded_at.desc()).limit(limit).all()
     include_ocr = config.get("include_ocr_text", True)
@@ -440,6 +472,7 @@ def _exec_document_source(db: Session, config: dict, context: dict, log: Callabl
             "filename": d.filename,
             "status": d.status,
             "extracted_data": d.reviewed_data or d.extracted_data,
+            "extraction": _workflow_document_extraction(d),
         }
         if include_ocr:
             item["ocr_text"] = d.ocr_text
@@ -466,7 +499,7 @@ def _exec_job_source(db: Session, config: dict, context: dict, log: Callable[[st
         raise NodeExecutionError(f"Job not found: {job_id}")
 
     query = db.query(Document).filter(Document.job_id == job_id)
-    status = config.get("status")
+    status = _workflow_document_status(config.get("status"))
     if status:
         query = query.filter(Document.status == status)
     elif config.get("only_completed", True):
@@ -493,6 +526,7 @@ def _exec_job_source(db: Session, config: dict, context: dict, log: Callable[[st
             "filename": d.filename,
             "status": d.status,
             "data": data,
+            "extraction": _workflow_document_extraction(d),
         })
 
     return {
