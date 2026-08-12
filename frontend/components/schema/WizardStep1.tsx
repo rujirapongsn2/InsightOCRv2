@@ -1,12 +1,12 @@
 "use client"
 
-import { FileJson, ScanText } from "lucide-react"
+import { FileJson, ScanText, ScanLine } from "lucide-react"
 import { useSchemaWizard } from "@/contexts/SchemaWizardContext"
 
 export function WizardStep1() {
   const { setStartingPoint, setCurrentStep } = useSchemaWizard()
 
-  const handleSelect = (mode: "ai" | "import") => {
+  const handleSelect = (mode: "ai" | "fixed" | "import") => {
     setCurrentStep(1)
     setStartingPoint(mode)
   }
@@ -35,6 +35,21 @@ export function WizardStep1() {
             <div className="flex-1">
               <h3 className="font-semibold text-slate-900">Upload sample document</h3>
               <p className="text-sm text-slate-600 mt-1">Generate editable fields from a PDF or image.</p>
+            </div>
+          </div>
+        </button>
+
+        <button
+          onClick={() => handleSelect("fixed")}
+          className="relative text-left border rounded-lg p-5 transition-colors border-slate-200 bg-white hover:border-blue-400"
+        >
+          <div className="flex items-start gap-4">
+            <div className="p-2 rounded-md bg-emerald-50">
+              <ScanLine className="h-5 w-5 text-emerald-700" />
+            </div>
+            <div className="flex-1">
+              <h3 className="font-semibold text-slate-900">Fixed-position PDF</h3>
+              <p className="text-sm text-slate-600 mt-1">Draw fields for a stable form layout.</p>
             </div>
           </div>
         </button>

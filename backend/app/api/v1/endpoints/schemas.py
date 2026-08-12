@@ -1,9 +1,10 @@
 import logging
 import os
 import tempfile
+import json
 from typing import List, Any
 from urllib.parse import urlparse, urlencode
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, status
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
@@ -16,7 +17,7 @@ from app.models.document import Document
 from app.models.job import Job
 from app.models.setting import Setting
 from app.schemas.schema import DocumentSchema as DocumentSchemaSchema
-from app.schemas.schema import DocumentSchemaCreate, DocumentSchemaUpdate
+from app.schemas.schema import DocumentSchemaCreate, DocumentSchemaUpdate, SchemaField
 from app.models.user import User
 from app.services.ai_suggestion_service import AISuggestionService
 from app.services.schema_suggestion_service import SchemaSuggestionService
@@ -25,6 +26,7 @@ from app.services.anydoc_pipeline import (
     AnydocTerminalError,
     extract_schema_sample,
 )
+from app.services.anydoc_bbox import BboxLocatorError, extract_fixed_position_fields
 from app.services.extraction_profiles import validate_extraction_profile
 from app.core.config import settings
 from app.utils.activity_logger import log_activity, Actions
@@ -130,6 +132,11 @@ def _extract_schema_sample_in_worker(file_path: str):
         return extract_schema_sample(file_path, worker_db)
     finally:
         worker_db.close()
+
+
+def _extract_bbox_preview_in_worker(file_path: str, fields: list[dict[str, Any]]) -> tuple[dict[str, str], dict[str, Any]]:
+    """Evaluate BBox locators outside the async request loop."""
+    return extract_fixed_position_fields(file_path, fields)
 
 @router.get("/", response_model=List[DocumentSchemaSchema])
 def read_schemas(
@@ -286,6 +293,66 @@ async def suggest_schema_from_file(
                 os.unlink(tmp_path)
             except OSError:
                 logger.warning("Failed to remove temporary schema suggestion file: %s", tmp_path)
+
+
+@router.post("/preview-fixed-fields")
+async def preview_fixed_position_fields(
+    *,
+    file: UploadFile = File(...),
+    fields_json: str = Form(...),
+    current_user: User = Depends(deps.get_current_active_user),
+) -> Any:
+    """Read test values for fixed-position Schema fields from a sample file.
+
+    PDF pages are read from their text layer first.  A page without text is
+    rendered and read locally through TesseractOCR so the response always has
+    real coordinates rather than a guessed position from an external provider.
+    """
+    _ensure_can_create_schema(current_user)
+    _validate_suggestion_upload(file)
+    try:
+        raw_fields = json.loads(fields_json)
+        if not isinstance(raw_fields, list) or not raw_fields:
+            raise ValueError("At least one fixed-position field is required")
+        fields = []
+        for raw_field in raw_fields:
+            validated = SchemaField.model_validate(raw_field)
+            if not validated.locator:
+                raise ValueError("Each preview field must include a BBox locator")
+            fields.append(validated.model_dump())
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+
+    file_bytes = await file.read()
+    if not file_bytes:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Uploaded file is empty")
+
+    suffix = os.path.splitext(file.filename)[1]
+    tmp_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
+            tmp_file.write(file_bytes)
+            tmp_path = tmp_file.name
+        raw_values, evidence = await run_in_threadpool(_extract_bbox_preview_in_worker, tmp_path, fields)
+        values = {
+            name: str(evidence.get(name, {}).get("cleaned_text", raw_value))
+            for name, raw_value in raw_values.items()
+        }
+        return {
+            "values": values,
+            "raw_values": raw_values,
+            "evidence": evidence,
+            "coordinate_unit": "percent",
+            "coordinate_origin": "top_left",
+        }
+    except BboxLocatorError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                logger.warning("Failed to remove temporary fixed-position sample: %s", tmp_path)
 
 def _fields_to_schema(fields: list[dict[str, Any]]) -> dict[str, Any]:
     properties: dict[str, Any] = {}

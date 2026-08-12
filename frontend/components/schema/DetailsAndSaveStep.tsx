@@ -5,16 +5,14 @@ import { CheckCircle, Loader2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { useSchemaWizard } from "@/contexts/SchemaWizardContext"
 import { SchemaField } from "@/types/schema"
-
-function isValidFieldName(name: string) {
-    return /^[a-zA-Z_][a-zA-Z0-9_\-]*$/.test(name)
-}
+import { isValidFieldName, validateFields } from "@/lib/schema-validation"
 
 export function DetailsAndSaveStep() {
     const { schemaData, fields, updateSchemaData, isSaving, saveSchema, previousStep } = useSchemaWizard()
     const [nameError, setNameError] = useState("")
 
-    const hasInvalidFields = fields.some((f: SchemaField) => !f.name || !isValidFieldName(f.name))
+    const fieldErrors = validateFields(fields).filter((error) => error.severity === "error")
+    const hasInvalidFields = fieldErrors.length > 0
     const canSave = fields.length > 0 && !hasInvalidFields && schemaData.name.trim().length > 0
 
     const handleSave = () => {
@@ -68,9 +66,20 @@ export function DetailsAndSaveStep() {
                 </p>
                 {hasInvalidFields && (
                     <p className="text-red-600 mt-2">
-                        Some field names are invalid. Go back and fix them before saving.
+                        Fix the field names before saving: {fieldErrors.map((error) => error.message).join(" ")}
                     </p>
                 )}
+            </div>
+
+            <div className="space-y-2 border-t pt-4">
+                <h3 className="text-sm font-semibold text-slate-800">Fields in this schema</h3>
+                <div className="flex flex-wrap gap-2" aria-label="Schema field names">
+                    {fields.map((field: SchemaField) => (
+                        <span key={field.id || field.name} className={`rounded-md border px-2.5 py-1 text-xs font-medium ${isValidFieldName(field.name) ? "border-slate-200 bg-slate-50 text-slate-700" : "border-red-200 bg-red-50 text-red-700"}`}>
+                            {field.name || "(unnamed)"}
+                        </span>
+                    ))}
+                </div>
             </div>
 
             {/* Navigation */}

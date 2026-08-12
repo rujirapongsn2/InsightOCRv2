@@ -3,7 +3,7 @@ import { SchemaField, SchemaData, ValidationError } from "@/types/schema"
 /**
  * Validate field name format for JSON Schema compatibility
  * - Must not be empty
- * - Can contain letters (including Unicode/Thai), numbers, underscores, and hyphens
+ * - Can contain ASCII letters, numbers, and underscores
  * - NO SPACES allowed (required for valid JSON Schema property names)
  * - Must start with a letter or underscore
  */
@@ -13,11 +13,12 @@ export function isValidFieldName(name: string): boolean {
   // Check for leading/trailing spaces
   if (name !== name.trim()) return false
 
-  // JSON Schema property name rules:
-  // - Start with letter (Unicode) or underscore
-  // - Contain only letters, numbers, underscores, hyphens
+  // Platform field names are intentionally stricter than JSON object keys so
+  // they work consistently across extraction, mapping, and workflow tools.
+  // - Start with an ASCII letter or underscore
+  // - Contain only ASCII letters, numbers, and underscores
   // - NO SPACES (important for JSON Schema)
-  const pattern = /^[\p{L}_][\p{L}\p{N}_-]*$/u
+  const pattern = /^[A-Za-z_][A-Za-z0-9_]*$/
   return pattern.test(name)
 }
 
@@ -34,20 +35,20 @@ export function suggestFieldName(invalidName: string): string {
   // Replace spaces with underscores (important for JSON Schema)
   suggested = suggested.replace(/\s+/g, "_")
 
-  // Replace special characters (except letters, numbers, underscore, hyphen) with underscore
-  suggested = suggested.replace(/[^\p{L}\p{N}_-]/gu, "_")
+  // Replace non-ASCII characters and special characters with underscores.
+  suggested = suggested.replace(/[^A-Za-z0-9_]/g, "_")
 
   // Remove leading numbers or hyphens (must start with letter or underscore)
-  suggested = suggested.replace(/^[\p{N}-]+/u, "")
+  suggested = suggested.replace(/^[0-9]+/, "")
 
   // Remove consecutive underscores
   suggested = suggested.replace(/_+/g, "_")
 
   // Remove trailing underscores or hyphens
-  suggested = suggested.replace(/[_-]+$/g, "")
+  suggested = suggested.replace(/_+$/g, "")
 
   // If starts with special char, prepend underscore
-  if (suggested && !/^[\p{L}_]/u.test(suggested)) {
+  if (suggested && !/^[A-Za-z_]/.test(suggested)) {
     suggested = "_" + suggested
   }
 

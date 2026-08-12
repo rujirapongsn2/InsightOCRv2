@@ -1,7 +1,7 @@
 "use client"
 
 import { useEffect, useMemo, useState } from "react"
-import { Plus, FileText, Receipt, FileSignature, File, Search, ScrollText, X, Trash2, Loader2 } from "lucide-react"
+import { Plus, FileText, Receipt, FileSignature, File, Search, ScrollText, X, Trash2, Loader2, ListFilter, ArrowDownAZ } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { useAuth } from "@/components/auth-provider"
@@ -14,7 +14,7 @@ interface Schema {
     name: string
     document_type: string
     description: string
-    fields: any[]
+    fields: SchemaField[]
     created_by?: string
     created_at?: string
     updated_at: string
@@ -26,9 +26,20 @@ interface SchemaField {
     type: string
     description: string
     required: boolean
+    locator?: {
+        type: "bbox"
+        page: number
+        x: number
+        y: number
+        width: number
+        height: number
+        clean_placeholders?: boolean
+    }
 }
 
 type ExtractionProfile = "legacy" | "anydoc_hybrid"
+
+type SchemaSort = "updated_desc" | "updated_asc" | "name_asc" | "name_desc" | "fields_desc" | "fields_asc"
 
 const getDocumentTypeIcon = (type: string) => {
     switch (type.toLowerCase()) {
@@ -71,8 +82,18 @@ function EditSchemaModal({ schemaId, onClose, onSaved }: { schemaId: string; onC
 
     const addField = () => setFields((f: SchemaField[]) => [...f, { name: "", type: "text", description: "", required: false }])
     const removeField = (i: number) => setFields((f: SchemaField[]) => f.filter((_: SchemaField, idx: number) => idx !== i))
-    const updateField = (i: number, key: keyof SchemaField, value: any) =>
+    const updateField = (i: number, key: keyof SchemaField, value: unknown) =>
         setFields((f: SchemaField[]) => f.map((field: SchemaField, idx: number) => idx === i ? { ...field, [key]: value } : field))
+    const updateLocator = (i: number, key: "page" | "x" | "y" | "width" | "height", value: string) =>
+        setFields((current) => current.map((field, index) => {
+            if (index !== i || !field.locator) return field
+            return { ...field, locator: { ...field.locator, [key]: Number(value) } }
+        }))
+    const updateLocatorCleanup = (i: number, cleanPlaceholders: boolean) =>
+        setFields((current) => current.map((field, index) => {
+            if (index !== i || !field.locator) return field
+            return { ...field, locator: { ...field.locator, clean_placeholders: cleanPlaceholders } }
+        }))
 
     const handleSave = async () => {
         if (!schema) return
@@ -168,7 +189,7 @@ function EditSchemaModal({ schemaId, onClose, onSaved }: { schemaId: string; onC
                                 <p className="text-sm text-slate-400 py-4 text-center border border-dashed rounded-lg">No fields yet.</p>
                             )}
                             {fields.map((field, index) => (
-                                <div key={index} className="flex items-start gap-3 p-3 rounded-lg bg-slate-50 border">
+                                <div key={index} className="flex flex-wrap items-start gap-3 p-3 rounded-lg bg-slate-50 border">
                                     <div className="grid gap-3 flex-1 sm:grid-cols-4">
                                         <div className="space-y-1">
                                             <label className="text-xs font-medium text-slate-600">Field Name</label>
@@ -191,9 +212,35 @@ function EditSchemaModal({ schemaId, onClose, onSaved }: { schemaId: string; onC
                                             <Input placeholder="Instructions for LLM..." value={field.description} onChange={e => updateField(index, "description", e.target.value)} className="h-8 text-sm" />
                                         </div>
                                     </div>
-                                    <button onClick={() => removeField(index)} className="mt-5 p-1 rounded text-red-400 hover:text-red-600 hover:bg-red-50">
+                                    <button aria-label={`Remove ${field.name || "field"}`} onClick={() => removeField(index)} className="mt-5 p-1 rounded text-red-400 hover:text-red-600 hover:bg-red-50">
                                         <Trash2 className="h-4 w-4" />
                                     </button>
+                                    {field.locator && (
+                                        <div className="basis-full grid grid-cols-5 gap-2 rounded-md border border-blue-100 bg-blue-50/50 p-2">
+                                            {(["page", "x", "y", "width", "height"] as const).map((key) => (
+                                                <label key={key} className="text-[11px] font-medium text-slate-600">
+                                                    {key === "width" ? "W (%)" : key === "height" ? "H (%)" : key === "page" ? "Page" : `${key.toUpperCase()} (%)`}
+                                                    <Input
+                                                        aria-label={`${field.name} ${key}`}
+                                                        type="number"
+                                                        min={key === "page" ? 1 : 0}
+                                                        step={key === "page" ? 1 : 0.01}
+                                                        className="mt-1 h-8 text-xs"
+                                                        value={field.locator?.[key] ?? ""}
+                                                        onChange={(event) => updateLocator(index, key, event.target.value)}
+                                                    />
+                                                </label>
+                                            ))}
+                                            <label className="col-span-5 flex items-center gap-2 text-xs text-slate-700">
+                                                <input
+                                                    type="checkbox"
+                                                    checked={field.locator.clean_placeholders !== false}
+                                                    onChange={(event) => updateLocatorCleanup(index, event.target.checked)}
+                                                />
+                                                Remove form placeholders
+                                            </label>
+                                        </div>
+                                    )}
                                 </div>
                             ))}
                         </div>
@@ -222,7 +269,7 @@ function EditSchemaModal({ schemaId, onClose, onSaved }: { schemaId: string; onC
 function CreateSchemaModal({ onClose, onSaved }: { onClose: () => void; onSaved: () => void }) {
     return (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-            <div className="bg-white rounded-xl shadow-2xl w-full max-w-4xl max-h-[92vh] flex flex-col">
+            <div className="bg-white rounded-xl shadow-2xl w-full max-w-[96vw] max-h-[96vh] flex flex-col">
                 <div className="flex items-center justify-between px-6 py-4 border-b">
                     <h2 className="text-lg font-semibold">Create New Schema</h2>
                     <button onClick={onClose} className="p-1 rounded hover:bg-slate-100"><X className="h-5 w-5 text-slate-500" /></button>
@@ -242,6 +289,9 @@ export default function SchemasPage() {
     const [schemas, setSchemas] = useState<Schema[]>([])
     const [loading, setLoading] = useState(true)
     const [searchQuery, setSearchQuery] = useState("")
+    const [documentTypeFilter, setDocumentTypeFilter] = useState("all")
+    const [pipelineFilter, setPipelineFilter] = useState<ExtractionProfile | "all">("all")
+    const [sortBy, setSortBy] = useState<SchemaSort>("updated_desc")
     const [showCreateModal, setShowCreateModal] = useState(false)
     const [editSchemaId, setEditSchemaId] = useState<string | null>(null)
 
@@ -250,15 +300,41 @@ export default function SchemasPage() {
         return user.role === "documents_admin" ? "manager" : user.role
     }, [user?.role])
 
+    const documentTypes = useMemo(() => (
+        Array.from(new Set(schemas.map((schema) => schema.document_type.toLowerCase())))
+            .sort((a, b) => a.localeCompare(b))
+    ), [schemas])
+
     const filteredSchemas = useMemo(() => {
-        if (!searchQuery.trim()) return schemas
-        const q = searchQuery.toLowerCase()
-        return schemas.filter((s: Schema) =>
-            s.name.toLowerCase().includes(q) ||
-            s.description?.toLowerCase().includes(q) ||
-            s.document_type.toLowerCase().includes(q)
-        )
-    }, [schemas, searchQuery])
+        const query = searchQuery.trim().toLowerCase()
+        return schemas
+            .filter((schema) => {
+                const matchesQuery = !query ||
+                    schema.name.toLowerCase().includes(query) ||
+                    schema.description?.toLowerCase().includes(query) ||
+                    schema.document_type.toLowerCase().includes(query)
+                const matchesType = documentTypeFilter === "all" || schema.document_type.toLowerCase() === documentTypeFilter
+                const matchesPipeline = pipelineFilter === "all" || (schema.extraction_profile || "legacy") === pipelineFilter
+                return matchesQuery && matchesType && matchesPipeline
+            })
+            .sort((a, b) => {
+                switch (sortBy) {
+                    case "name_asc": return a.name.localeCompare(b.name)
+                    case "name_desc": return b.name.localeCompare(a.name)
+                    case "fields_desc": return b.fields.length - a.fields.length
+                    case "fields_asc": return a.fields.length - b.fields.length
+                    case "updated_asc": return new Date(a.updated_at || 0).getTime() - new Date(b.updated_at || 0).getTime()
+                    case "updated_desc":
+                    default: return new Date(b.updated_at || 0).getTime() - new Date(a.updated_at || 0).getTime()
+                }
+            })
+    }, [schemas, searchQuery, documentTypeFilter, pipelineFilter, sortBy])
+
+    const hasActiveFilters = documentTypeFilter !== "all" || pipelineFilter !== "all"
+    const clearFilters = () => {
+        setDocumentTypeFilter("all")
+        setPipelineFilter("all")
+    }
 
     const fetchSchemas = async () => {
         try {
@@ -320,17 +396,66 @@ export default function SchemasPage() {
                 </Button>
             </div>
 
-            {/* Search */}
+            {/* Search and filters */}
             {schemas.length > 0 && (
-                <div className="relative">
-                    <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-                    <input
-                        type="text"
-                        placeholder="Search schemas by name, description, or type..."
-                        value={searchQuery}
-                        onChange={(e) => setSearchQuery(e.target.value)}
-                        className="w-full pl-10 pr-4 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent text-sm"
-                    />
+                <div className="space-y-3">
+                    <div className="relative">
+                        <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                        <input
+                            type="text"
+                            placeholder="Search schemas by name, description, or type..."
+                            value={searchQuery}
+                            onChange={(e) => setSearchQuery(e.target.value)}
+                            className="w-full rounded-lg border border-slate-300 py-2 pl-10 pr-4 text-sm focus:border-transparent focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        />
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                        <div className="flex items-center gap-1.5 text-sm font-medium text-slate-600">
+                            <ListFilter className="h-4 w-4" />
+                            Filter
+                        </div>
+                        <select
+                            aria-label="Filter by document type"
+                            value={documentTypeFilter}
+                            onChange={(event) => setDocumentTypeFilter(event.target.value)}
+                            className="h-9 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        >
+                            <option value="all">All document types</option>
+                            {documentTypes.map((type) => <option key={type} value={type}>{type}</option>)}
+                        </select>
+                        <select
+                            aria-label="Filter by extraction pipeline"
+                            value={pipelineFilter}
+                            onChange={(event) => setPipelineFilter(event.target.value as ExtractionProfile | "all")}
+                            className="h-9 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        >
+                            <option value="all">All pipelines</option>
+                            <option value="anydoc_hybrid">AnyDoc hybrid</option>
+                            <option value="legacy">Legacy</option>
+                        </select>
+                        <div className="ml-auto flex items-center gap-1.5 text-sm font-medium text-slate-600">
+                            <ArrowDownAZ className="h-4 w-4" />
+                            Sort by
+                        </div>
+                        <select
+                            aria-label="Sort schemas"
+                            value={sortBy}
+                            onChange={(event) => setSortBy(event.target.value as SchemaSort)}
+                            className="h-9 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        >
+                            <option value="updated_desc">Recently updated</option>
+                            <option value="updated_asc">Oldest updated</option>
+                            <option value="name_asc">Name A-Z</option>
+                            <option value="name_desc">Name Z-A</option>
+                            <option value="fields_desc">Most fields</option>
+                            <option value="fields_asc">Fewest fields</option>
+                        </select>
+                        {hasActiveFilters && (
+                            <Button type="button" variant="ghost" size="sm" onClick={clearFilters}>
+                                Clear filters
+                            </Button>
+                        )}
+                    </div>
                 </div>
             )}
 
@@ -354,7 +479,7 @@ export default function SchemasPage() {
                     <Search className="h-10 w-10 text-slate-400 mb-3" />
                     <h3 className="text-lg font-semibold">No schemas found</h3>
                     <p className="text-sm text-slate-500 mt-1">
-                        {searchQuery ? `No results for "${searchQuery}"` : "Try a different search term"}
+                        {searchQuery ? `No results for "${searchQuery}"` : hasActiveFilters ? "Try changing the filters" : "Try a different search term"}
                     </p>
                 </div>
             ) : (

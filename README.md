@@ -167,7 +167,7 @@ scripts/services.sh down
 
 # Restart specific service
 scripts/services.sh restart web      # Restart frontend
-scripts/services.sh restart api      # Restart backend
+scripts/services.sh restart api      # Restart backend, Celery worker, and scheduler
 scripts/services.sh restart all      # Restart all services
 
 # View logs (real-time)
@@ -220,6 +220,10 @@ scripts/services.sh restart web
 
 # View backend error logs
 scripts/services.sh logs api
+
+# Rebuild backend changes that affect document processing. This also recreates
+# Celery worker and scheduler, so queued jobs use the same source version.
+scripts/services.sh rebuild api
 
 # Full restart after major changes
 scripts/services.sh down

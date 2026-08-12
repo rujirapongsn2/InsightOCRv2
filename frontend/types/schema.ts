@@ -7,7 +7,7 @@ export type ExtractionProfile = "legacy" | "anydoc_hybrid"
 
 export type WizardStep = 1 | 2
 
-export type StartingPoint = "template" | "ai" | "scratch" | "import"
+export type StartingPoint = "template" | "ai" | "fixed" | "scratch" | "import"
 
 export interface ValidationRule {
   min?: number
@@ -33,6 +33,17 @@ export interface SchemaField {
   help_text?: string
   example?: string
   order?: number
+  locator?: BboxLocator
+}
+
+export interface BboxLocator {
+  type: "bbox"
+  page: number
+  x: number
+  y: number
+  width: number
+  height: number
+  clean_placeholders?: boolean
 }
 
 export interface SchemaData {
@@ -83,7 +94,7 @@ export interface TemplateListResponse {
 }
 
 export interface TestResults {
-  extracted_data: Record<string, any>
+  extracted_data: Record<string, unknown>
   ocr_preview: string
   quality_metrics: QualityMetrics
   field_confidence: Record<string, number>

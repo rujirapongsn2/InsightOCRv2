@@ -11,10 +11,10 @@ Usage:
   services.sh up           # start all services (frontend, backend, db, redis, minio)
   services.sh down         # stop and remove containers
   services.sh update       # pull latest code and refresh the running stack
-  services.sh restart api  # restart backend only
+  services.sh restart api  # restart backend and task workers
   services.sh restart web  # restart frontend only
   services.sh restart all  # restart all containers
-  services.sh rebuild api  # rebuild and restart backend only
+  services.sh rebuild api  # rebuild backend and recreate task workers
   services.sh rebuild web  # rebuild and restart frontend only
   services.sh rebuild all  # rebuild and restart all services
   services.sh logs api     # tail backend logs
@@ -42,6 +42,12 @@ restart_service() {
   $COMPOSE restart "$svc"
 }
 
+restart_backend_services() {
+  echo "Restarting backend and task workers..."
+  $COMPOSE restart backend celery_worker celery_beat
+  wait_for_service_group backend
+}
+
 logs_service() {
   local svc="$1"
   echo "Tailing logs for ${svc} (Ctrl+C to stop)..."
@@ -59,11 +65,20 @@ rebuild_service() {
   wait_for_service_group "$svc"
 }
 
+rebuild_backend_services() {
+  echo "Rebuilding backend and recreating task workers..."
+  $COMPOSE up -d --build --force-recreate backend celery_worker celery_beat
+  echo "Refreshing nginx upstreams..."
+  $COMPOSE restart nginx
+  wait_for_service_group backend
+}
+
 wait_for_service_group() {
   local svc="$1"
   case "$svc" in
     backend)
       wait_for_healthy softnix_ocr_backend
+      wait_for_worker_ready
       wait_for_healthy softnix_ocr_nginx
       ;;
     frontend)
@@ -79,6 +94,22 @@ wait_for_service_group() {
       wait_for_healthy softnix_ocr_nginx
       ;;
   esac
+}
+
+wait_for_worker_ready() {
+  local timeout_seconds="${1:-180}"
+  local elapsed=0
+
+  while [ "$elapsed" -lt "$timeout_seconds" ]; do
+    if $COMPOSE exec -T celery_worker sh -lc 'celery -A app.celery_app inspect ping -d "celery@$(hostname)" 2>/dev/null | grep -q pong'; then
+      return 0
+    fi
+    sleep 3
+    elapsed=$((elapsed + 3))
+  done
+
+  echo "celery_worker did not become ready within ${timeout_seconds} seconds" >&2
+  return 1
 }
 
 wait_for_healthy() {
@@ -141,7 +172,7 @@ update_stack() {
   write_build_info "$after_sha" "$branch_name"
 
   echo "Rebuilding application services..."
-  $COMPOSE up -d --build backend celery_worker frontend gateway
+  $COMPOSE up -d --build --force-recreate backend celery_worker celery_beat frontend gateway
 
   echo "Refreshing nginx..."
   $COMPOSE restart nginx
@@ -178,7 +209,7 @@ case "${1:-}" in
     require_compose
     svc="${2:-all}"
     case "$svc" in
-      api|backend) restart_service backend ;;
+      api|backend) restart_backend_services ;;
       web|frontend) restart_service frontend ;;
       worker|celery) restart_service celery_worker ;;
       all) $COMPOSE restart ;;
@@ -189,11 +220,11 @@ case "${1:-}" in
     require_compose
     svc="${2:-all}"
     case "$svc" in
-      api|backend) rebuild_service backend ;;
+      api|backend) rebuild_backend_services ;;
       web|frontend) rebuild_service frontend ;;
       worker|celery) rebuild_service celery_worker ;;
       all)
-        $COMPOSE up -d --build
+        $COMPOSE up -d --build --force-recreate backend celery_worker celery_beat frontend gateway
         echo "Refreshing nginx upstreams..."
         $COMPOSE restart nginx
         wait_for_service_group all

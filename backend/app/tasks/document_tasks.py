@@ -22,6 +22,7 @@ from app.services.anydoc_pipeline import (
     AnydocTerminalError,
     extract_anydoc_document,
 )
+from app.services.anydoc_bbox import BboxLocatorError, extract_fixed_position_fields
 from app.services.extraction_profiles import supports_anydoc_source, validate_extraction_profile
 from app.utils.activity_logger import log_activity, Actions
 from app.utils.job_logger import get_job_logger
@@ -480,14 +481,17 @@ def map_field_type_to_json_schema(field_type: str, field_description: str) -> di
     return {"type": "string", "description": field_description}
 
 
-def build_schema_json(schema: SchemaModel | None) -> str:
-    if not schema:
+def build_schema_json(
+    schema: SchemaModel | None,
+    fields: list[dict[str, Any]] | None = None,
+) -> str:
+    if not schema and fields is None:
         return ""
 
     properties: dict[str, Any] = {}
     required_fields: list[str] = []
 
-    for field in schema.fields or []:
+    for field in (schema.fields if fields is None and schema else fields) or []:
         field_name = (field.get("name") or "").strip()
         if not field_name:
             continue
@@ -618,11 +622,131 @@ def map_anydoc_schema_fields(
     return validate_mapped_schema_fields(mapped, schema_payload)
 
 
+def _normalise_fixed_position_value(
+    value: str,
+    field_schema: dict[str, Any],
+    field_name: str,
+) -> Any:
+    """Normalize deterministic BBox text through the same Schema type rules."""
+    if not value.strip():
+        return None
+    if field_schema.get("format") == "date":
+        value = _normalise_fixed_position_date(value)
+    return _normalize_schema_value(value, field_schema, field_name)
+
+
+def _normalise_fixed_position_date(value: str) -> str:
+    """Return a Gregorian ISO date from common English and Thai form values."""
+    cleaned = value.strip().translate(str.maketrans("๐๑๒๓๔๕๖๗๘๙", "0123456789"))
+    thai_months = {
+        "มกราคม": 1, "ม.ค.": 1, "มค": 1,
+        "กุมภาพันธ์": 2, "ก.พ.": 2, "กพ": 2,
+        "มีนาคม": 3, "มี.ค.": 3, "มีค": 3,
+        "เมษายน": 4, "เม.ย.": 4, "เมย": 4,
+        "พฤษภาคม": 5, "พ.ค.": 5, "พค": 5,
+        "มิถุนายน": 6, "มิ.ย.": 6, "มิย": 6,
+        "กรกฎาคม": 7, "ก.ค.": 7, "กค": 7,
+        "สิงหาคม": 8, "ส.ค.": 8, "สค": 8,
+        "กันยายน": 9, "ก.ย.": 9, "กย": 9,
+        "ตุลาคม": 10, "ต.ค.": 10, "ตค": 10,
+        "พฤศจิกายน": 11, "พ.ย.": 11, "พย": 11,
+        "ธันวาคม": 12, "ธ.ค.": 12, "ธค": 12,
+    }
+
+    def to_iso(day: int, month: int, year: int) -> str:
+        if year >= 2400:
+            year -= 543
+        return datetime(year, month, day).date().isoformat()
+
+    numeric = re.search(r"(?<!\d)(\d{1,2})[/.\-](\d{1,2})[/.\-](\d{4})(?!\d)", cleaned)
+    if numeric:
+        return to_iso(*(int(part) for part in numeric.groups()))
+
+    thai_named = re.search(r"(?<!\d)(\d{1,2})\s+([^\s]+)\s+(\d{4})(?!\d)", cleaned)
+    if thai_named:
+        day, month_name, year = thai_named.groups()
+        month = thai_months.get(month_name.lower())
+        if month:
+            return to_iso(int(day), month, int(year))
+
+    candidates = ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y", "%d %B %Y", "%B %d, %Y")
+    for date_format in candidates:
+        try:
+            return datetime.strptime(cleaned, date_format).date().isoformat()
+        except ValueError:
+            continue
+    return cleaned
+
+
+class PartialSchemaMappingError(ValueError):
+    """Structured mapping failed after deterministic BBox fields succeeded."""
+
+    def __init__(self, mapped: dict[str, Any], evidence: dict[str, Any], reason: Exception):
+        super().__init__(str(reason))
+        self.mapped = mapped
+        self.evidence = evidence
+
+
+def map_schema_fields_with_locators(
+    markdown: str,
+    schema: SchemaModel,
+    db: Any,
+    file_path: str,
+) -> tuple[dict[str, Any], dict[str, Any], str]:
+    """Map BBox fields directly and use structured output only for remaining fields."""
+    fields = [field for field in schema.fields or [] if isinstance(field, dict)]
+    locator_fields = [field for field in fields if isinstance(field.get("locator"), dict)]
+    if not locator_fields:
+        return map_anydoc_schema_fields(markdown, schema, db), {}, "structured_output"
+
+    raw_fixed_values, evidence = extract_fixed_position_fields(file_path, locator_fields)
+    schema_payload = json.loads(build_schema_json(schema))
+    mapped: dict[str, Any] = {}
+    for field in locator_fields:
+        name = str(field.get("name") or "").strip()
+        if not name:
+            continue
+        field_evidence = evidence.get(name, {})
+        mapped[name] = _normalise_fixed_position_value(
+            str(field_evidence.get("cleaned_text", raw_fixed_values.get(name, ""))),
+            schema_payload["properties"][name],
+            name,
+        )
+
+    remaining_fields = [field for field in fields if not isinstance(field.get("locator"), dict)]
+    if remaining_fields:
+        try:
+            remaining_schema = json.loads(build_schema_json(schema, remaining_fields))
+            result = extract_structure(
+                markdown,
+                json.dumps(remaining_schema),
+                db,
+                prompt=(
+                    "Extract only values supported by the supplied JSON Schema. "
+                    "Return valid JSON and do not invent values that are not present in the document."
+                ),
+            )
+            remaining_mapped = parse_extracted_json(result)
+            mapped.update(validate_mapped_schema_fields(remaining_mapped, remaining_schema))
+        except Exception as exc:
+            locator_schema = json.loads(build_schema_json(schema, locator_fields))
+            raise PartialSchemaMappingError(
+                validate_mapped_schema_fields(mapped, locator_schema),
+                evidence,
+                exc,
+            ) from exc
+
+    return validate_mapped_schema_fields(mapped, schema_payload), evidence, (
+        "bbox+structured_output" if remaining_fields else "bbox"
+    )
+
+
 def apply_schema_mapping(
     document: Document,
     schema: SchemaModel | None,
     db: Any,
     extraction_metadata: dict[str, Any],
+    file_path: str | None = None,
 ) -> str | None:
     """Apply selected Schema mapping after any successful text extraction route."""
     if not schema:
@@ -631,13 +755,44 @@ def apply_schema_mapping(
         return None
 
     try:
-        document.extracted_data = map_anydoc_schema_fields(document.ocr_text or "", schema, db)
+        has_locator_fields = any(
+            isinstance(field, dict) and isinstance(field.get("locator"), dict)
+            for field in (schema.fields or [])
+        )
+        if has_locator_fields:
+            if not file_path:
+                raise BboxLocatorError("The source document is unavailable for fixed-position fields")
+            mapped, evidence, provider = map_schema_fields_with_locators(
+                document.ocr_text or "", schema, db, file_path
+            )
+            document.extracted_data = mapped
+            extraction_metadata["field_evidence"] = evidence
+        else:
+            document.extracted_data = map_anydoc_schema_fields(document.ocr_text or "", schema, db)
+            provider = "structured_output"
         extraction_metadata["mapping"] = {
             "status": "completed",
             "schema": schema.name,
-            "provider": "structured_output",
+            "provider": provider,
         }
         return None
+    except PartialSchemaMappingError as exc:
+        document.extracted_data = exc.mapped
+        extraction_metadata["field_evidence"] = exc.evidence
+        mapping_error = str(exc)
+        extraction_metadata["mapping"] = {
+            "status": "partial",
+            "schema": schema.name,
+            "provider": "bbox",
+            "reason": mapping_error,
+        }
+        logger.warning(
+            "Structured mapping partially failed for %s with schema %s: %s",
+            document.filename,
+            schema.name,
+            mapping_error,
+        )
+        return mapping_error
     except Exception as exc:
         document.extracted_data = None
         mapping_error = str(exc)
@@ -954,6 +1109,7 @@ def process_document_task(
                         schema,
                         db,
                         extraction_metadata,
+                        file_path=local_file_path,
                     )
                     document.extraction_metadata = extraction_metadata
                     document.status = "extraction_completed"
@@ -1232,7 +1388,13 @@ def process_document_task(
                 "pipeline": "legacy_fallback" if legacy_metadata.get("legacy_fallback") else "legacy",
                 "schema_context": schema.name if schema else None,
             })
-            mapping_error = apply_schema_mapping(document, schema, db, legacy_metadata)
+            mapping_error = apply_schema_mapping(
+                document,
+                schema,
+                db,
+                legacy_metadata,
+                file_path=local_file_path,
+            )
             document.extraction_metadata = legacy_metadata
             document.status = "extraction_completed"
             processing_errors = ai_processing_errors[:]
@@ -1347,12 +1509,17 @@ def process_document_task(
                     "key_source": fallback_source,
                     "recovered_primary_error": str(e),
                 }
-                mapping_error = apply_schema_mapping(
-                    fallback_document,
-                    fallback_schema,
-                    fallback_db,
-                    fallback_metadata,
-                )
+                # The first storage context has already released its temporary
+                # file. Reopen it only when a fixed-position Schema needs the
+                # original page geometry for BBox extraction.
+                with fallback_storage.get_local_path(fallback_document.file_path) as mapping_path:
+                    mapping_error = apply_schema_mapping(
+                        fallback_document,
+                        fallback_schema,
+                        fallback_db,
+                        fallback_metadata,
+                        file_path=mapping_path,
+                    )
                 fallback_document.extraction_metadata = fallback_metadata
                 fallback_document.status = "extraction_completed"
                 fallback_document.processing_error = (

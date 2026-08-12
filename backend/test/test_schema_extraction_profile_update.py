@@ -5,7 +5,7 @@ import pytest
 from app.api.v1.endpoints.schemas import _schema_update_values
 from app.api.v1.endpoints.documents import _validate_requested_extraction_profile
 from app.services.extraction_profiles import supports_anydoc_source, validate_extraction_profile
-from app.schemas.schema import DocumentSchemaUpdate, SchemaField
+from app.schemas.schema import DocumentSchemaCreate, DocumentSchemaUpdate, SchemaField
 
 
 def test_schema_update_keeps_anydoc_profile_and_normalizes_fields():
@@ -71,3 +71,23 @@ def test_unsupported_sources_use_internal_legacy_compatibility_route():
 def test_shadow_profile_is_rejected_after_standardization():
     with pytest.raises(ValueError, match="Unsupported extraction profile"):
         validate_extraction_profile("invoice", "anydoc_shadow")
+
+
+@pytest.mark.parametrize("field_name", ["เลขที่ใบกำกับ", "1_invoice", "invoice-number", "invoice number"])
+def test_schema_rejects_field_names_that_are_not_platform_identifiers(field_name):
+    with pytest.raises(ValueError, match="Invalid field name"):
+        DocumentSchemaCreate(
+            name="invoice_schema",
+            document_type="invoice",
+            fields=[SchemaField(name=field_name, type="text")],
+        )
+
+
+def test_schema_rejects_duplicate_field_names():
+    with pytest.raises(ValueError, match="Duplicate field name"):
+        DocumentSchemaUpdate(
+            fields=[
+                SchemaField(name="invoice_number", type="text"),
+                SchemaField(name="invoice_number", type="text"),
+            ],
+        )
