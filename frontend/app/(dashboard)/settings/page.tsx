@@ -6,7 +6,11 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { AlertCircle, Bot, CheckCircle2, ChevronDown, Eye, EyeOff, Loader2, Pencil, Plus, Trash2 } from "lucide-react"
-import { getApiBaseUrl } from "@/lib/api"
+import { getApiBaseUrl, getPublicApiBaseUrl } from "@/lib/api"
+import { ApiAccessTokens } from "@/components/settings/ApiAccessTokens"
+import { ApiWorkflowDocs } from "@/components/profile/ApiWorkflowDocs"
+import { AgentSkillDownloads } from "@/components/profile/AgentSkillDownloads"
+import { McpClientGuide } from "@/components/profile/McpClientGuide"
 import {
   type AIProviderSetting,
   createAIProvider,
@@ -19,6 +23,8 @@ import {
   unsetWorkflowBuilderProvider,
   updateAIProvider,
 } from "@/lib/ai-settings-api"
+
+type SettingsTab = "ocr" | "tokens" | "mcp" | "api" | "skills"
 
 export default function SettingsPage() {
   const { user } = useAuth()
@@ -62,6 +68,16 @@ export default function SettingsPage() {
   const [showProviderKey, setShowProviderKey] = useState(false)
   const [savingProvider, setSavingProvider] = useState(false)
   const [savingFeatureProvider, setSavingFeatureProvider] = useState<string | null>(null)
+  const [activeTab, setActiveTab] = useState<SettingsTab>("ocr")
+  const [publicApiBaseUrl, setPublicApiBaseUrl] = useState("/api/v1")
+  const [tokenExample, setTokenExample] = useState("YOUR_API_ACCESS_TOKEN")
+
+  const isAdmin = normalizedRole === "admin"
+
+  const getAuthHeader = (): Record<string, string> => {
+    const authToken = typeof window !== "undefined" ? localStorage.getItem("token") : null
+    return authToken ? { Authorization: `Bearer ${authToken}` } : {}
+  }
 
   useEffect(() => {
     const fetchConfig = async () => {
@@ -110,6 +126,11 @@ export default function SettingsPage() {
   }
 
   useEffect(() => { fetchAiProviders() }, [])
+
+  useEffect(() => {
+    setPublicApiBaseUrl(getPublicApiBaseUrl())
+    if (!isAdmin && activeTab === "ocr") setActiveTab("tokens")
+  }, [activeTab, isAdmin])
 
   const openCreateForm = () => {
     setEditingProvider(null)
@@ -268,6 +289,15 @@ export default function SettingsPage() {
     }
   }
 
+  const handleOcrFallbackToggle = (enabled: boolean) => {
+    if (enabled && !ocrFallbackConfigured && !ocrFallbackApiKey.trim()) {
+      setError("กรุณาระบุ Fallback API Key ในหน้านี้ หรือกำหนด MISTRAL_API_KEY ใน backend/.env ก่อนเปิดใช้งาน")
+      return
+    }
+    setError(null)
+    setOcrFallbackEnabled(enabled)
+  }
+
   const handleTestOcrFallback = async () => {
     setOcrFallbackTesting(true)
     setResult(null)
@@ -322,24 +352,54 @@ export default function SettingsPage() {
     }
   }
 
-  if (normalizedRole !== "admin") {
-    return (
-      <div className="bg-white rounded-lg border shadow-sm p-6">
-        <h2 className="text-xl font-semibold text-slate-900">Access restricted</h2>
-        <p className="text-slate-600 mt-2">Settings are available to Admin only.</p>
-      </div>
-    )
-  }
-
   return (
-    <div className="max-w-3xl space-y-6">
+    <div className="max-w-6xl space-y-6">
       <div className="space-y-2">
         <h2 className="text-2xl font-bold tracking-tight">Settings</h2>
-        <p className="text-slate-600">Configure and test external API endpoint.</p>
+        <p className="text-slate-600">Manage OCR, providers, API access, and agent connections.</p>
         <p className="text-xs text-slate-500">
           Update commit: <span className="font-mono text-slate-700">{appCommitSha || "unknown"}</span>
         </p>
       </div>
+
+      <div role="tablist" aria-label="Settings sections" className="grid grid-cols-2 gap-2 rounded-lg border border-slate-200 bg-white p-2 sm:grid-cols-5">
+        {[
+          ...(isAdmin ? [{ id: "ocr" as const, label: "OCR & Providers" }] : []),
+          { id: "tokens" as const, label: "API Access Tokens" },
+          { id: "mcp" as const, label: "MCP Access" },
+          { id: "api" as const, label: "API Workflow Docs" },
+          { id: "skills" as const, label: "AI Agent Skill Package" },
+        ].map((tab) => (
+          <button
+            key={tab.id}
+            type="button"
+            role="tab"
+            aria-selected={activeTab === tab.id}
+            onClick={() => setActiveTab(tab.id)}
+            className={`min-h-10 rounded-md px-3 py-2 text-sm font-medium transition-colors ${activeTab === tab.id
+              ? "bg-[#EBF4FB] text-[#1F6FA8]"
+              : "text-slate-600 hover:bg-slate-50 hover:text-slate-900"}`}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
+
+      {activeTab === "tokens" && (
+        <ApiAccessTokens onTokenCreated={setTokenExample} />
+      )}
+      {activeTab === "mcp" && (
+        <McpClientGuide apiBaseUrl={publicApiBaseUrl} tokenExample={tokenExample} />
+      )}
+      {activeTab === "api" && (
+        <ApiWorkflowDocs apiBaseUrl={publicApiBaseUrl} tokenExample={tokenExample} />
+      )}
+      {activeTab === "skills" && (
+        <AgentSkillDownloads apiBaseUrl={publicApiBaseUrl} getAuthHeader={getAuthHeader} />
+      )}
+
+      {isAdmin && activeTab === "ocr" && (
+        <>
 
       <Card>
         <CardHeader>
@@ -482,7 +542,7 @@ export default function SettingsPage() {
               type="checkbox"
               className="mt-0.5 h-4 w-4 accent-[#2786C2]"
               checked={ocrFallbackEnabled}
-              onChange={(e) => setOcrFallbackEnabled(e.target.checked)}
+              onChange={(e) => handleOcrFallbackToggle(e.target.checked)}
               disabled={isLoadingConfig}
             />
             <span>
@@ -492,6 +552,11 @@ export default function SettingsPage() {
               </span>
             </span>
           </label>
+          {!ocrFallbackConfigured && !ocrFallbackApiKey.trim() && (
+            <p className="text-xs text-amber-700">
+              ต้องตั้งค่า key ก่อนเปิดใช้งาน fallback: ใส่ key ในช่องนี้ หรือกำหนดไว้ใน backend/.env
+            </p>
+          )}
           <div className="space-y-2">
             <label className="text-sm font-medium">Fallback API Key</label>
             <div className="relative">
@@ -787,6 +852,8 @@ export default function SettingsPage() {
           </div>
         </CardContent>
       </Card>
+        </>
+      )}
     </div>
   )
 }

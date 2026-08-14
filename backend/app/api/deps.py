@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Generator, Optional
 from fastapi import Depends, HTTPException, status
@@ -12,6 +13,25 @@ from app.models.api_access_token import APIAccessToken
 from app.models.user import User
 from app.schemas.user import TokenPayload
 
+
+@dataclass(frozen=True)
+class APIAccessTokenPrincipal:
+    """Authenticated user plus the Personal API Token used for a request."""
+
+    user: User
+    api_token: APIAccessToken
+
+    def __getattr__(self, name: str):
+        return getattr(self.user, name)
+
+
+def _should_update_last_used(last_used_at: datetime | None, now: datetime) -> bool:
+    if last_used_at is None:
+        return True
+    if last_used_at.tzinfo is None:
+        last_used_at = last_used_at.replace(tzinfo=timezone.utc)
+    return (now - last_used_at).total_seconds() >= settings.API_TOKEN_LAST_USED_UPDATE_SECONDS
+
 reusable_oauth2 = OAuth2PasswordBearer(
     tokenUrl=f"{settings.API_V1_STR}/login/access-token"
 )
@@ -24,7 +44,7 @@ def get_db() -> Generator:
         db.close()
 
 
-def _get_user_from_api_access_token(db: Session, token: str) -> Optional[User]:
+def _get_api_access_token(db: Session, token: str) -> Optional[APIAccessToken]:
     hashed_token = security.hash_api_access_token(token)
     api_token = (
         db.query(APIAccessToken)
@@ -40,10 +60,24 @@ def _get_user_from_api_access_token(db: Session, token: str) -> Optional[User]:
         if api_token.expires_at <= now:
             return None
 
-    api_token.last_used_at = datetime.now(timezone.utc)
-    db.add(api_token)
-    db.commit()
+    now = datetime.now(timezone.utc)
+    if _should_update_last_used(api_token.last_used_at, now):
+        api_token.last_used_at = now
+        db.add(api_token)
+        db.commit()
 
+    return api_token
+
+
+def _get_user_from_api_access_token(db: Session, token: str) -> Optional[User]:
+    api_token = _get_api_access_token(db, token)
+    if not api_token:
+        return None
+    if api_token.mcp_access_only:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This token is restricted to the MCP endpoint",
+        )
     return db.query(User).filter(User.id == api_token.user_id).first()
 
 
@@ -72,6 +106,22 @@ def get_current_active_user(
     if not current_user.is_active:
         raise HTTPException(status_code=400, detail="Inactive user")
     return current_user
+
+
+def get_current_active_api_token_principal(
+    db: Session = Depends(get_db), token: str = Depends(reusable_oauth2)
+) -> APIAccessTokenPrincipal:
+    """Authenticate MCP requests with a Personal API Token, not a web JWT."""
+    api_token = _get_api_access_token(db, token)
+    if not api_token:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="MCP requires a valid Personal API Token",
+        )
+    user = db.query(User).filter(User.id == api_token.user_id).first()
+    if not user or not user.is_active:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Could not validate credentials")
+    return APIAccessTokenPrincipal(user=user, api_token=api_token)
 
 def get_current_active_superuser(
     current_user: User = Depends(get_current_user),

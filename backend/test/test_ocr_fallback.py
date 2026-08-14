@@ -2,7 +2,11 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from app.services.ocr_fallback import process_fallback_ocr, resolve_fallback_api_key
+from app.services.ocr_fallback import (
+    fallback_configuration_error,
+    process_fallback_ocr,
+    resolve_fallback_api_key,
+)
 
 
 def _response(payload, status_code=200):
@@ -77,3 +81,18 @@ def test_resolve_fallback_api_key_uses_environment_when_ui_is_empty(monkeypatch)
     monkeypatch.setenv("MISTRAL_API_KEY", "environment-key")
 
     assert resolve_fallback_api_key(setting) == ("environment-key", "environment")
+
+
+def test_fallback_configuration_error_explains_missing_key(monkeypatch):
+    monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+    setting = Mock(ocr_fallback_api_key=None)
+
+    assert fallback_configuration_error(setting, enabled=True) == (
+        "OCR fallback is enabled but no API key is configured"
+    )
+
+
+def test_fallback_configuration_error_is_clear_when_disabled():
+    assert fallback_configuration_error(Mock(ocr_fallback_api_key="key"), enabled=False) == (
+        "OCR fallback is disabled"
+    )

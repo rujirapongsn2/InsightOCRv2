@@ -16,7 +16,11 @@ from app.models import Document, DocumentSchema as SchemaModel, Setting
 from app.services.storage import get_storage_service
 from app.services.structure import extract_structure
 from app.services.tls import get_verify_ssl
-from app.services.ocr_fallback import process_fallback_ocr, resolve_fallback_api_key
+from app.services.ocr_fallback import (
+    fallback_configuration_error,
+    process_fallback_ocr,
+    resolve_fallback_api_key,
+)
 from app.services.anydoc_pipeline import (
     AnydocFallbackToLegacy,
     AnydocTerminalError,
@@ -1577,7 +1581,16 @@ def process_document_task(
             document = db.query(Document).filter(Document.id == document_id).first()
             if document:
                 document.status = "failed"
+                fallback_setting = db.query(Setting).first()
+                fallback_reason = fallback_configuration_error(
+                    fallback_setting,
+                    bool(getattr(fallback_setting, "ocr_fallback_enabled", False)),
+                )
+                if fallback_eligible and fallback_reason is None:
+                    fallback_reason = "OCR fallback request failed"
                 document.processing_error = f"Unexpected error: {str(e)}"
+                if fallback_eligible and fallback_reason:
+                    document.processing_error += f"; {fallback_reason}"
                 db.add(document)
                 db.commit()
         except:

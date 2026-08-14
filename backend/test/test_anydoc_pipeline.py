@@ -147,9 +147,14 @@ def test_anydoc_hybrid_fails_when_ocr_providers_return_no_text(monkeypatch, tmp_
     monkeypatch.setattr(anydoc_pipeline, "_pdf_text_pages", lambda _path: [{"page_number": 1, "ocr_text": ""}, {"page_number": 2, "ocr_text": ""}])
     monkeypatch.setattr(anydoc_pipeline, "process_ocr", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(anydoc_pipeline, "resolve_fallback_api_key", lambda _setting: ("", "none"))
+    monkeypatch.setattr(
+        anydoc_pipeline,
+        "fallback_configuration_error",
+        lambda *_args, **_kwargs: "OCR fallback is enabled but no API key is configured",
+    )
 
-    with pytest.raises(AnydocTerminalError, match="returned no text"):
-        extract_anydoc_document(_write_pdf_placeholder(tmp_path), FakeDb(_setting(False)), _schema())
+    with pytest.raises(AnydocTerminalError, match="enabled but no API key is configured"):
+        extract_anydoc_document(_write_pdf_placeholder(tmp_path), FakeDb(_setting(True)), _schema())
 
 
 def test_anydoc_hybrid_auto_skips_structured_field_mapping(monkeypatch, tmp_path):

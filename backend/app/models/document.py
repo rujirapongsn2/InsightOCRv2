@@ -45,6 +45,8 @@ class Document(Base):
     
     schema_id = Column(UUID(as_uuid=True), ForeignKey("document_schemas.id"), nullable=True, index=True)
     task_id = Column(String, nullable=True)
+    # Hash of an MCP action key. Manual/UI uploads leave this empty.
+    mcp_idempotency_key = Column(String(64), nullable=True, unique=True, index=True)
 
     # Relationships
     job = relationship("Job", back_populates="documents")

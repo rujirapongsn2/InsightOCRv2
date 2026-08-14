@@ -52,6 +52,8 @@ def create_api_token(
         token_prefix=security.get_api_access_token_prefix(plain_token),
         hashed_token=security.hash_api_access_token(plain_token),
         expires_at=expires_at,
+        mcp_access_only=payload.mcp_access_only,
+        scopes=payload.scopes,
     )
     db.add(db_token)
     db.commit()
@@ -65,7 +67,12 @@ def create_api_token(
         action=Actions.CREATE_API_TOKEN,
         resource_type="api_token",
         resource_id=db_token.id,
-        details={"name": db_token.name, "expires_at": db_token.expires_at.isoformat() if db_token.expires_at else None},
+        details={
+            "name": db_token.name,
+            "expires_at": db_token.expires_at.isoformat() if db_token.expires_at else None,
+            "mcp_access_only": db_token.mcp_access_only,
+            "scopes": db_token.scopes,
+        },
         ip_address=client_ip,
         user_agent=user_agent,
     )

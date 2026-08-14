@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Column, DateTime, ForeignKey, String, Text, func
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, JSON, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 
@@ -16,6 +16,12 @@ class APIAccessToken(Base):
     name = Column(String(255), nullable=False)
     token_prefix = Column(String(32), nullable=False, index=True)
     hashed_token = Column(Text, nullable=False, unique=True, index=True)
+    # Existing tokens predate scopes. The MCP authorization layer treats a
+    # null value as read-only for backward compatibility.
+    scopes = Column(JSON, nullable=True, default=list)
+    # A dedicated MCP token cannot be reused against the general REST API.
+    # Existing Personal API Tokens remain general-purpose for compatibility.
+    mcp_access_only = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     last_used_at = Column(DateTime(timezone=True), nullable=True)
     expires_at = Column(DateTime(timezone=True), nullable=True)

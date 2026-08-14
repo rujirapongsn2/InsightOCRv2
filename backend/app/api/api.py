@@ -11,6 +11,7 @@ from app.api.v1.endpoints import (
     external,
     integrations,
     jobs,
+    mcp,
     schemas,
     settings,
     templates,
@@ -33,5 +34,6 @@ api_router.include_router(activity_logs.router, prefix="/activity-logs", tags=["
 api_router.include_router(integrations.router, prefix="/integrations", tags=["integrations"])
 api_router.include_router(chat.router, prefix="/chat", tags=["chat"])
 api_router.include_router(agent.router, prefix="/agent", tags=["agent"])
+api_router.include_router(mcp.router, prefix="/mcp", tags=["mcp"])
 api_router.include_router(external.router, prefix="/external", tags=["external"])
 api_router.include_router(workflows.router, prefix="/workflows", tags=["workflows"])

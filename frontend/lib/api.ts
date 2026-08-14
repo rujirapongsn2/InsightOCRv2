@@ -50,3 +50,15 @@ export const handleAuthError = (response: Response): void => {
 export const getApiBaseUrl = (): string => {
   return "/api/v1"
 }
+
+/**
+ * Resolve an API URL that can be copied to an external client.
+ * Internal browser calls stay relative so they continue to work behind the
+ * reverse proxy, while copied MCP/curl examples need the current public host.
+ */
+export const getPublicApiBaseUrl = (): string => {
+  const baseUrl = getApiBaseUrl()
+  if (typeof window === "undefined") return baseUrl
+  if (/^https?:\/\//i.test(baseUrl)) return baseUrl.replace(/\/$/, "")
+  return `${window.location.origin}/${baseUrl.replace(/^\/+/, "")}`.replace(/\/$/, "")
+}

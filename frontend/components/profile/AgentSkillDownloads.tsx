@@ -5,7 +5,6 @@ import { Archive, Bot, Download, FileCode2, Settings2 } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
-import { Textarea } from "@/components/ui/textarea"
 
 type AgentSkillDownloadsProps = {
   apiBaseUrl: string
@@ -252,7 +251,7 @@ esac
           </div>
         )}
 
-        <div className="grid gap-4 md:grid-cols-[320px_1fr]">
+        <div className="grid gap-4 md:grid-cols-[280px_minmax(0,1fr)]">
           <div className="space-y-3">
             <div className="rounded-xl border border-slate-200 bg-white p-4">
               <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
@@ -286,15 +285,17 @@ esac
             </div>
           </div>
 
-          <div className="rounded-xl border border-slate-200 bg-slate-50/60 p-4">
+          <div className="min-w-0 rounded-xl border border-slate-200 bg-slate-50/60 p-4">
             <div className="space-y-1">
               <h3 className="text-sm font-semibold text-slate-900">{selectedFile.label}</h3>
               <p className="text-sm text-slate-600">{selectedFile.description}</p>
             </div>
-            <Textarea
+            <textarea
               readOnly
               value={selectedFile.content}
-              className="mt-4 min-h-[420px] bg-slate-950 font-mono text-xs leading-6 text-slate-100"
+              aria-label={`${selectedFile.label} preview`}
+              spellCheck={false}
+              className="mt-4 block min-h-[560px] w-full resize-y overflow-auto rounded-md border border-slate-800 bg-slate-950 p-4 font-mono text-xs leading-6 text-slate-100 caret-slate-100 outline-none selection:bg-sky-400 selection:text-slate-950 focus:border-sky-400 focus:ring-2 focus:ring-sky-400/30"
             />
           </div>
         </div>

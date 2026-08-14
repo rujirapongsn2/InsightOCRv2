@@ -13,6 +13,9 @@ class Job(Base):
     status = Column(String, default="draft", index=True) # draft, processing, review, completed, failed
     schema_id = Column(UUID(as_uuid=True), ForeignKey("document_schemas.id"), nullable=True)
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    # Hash of an MCP action key. Used only to make remote create requests safe
+    # to retry without returning a second Job.
+    mcp_idempotency_key = Column(String(64), nullable=True, unique=True, index=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())

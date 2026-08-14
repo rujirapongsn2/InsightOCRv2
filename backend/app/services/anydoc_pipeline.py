@@ -20,7 +20,11 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.models import DocumentSchema, Setting
 from app.services.ocr import process_ocr
-from app.services.ocr_fallback import process_fallback_ocr, resolve_fallback_api_key
+from app.services.ocr_fallback import (
+    fallback_configuration_error,
+    process_fallback_ocr,
+    resolve_fallback_api_key,
+)
 from app.services.tesseract_ocr import TesseractOcrError, process_tesseract_ocr
 from app.services.tls import get_verify_ssl
 
@@ -235,7 +239,11 @@ def _ocr_page_with_providers(
             logger.warning("Softnix OCR failed for page %s: %s", page_number, error)
 
     fallback_key, fallback_source = resolve_fallback_api_key(setting)
-    if bool(setting.ocr_fallback_enabled and fallback_key):
+    fallback_failure: str | None = fallback_configuration_error(
+        setting,
+        bool(setting.ocr_fallback_enabled),
+    )
+    if fallback_failure is None:
         try:
             fallback_result = process_fallback_ocr(
                 image_path,
@@ -254,12 +262,14 @@ def _ocr_page_with_providers(
                     "provider": "ocr_fallback",
                     "key_source": fallback_source,
                 }
+            fallback_failure = "OCR fallback returned no readable text"
         except Exception as error:
+            fallback_failure = "OCR fallback request failed"
             logger.warning("OCR fallback failed for page %s: %s", page_number, error)
 
     attempted_providers = "TesseractOCR, Softnix OCR, and OCR fallback" if allow_softnix_ocr else "TesseractOCR and OCR fallback"
     raise AnydocTerminalError(
-        f"{attempted_providers} returned no text for page {page_number}"
+        f"{attempted_providers} returned no text for page {page_number}; {fallback_failure}"
     )
 
 

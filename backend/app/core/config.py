@@ -99,6 +99,13 @@ class Settings(BaseSettings):
     # Keep refresh sessions independent from the short-lived access token.
     REFRESH_TOKEN_EXPIRE_DAYS: int = 30
 
+    # MCP accepts JSON-RPC, so uploaded binary files are base64 encoded. Keep
+    # this lower than the regular UI upload limit to bound request memory.
+    MCP_MAX_UPLOAD_SIZE_MB: int = 10
+    # Avoid a database write on every authenticated MCP/API request while
+    # keeping token usage information reasonably current.
+    API_TOKEN_LAST_USED_UPDATE_SECONDS: int = 300
+
     # Extra CORS origins (comma-separated) to append beyond BACKEND_CORS_ORIGINS
     BACKEND_EXTRA_CORS_ORIGINS: str = ""
 

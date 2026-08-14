@@ -10,7 +10,7 @@ from app.models.user import User
 from app.models.setting import Setting
 from app.schemas.setting import Setting as SettingSchema, SettingUpdate
 from app.services.tls import warn_ssl_verification_disabled
-from app.services.ocr_fallback import resolve_fallback_api_key
+from app.services.ocr_fallback import fallback_configuration_error, resolve_fallback_api_key
 from app.utils.activity_logger import log_activity, Actions
 from app.utils.redact import is_masked, mask_secret
 
@@ -130,6 +130,14 @@ def update_settings(
     if "ocr_fallback_api_key" in payload.model_fields_set and not is_masked(payload.ocr_fallback_api_key):
         setting.ocr_fallback_api_key = payload.ocr_fallback_api_key or None
     setting.verify_ssl = payload.verify_ssl
+
+    if payload.ocr_fallback_enabled:
+        fallback_error = fallback_configuration_error(setting, enabled=True)
+        if fallback_error:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Cannot enable OCR fallback: {fallback_error}. Configure a UI key or MISTRAL_API_KEY first.",
+            )
     setting.ocr_fallback_enabled = payload.ocr_fallback_enabled
 
     # Keep legacy api_endpoint in sync with ocr_endpoint for backward compatibility

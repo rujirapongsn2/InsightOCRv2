@@ -40,6 +40,16 @@ def resolve_fallback_api_key(setting: Any = None) -> tuple[str, str]:
     return "", "none"
 
 
+def fallback_configuration_error(setting: Any = None, enabled: bool = False) -> str | None:
+    """Explain why the fallback cannot be used, without exposing credentials."""
+    if not enabled:
+        return "OCR fallback is disabled"
+    key, _source = resolve_fallback_api_key(setting)
+    if not key:
+        return "OCR fallback is enabled but no API key is configured"
+    return None
+
+
 def process_fallback_ocr(
     file_path: str,
     *,
