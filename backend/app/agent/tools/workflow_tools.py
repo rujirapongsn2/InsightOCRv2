@@ -180,7 +180,12 @@ async def _validate_workflow_handler(args: dict, context) -> dict:
     owner = _owner(context)
     if not owner:
         return {"error": "ไม่พบผู้ใช้"}
-    issues = validate_workflow_definition(context.db, definition, owner)
+    issues = validate_workflow_definition(
+        context.db,
+        definition,
+        owner,
+        allow_unresolved_references=False,
+    )
     errors = [i for i in issues if i["level"] == "error"]
     return {"ok": not errors, "error_count": len(errors), "issues": issues}
 
@@ -267,7 +272,12 @@ async def _save_workflow_handler(args: dict, context) -> dict:
     if not name:
         return {"ok": False, "error": "ต้องระบุชื่อ workflow"}
 
-    issues = validate_workflow_definition(db, definition, owner)
+    issues = validate_workflow_definition(
+        db,
+        definition,
+        owner,
+        allow_unresolved_references=False,
+    )
     errors = [i for i in issues if i["level"] == "error"]
     if errors:
         return {"ok": False, "error": "validation ไม่ผ่าน — แก้ไขก่อนบันทึก", "issues": issues}

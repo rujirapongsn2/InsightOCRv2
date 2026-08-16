@@ -20,10 +20,13 @@ import json
 import logging
 import re
 import os
+import socket
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
+from urllib.parse import urlparse
 
 import requests as http_requests
+from requests.adapters import HTTPAdapter
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -42,6 +45,16 @@ logger = logging.getLogger(__name__)
 # same shared-volume location the engine wrote to before; with MinIO/S3 the
 # files land in the bucket so any replica can serve them.
 WORKFLOW_OUTPUT_DIR = os.environ.get("WORKFLOW_OUTPUT_DIR", "workflow_outputs")
+
+# A workflow can use an external API response in downstream nodes, but it must
+# not be able to exhaust a worker by returning an unbounded response body.
+try:
+    WORKFLOW_API_MAX_RESPONSE_BYTES = max(
+        1,
+        int(os.environ.get("WORKFLOW_API_MAX_RESPONSE_BYTES", "1048576")),
+    )
+except ValueError:
+    WORKFLOW_API_MAX_RESPONSE_BYTES = 1_048_576
 
 # ── Node catalog (exposed to the frontend palette) ──────────────────
 NODE_TYPES: List[Dict[str, Any]] = [
@@ -195,8 +208,8 @@ NODE_TYPES: List[Dict[str, Any]] = [
     {
         "type": "http_request",
         "category": "action",
-        "label": "HTTP Request",
-        "description": "ส่งข้อมูลต่อไปยังระบบอื่นผ่าน REST API / Webhook",
+        "label": "HTTP Request (Advanced)",
+        "description": "เรียก endpoint โดยตรงจาก workflow; ใช้ API node เมื่อต้องการ Custom API ที่บันทึกไว้",
         "config_fields": [
             {"name": "method", "label": "Method", "type": "select",
              "options": ["POST", "GET", "PUT", "PATCH", "DELETE"], "default": "POST"},
@@ -209,6 +222,27 @@ NODE_TYPES: List[Dict[str, Any]] = [
              "hint": "ใช้ปุ่มแทรกข้อมูลเพื่อส่งผลจากโหนดก่อนหน้า"},
         ],
         "output_fields": [
+            {"name": "status_code", "label": "HTTP status"},
+            {"name": "body", "label": "เนื้อหาที่ตอบกลับ"},
+        ],
+    },
+    {
+        "type": "api",
+        "category": "action",
+        "label": "API",
+        "description": "ส่งข้อมูลจากโหนดก่อนหน้าไปยัง Custom API ที่ตั้งค่าไว้ใน Integration",
+        "config_fields": [
+            {"name": "integration_id", "label": "Custom API", "type": "integration_select",
+             "provider": "api", "required": True,
+             "hint": "เลือก Custom API ที่มี endpoint, method และ headers ที่บันทึกไว้แล้ว"},
+            {"name": "body", "label": "Request body", "type": "textarea", "required": False,
+             "placeholder": "{{transform_xxx}}",
+             "hint": "ข้อมูลนี้จะแทน Payload Template ของ Custom API; เว้นว่างเพื่อใช้ Payload Template ที่บันทึกไว้"},
+            {"name": "timeout_seconds", "label": "Timeout (seconds)", "type": "number", "default": 30,
+             "hint": "เวลาสูงสุดที่รอ API ตอบกลับ (1-120 วินาที)"},
+        ],
+        "output_fields": [
+            {"name": "integration_name", "label": "Custom API ที่ใช้"},
             {"name": "status_code", "label": "HTTP status"},
             {"name": "body", "label": "เนื้อหาที่ตอบกลับ"},
         ],
@@ -972,16 +1006,14 @@ def _exec_python_code(db: Session, config: dict, context: dict, log: Callable[[s
     return {"result": result.get("result"), "stdout": stdout}
 
 
-def _validate_outbound_url(url: str) -> None:
-    """SSRF guard for user-configurable HTTP nodes: only http(s), and no
-    private/loopback/link-local/metadata targets unless explicitly allowed
-    via WORKFLOW_HTTP_ALLOW_PRIVATE=true (e.g. for on-prem internal APIs)."""
-    import ipaddress
-    import socket
-    from urllib.parse import urlparse
+def _validate_outbound_url(url: str) -> tuple[Any, str]:
+    """Validate an outbound URL and return one approved, pinned IP address.
 
-    if os.environ.get("WORKFLOW_HTTP_ALLOW_PRIVATE", "").lower() in ("1", "true", "yes"):
-        return
+    A request made by hostname would resolve DNS a second time inside the HTTP
+    client. Returning the approved address lets Custom API requests connect to
+    that exact address and prevents DNS rebinding from reaching private hosts.
+    """
+    import ipaddress
 
     parsed = urlparse(str(url))
     if parsed.scheme not in ("http", "https"):
@@ -989,17 +1021,113 @@ def _validate_outbound_url(url: str) -> None:
     host = parsed.hostname
     if not host:
         raise NodeExecutionError("HTTP node: URL has no host")
+    if parsed.username or parsed.password:
+        raise NodeExecutionError("HTTP node: URL must not include credentials")
     try:
         infos = socket.getaddrinfo(host, None)
     except socket.gaierror as exc:
         raise NodeExecutionError(f"HTTP node: cannot resolve host '{host}': {exc}")
+    addresses: List[str] = []
     for info in infos:
         ip = ipaddress.ip_address(info[4][0])
-        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
-            raise NodeExecutionError(
-                f"HTTP node: target '{host}' resolves to a private address ({ip}) — blocked. "
-                "Set WORKFLOW_HTTP_ALLOW_PRIVATE=true to allow internal targets."
-            )
+        if str(ip) not in addresses:
+            addresses.append(str(ip))
+    if not addresses:
+        raise NodeExecutionError(f"HTTP node: cannot resolve host '{host}'")
+
+    private_networks_allowed = os.environ.get("WORKFLOW_HTTP_ALLOW_PRIVATE", "").lower() in ("1", "true", "yes")
+    if not private_networks_allowed:
+        for address in addresses:
+            ip = ipaddress.ip_address(address)
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+                raise NodeExecutionError(
+                    f"HTTP node: target '{host}' resolves to a private address ({ip}) — blocked. "
+                    "Set WORKFLOW_HTTP_ALLOW_PRIVATE=true to allow internal targets."
+                )
+    return parsed, addresses[0]
+
+
+class _PinnedAddressAdapter(HTTPAdapter):
+    """Connect Requests to a validated IP while preserving Host and HTTPS SNI."""
+
+    def __init__(self, hostname: str, host_header: str, address: str) -> None:
+        super().__init__()
+        self.hostname = hostname
+        self.host_header = host_header
+        self.address = address
+
+    def get_connection_with_tls_context(self, request, verify, proxies=None, cert=None):
+        if proxies:
+            raise NodeExecutionError("Custom API ผ่าน proxy ไม่ได้รับอนุญาต")
+        host_params, pool_kwargs = self.build_connection_pool_key_attributes(request, verify, cert)
+        host_params["host"] = self.address
+        if request.url.lower().startswith("https://"):
+            pool_kwargs["assert_hostname"] = self.hostname
+            pool_kwargs["server_hostname"] = self.hostname
+        return self.poolmanager.connection_from_host(**host_params, pool_kwargs=pool_kwargs)
+
+    def add_headers(self, request, **kwargs):
+        super().add_headers(request, **kwargs)
+        request.headers.setdefault("Host", self.host_header)
+
+
+def _request_custom_api(method: str, url: str, **kwargs: Any) -> Any:
+    """Perform a Custom API request through the validated DNS address only."""
+    parsed, address = _validate_outbound_url(url)
+    host_header = parsed.netloc.rsplit("@", 1)[-1]
+    session = http_requests.Session()
+    session.trust_env = False
+    session.mount(
+        f"{parsed.scheme}://",
+        _PinnedAddressAdapter(parsed.hostname or "", host_header, address),
+    )
+    try:
+        response = session.request(method, url, stream=True, **kwargs)
+    except Exception:
+        session.close()
+        raise
+    # Keep the session alive until the streamed response has been fully read.
+    response._insightdoc_session = session
+    return response
+
+
+def _read_custom_api_response(response: Any) -> Any:
+    """Read a bounded Custom API response and parse JSON when available."""
+    raw_length = response.headers.get("Content-Length")
+    if raw_length:
+        try:
+            if int(raw_length) > WORKFLOW_API_MAX_RESPONSE_BYTES:
+                response.close()
+                session = getattr(response, "_insightdoc_session", None)
+                if session is not None:
+                    session.close()
+                raise NodeExecutionError(f"API node: response exceeds {WORKFLOW_API_MAX_RESPONSE_BYTES} bytes")
+        except ValueError:
+            pass
+
+    chunks: List[bytes] = []
+    total = 0
+    try:
+        for chunk in response.iter_content(chunk_size=64 * 1024):
+            if not chunk:
+                continue
+            total += len(chunk)
+            if total > WORKFLOW_API_MAX_RESPONSE_BYTES:
+                raise NodeExecutionError(
+                    f"API node: response exceeds {WORKFLOW_API_MAX_RESPONSE_BYTES} bytes"
+                )
+            chunks.append(chunk)
+    finally:
+        response.close()
+        session = getattr(response, "_insightdoc_session", None)
+        if session is not None:
+            session.close()
+
+    text = b"".join(chunks).decode(response.encoding or "utf-8", errors="replace")
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return text[:5000]
 
 
 def _exec_http_request(db: Session, config: dict, context: dict, log: Callable[[str], None]) -> Any:
@@ -1040,6 +1168,106 @@ def _exec_http_request(db: Session, config: dict, context: dict, log: Callable[[
     if resp.status_code >= 400:
         raise NodeExecutionError(f"HTTP {resp.status_code}: {_stringify(payload)[:500]}")
     return {"status_code": resp.status_code, "body": payload}
+
+
+def _custom_api_headers(integration: Integration) -> Dict[str, str]:
+    """Build headers from a saved Custom API integration without exposing them to the workflow."""
+    config = integration.config or {}
+    headers: Dict[str, str] = {"Content-Type": "application/json"}
+
+    auth_header = config.get("authHeader")
+    if auth_header:
+        for line in str(auth_header).splitlines():
+            name, separator, value = line.partition(":")
+            if separator and name.strip():
+                headers[name.strip()] = value.strip()
+
+    raw_headers = config.get("headersJson")
+    if isinstance(raw_headers, dict):
+        headers.update({str(name): str(value) for name, value in raw_headers.items()})
+    elif isinstance(raw_headers, str) and raw_headers.strip():
+        try:
+            parsed = json.loads(raw_headers)
+        except json.JSONDecodeError as exc:
+            raise NodeExecutionError(
+                f"Custom API '{integration.name}' มี Headers (JSON) ไม่ถูกต้อง"
+            ) from exc
+        if not isinstance(parsed, dict):
+            raise NodeExecutionError(f"Custom API '{integration.name}' ต้องกำหนด Headers เป็น JSON object")
+        headers.update({str(name): str(value) for name, value in parsed.items()})
+
+    return headers
+
+
+def _exec_api(db: Session, config: dict, context: dict, log: Callable[[str], None]) -> Any:
+    """Send templated upstream data through a saved Custom API integration."""
+    integration_id = config.get("integration_id")
+    if not integration_id:
+        raise NodeExecutionError("API node: ต้องเลือก Custom API ก่อน")
+
+    integration = db.query(Integration).filter(Integration.id == integration_id).first()
+    if not integration:
+        raise NodeExecutionError("API node: ไม่พบ Custom API ที่เลือก")
+    _ensure_integration_owner(integration, (context or {}).get("_owner_user_id"))
+    if integration.type != IntegrationType.API:
+        raise NodeExecutionError(f"API node: integration '{integration.name}' ไม่ใช่ Custom API")
+    if integration.status != IntegrationStatus.ACTIVE:
+        raise NodeExecutionError(f"API node: Custom API '{integration.name}' ยังไม่พร้อมใช้งาน")
+
+    integration_config = integration.config or {}
+    url = str(integration_config.get("endpoint") or "").strip()
+    if not url:
+        raise NodeExecutionError(f"API node: Custom API '{integration.name}' ไม่มี Endpoint URL")
+    method = str(integration_config.get("method") or "POST").upper()
+    if method not in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
+        raise NodeExecutionError(f"API node: Custom API '{integration.name}' ใช้ HTTP method ที่ไม่รองรับ")
+
+    # A workflow body is intentionally the first choice: it is where values from
+    # upstream nodes are resolved. The saved template remains a reusable default.
+    body = config.get("body")
+    if body is None or (isinstance(body, str) and not body.strip()):
+        body = resolve_template(integration_config.get("payloadTemplate"), context)
+
+    try:
+        timeout_seconds = int(config.get("timeout_seconds") or 30)
+    except (TypeError, ValueError) as exc:
+        raise NodeExecutionError("API node: Timeout ต้องเป็นตัวเลข") from exc
+    if not 1 <= timeout_seconds <= 120:
+        raise NodeExecutionError("API node: Timeout ต้องอยู่ระหว่าง 1 ถึง 120 วินาที")
+
+    kwargs: Dict[str, Any] = {
+        "headers": _custom_api_headers(integration),
+        "timeout": timeout_seconds,
+        # Do not follow redirects: the target is checked above and a redirect
+        # could otherwise bypass the outbound-network protection.
+        "allow_redirects": False,
+    }
+    if body is not None and method != "GET":
+        if isinstance(body, (dict, list)):
+            kwargs["json"] = body
+        else:
+            try:
+                kwargs["json"] = json.loads(str(body))
+            except json.JSONDecodeError:
+                kwargs["data"] = str(body)
+
+    log(f"{method} ผ่าน Custom API '{integration.name}'")
+    try:
+        response = _request_custom_api(method, url, **kwargs)
+    except http_requests.RequestException as exc:
+        raise NodeExecutionError(f"API node: เรียก Custom API '{integration.name}' ไม่สำเร็จ: {exc}") from exc
+
+    log(f"Response: HTTP {response.status_code}")
+    payload = _read_custom_api_response(response)
+    if response.status_code >= 400:
+        raise NodeExecutionError(f"HTTP {response.status_code}: {_stringify(payload)[:500]}")
+
+    return {
+        "integration_id": str(integration.id),
+        "integration_name": integration.name,
+        "status_code": response.status_code,
+        "body": payload,
+    }
 
 
 _WRITE_OUTPUT_CONTENT_TYPES = {
@@ -1391,6 +1619,7 @@ EXECUTORS: Dict[str, Callable] = {
     "transform": _exec_transform,
     "python_code": _exec_python_code,
     "http_request": _exec_http_request,
+    "api": _exec_api,
     "write_output": _exec_write_output,
     "webhook_response": _exec_webhook_response,
     "gdrive_upload": _exec_gdrive_upload,
@@ -1549,7 +1778,7 @@ def execute_workflow_run(db: Session, run: WorkflowRun) -> None:
                 raise NodeExecutionError(f"Unknown node type: {node_type}")
             output = executor(db, resolved_config, context, log)
             context[node_id] = output
-            nr.output = _safe_json(output)
+            nr.output = _safe_json(redact_secrets(output))
             nr.status = "succeeded"
             node_status[node_id] = "succeeded"
             if node_type == "webhook_response":
@@ -1574,7 +1803,7 @@ def execute_workflow_run(db: Session, run: WorkflowRun) -> None:
     run.error = run_failed_error
     if not run_failed_error:
         selected_result = webhook_result if webhook_result is not None else fallback_result
-        run.result = _safe_json(selected_result)
+        run.result = _safe_json(redact_secrets(selected_result))
         run.result_node_id = webhook_result_node_id or fallback_result_node_id
     run.finished_at = _now()
     db.commit()
@@ -1673,7 +1902,7 @@ def execute_single_node(db: Session, run: WorkflowRun, node_id: str) -> None:
         if not executor:
             raise NodeExecutionError(f"Unknown node type: {node_type}")
         output = executor(db, resolved_config, context, log)
-        nr.output = _safe_json(output)
+        nr.output = _safe_json(redact_secrets(output))
         nr.status = "succeeded"
     except Exception as exc:  # noqa: BLE001
         logger.exception("Single-node test %s failed", node_id)

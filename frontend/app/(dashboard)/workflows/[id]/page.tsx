@@ -63,6 +63,7 @@ const TYPE_ICON: Record<string, any> = {
     transform: Shuffle,
     python_code: Code2,
     http_request: Globe,
+    api: Globe,
     write_output: FileOutput,
     webhook_response: Webhook,
     gdrive_upload: CloudUpload,
@@ -233,6 +234,16 @@ const NODE_HELP_CONTENT: Record<string, NodeHelpContent> = {
         example: "ตัวอย่าง: POST {{job.reviewed}} ไปยังระบบบัญชีหลังตรวจเอกสาร",
         caution: "ตรวจปลายทางและข้อมูลใน Body ทุกครั้ง เพราะ node นี้สามารถส่งข้อมูลออกนอกระบบได้",
     },
+    api: {
+        purpose: "ใช้ส่งข้อมูลจาก node ก่อนหน้าไปยัง Custom API ที่ตั้งค่าไว้ในเมนู Integration โดยไม่ต้องใส่ endpoint หรือ credentials ซ้ำใน workflow",
+        steps: [
+            "สร้างและทดสอบ Custom API ในเมนู Integration ก่อน แล้วเลือกการเชื่อมต่อนั้นในฟอร์มนี้",
+            "ใส่ Request body โดยใช้ปุ่มแทรกข้อมูลเพื่อเลือกผลจาก node ก่อนหน้า หรือเว้นว่างเพื่อใช้ Payload Template ของ Custom API",
+            "ตั้ง Timeout และทดสอบ node เพื่อดู HTTP status กับ response ก่อนเปิดใช้ workflow จริง",
+        ],
+        example: "ตัวอย่าง: Transform / Mapping → API เพื่อส่งข้อมูล invoice ที่จัดรูปแบบแล้วไปยังระบบบัญชี",
+        caution: "ข้อมูลใน Request body จะถูกส่งออกนอก InsightDOC ตาม endpoint ของ Custom API ที่เลือก",
+    },
     write_output: {
         purpose: "ใช้สร้างไฟล์ผลลัพธ์จากข้อมูลใน workflow เพื่อดาวน์โหลดหรืออัปโหลดต่อไปยัง storage",
         steps: [
@@ -314,6 +325,9 @@ const FIELD_HELP: Record<string, string> = {
     url: "URL ของ API ปลายทาง ควรเป็น HTTPS และตรวจสอบโดเมนก่อนบันทึก",
     headers: "ใส่ JSON ที่ถูกต้อง เช่น { \"Content-Type\": \"application/json\" }",
     body: "ข้อมูลที่จะส่งไปยัง API หรือใช้เป็นผลลัพธ์; แทรกตัวแปรจาก node ก่อนหน้าได้",
+    "api.integration_id": "เลือก Custom API ที่ตั้งค่า endpoint, method และ headers ไว้ในเมนู Integration",
+    "api.body": "ใช้ปุ่มแทรกข้อมูลเพื่อส่งผลของ node ก่อนหน้า; เว้นว่างเพื่อใช้ Payload Template ที่บันทึกไว้",
+    timeout_seconds: "เวลาสูงสุดที่รอ API ตอบกลับ; กำหนดได้ตั้งแต่ 1 ถึง 120 วินาที",
     filename: "ชื่อไฟล์รวมถึงนามสกุล เพื่อให้ผู้รับรู้ประเภทไฟล์ได้ชัดเจน",
     format: "เลือกรูปแบบไฟล์ให้เหมาะกับข้อมูล: json สำหรับระบบ, csv/xlsx สำหรับตาราง, docx สำหรับเอกสาร",
     content: "เนื้อหาที่จะบันทึกหรืออัปโหลด; ใช้ปุ่มแทรกข้อมูลเพื่อเลือกผลจาก node ก่อนหน้า",
@@ -1031,7 +1045,9 @@ function ConfigField({
         )
     }
     if (field.type === "integration_select") {
-        const matches = integrations.filter((i) => !field.provider || i.type === field.provider)
+        const allMatches = integrations.filter((i) => !field.provider || i.type === field.provider)
+        const matches = allMatches.filter((i) => i.status === "active")
+        const selected = allMatches.find((i) => i.id === value)
         const known = matches.some((i) => i.id === value)
         return (
             <div>
@@ -1040,12 +1056,18 @@ function ConfigField({
                     {matches.map((i) => (
                         <option key={i.id} value={i.id}>{i.name}{i.status === "paused" ? " (paused)" : ""}</option>
                     ))}
-                    {value && !known && <option value={value}>{`${value} (ไม่พบในรายการ)`}</option>}
+                    {selected && selected.status !== "active" && (
+                        <option value={selected.id}>{`${selected.name} (paused — ใช้งานไม่ได้)`}</option>
+                    )}
+                    {value && !known && !selected && <option value={value}>{`${value} (ไม่พบในรายการ)`}</option>}
                 </select>
                 {matches.length === 0 && (
                     <p className="text-[10px] text-amber-600 mt-1">
-                        ยังไม่มีบัญชีชนิดนี้ — ไปสร้างที่ <a href="/integrations" className="underline">เมนู Integration</a> ก่อน
+                        ยังไม่มีบัญชีชนิดนี้ที่พร้อมใช้งาน — ไปตรวจสอบที่ <a href="/integrations" className="underline">เมนู Integration</a>
                     </p>
+                )}
+                {selected && selected.status !== "active" && (
+                    <p className="text-[10px] text-amber-600 mt-1">บัญชีนี้ถูกพักไว้ ต้องเปิดใช้งานก่อนจึงจะรัน workflow ได้</p>
                 )}
             </div>
         )

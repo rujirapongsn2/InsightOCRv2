@@ -67,7 +67,11 @@ services:
       - db
       - redis
     networks:
-      - internal # isolate; outbound via gateway proxy
+      # public: DNS resolution for outbound Custom API targets (e.g.
+      # knowledge.softnix.ai). HTTP egress itself still goes through the
+      # gateway proxy via HTTP(S)_PROXY; internal: app database/redis.
+      - public
+      - internal
     security_opt:
       - no-new-privileges:true
     group_add:
@@ -115,7 +119,10 @@ services:
       - redis
       - backend
     networks:
-      - internal # isolate; outbound via gateway proxy
+      # public: DNS for outbound Custom API targets (knowledge.softnix.ai);
+      # HTTP egress still goes through the gateway proxy.
+      - public
+      - internal
     security_opt:
       - no-new-privileges:true
     group_add:

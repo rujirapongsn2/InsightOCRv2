@@ -77,8 +77,15 @@ def validate_workflow_definition(
     db: Session,
     definition: Dict[str, Any],
     owner: User,
+    *,
+    allow_unresolved_references: bool = True,
 ) -> List[Dict[str, Any]]:
-    """Validate a definition for `owner`. Returns issues (empty = fully valid)."""
+    """Validate a definition for `owner`.
+
+    Imports may retain unresolved references as warnings so they can be mapped
+    in a new environment. Saving, activating, or running a workflow uses strict
+    validation and blocks those references before any side effect can occur.
+    """
     issues: List[Dict[str, Any]] = []
     definition = definition or {}
     nodes: List[dict] = definition.get("nodes") or []
@@ -142,13 +149,17 @@ def validate_workflow_definition(
         if provider and config.get("integration_id"):
             integ = db.query(Integration).filter(Integration.id == config["integration_id"]).first()
             if not integ:
-                issues.append(_issue(nid, "warning", "integration_id", "ไม่พบ integration ที่อ้างถึง — โปรดเลือก/สร้างใหม่"))
+                level = "warning" if allow_unresolved_references else "error"
+                issues.append(_issue(nid, level, "integration_id", "ไม่พบ integration ที่อ้างถึง — โปรดเลือก/สร้างใหม่"))
             else:
                 if integ.user_id is not None and str(integ.user_id) != str(owner.id):
                     issues.append(_issue(nid, "error", "integration_id", "integration นี้เป็นของผู้ใช้อื่น"))
                 itype = integ.type.value if hasattr(integ.type, "value") else str(integ.type)
                 if itype != provider:
                     issues.append(_issue(nid, "error", "integration_id", f"integration ต้องเป็นชนิด {provider} (พบ {itype})"))
+                status = integ.status.value if hasattr(integ.status, "value") else str(integ.status)
+                if status != "active":
+                    issues.append(_issue(nid, "error", "integration_id", "integration ที่เลือกถูกพักการใช้งานอยู่"))
 
         # Referenced AI provider (llm node) must exist & be active.
         if ntype == "llm" and config.get("ai_provider_id"):

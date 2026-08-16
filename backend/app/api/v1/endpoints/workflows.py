@@ -60,6 +60,28 @@ def _validate_cron(expr: Optional[str]) -> None:
         raise HTTPException(status_code=422, detail=f"Invalid cron expression: {expr}")
 
 
+def _ensure_runnable_definition(db: Session, definition: dict, user: User) -> None:
+    # The builder creates an empty draft before the first node is placed.
+    # Keep that editing flow available; run/activate still validates the graph.
+    if not (definition or {}).get("nodes"):
+        return
+    issues = validate_workflow_definition(
+        db,
+        definition,
+        user,
+        allow_unresolved_references=False,
+    )
+    errors = [issue for issue in issues if issue["level"] == "error"]
+    if errors:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": "Workflow configuration is not runnable",
+                "issues": errors,
+            },
+        )
+
+
 def _webhook_url(request: Request, workflow_id: UUID, secret: str) -> str:
     base_url = str(request.base_url).rstrip("/")
     return f"{base_url}{settings.API_V1_STR}/external/workflows/{workflow_id}/webhook/{secret}"
@@ -163,10 +185,12 @@ def create_workflow(
     current_user: User = Depends(deps.get_current_active_user),
 ):
     _validate_cron(payload.schedule_cron)
+    definition = payload.definition.model_dump() if payload.definition else {"nodes": [], "edges": []}
+    _ensure_runnable_definition(db, definition, current_user)
     wf = Workflow(
         name=payload.name,
         description=payload.description,
-        definition=payload.definition.model_dump() if payload.definition else {"nodes": [], "edges": []},
+        definition=definition,
         schedule_cron=payload.schedule_cron,
         schedule_enabled=payload.schedule_enabled,
         is_active=payload.is_active,
@@ -203,6 +227,8 @@ def update_workflow(
         _validate_cron(data["schedule_cron"])
     if "definition" in data and data["definition"] is not None:
         data["definition"] = payload.definition.model_dump()
+    if "definition" in data or data.get("is_active"):
+        _ensure_runnable_definition(db, data.get("definition") or wf.definition or {}, current_user)
     for key, value in data.items():
         setattr(wf, key, value)
 
@@ -280,6 +306,7 @@ def run_workflow(
     nodes = (wf.definition or {}).get("nodes") or []
     if not nodes:
         raise HTTPException(status_code=400, detail="Workflow has no nodes")
+    _ensure_runnable_definition(db, wf.definition or {}, current_user)
 
     run = WorkflowRun(
         workflow_id=wf.id,
@@ -317,6 +344,7 @@ def test_node(
     nodes = (wf.definition or {}).get("nodes") or []
     if not any(n.get("id") == node_id for n in nodes):
         raise HTTPException(status_code=404, detail="Node not found in workflow")
+    _ensure_runnable_definition(db, wf.definition or {}, current_user)
 
     run = WorkflowRun(
         workflow_id=wf.id,

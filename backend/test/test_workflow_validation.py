@@ -72,6 +72,28 @@ def test_missing_required_config_errors():
     assert any(i["node_id"] == "l1" and i["field"] == "prompt" and i["level"] == "error" for i in issues)
 
 
+def test_api_node_requires_a_saved_custom_api_connection():
+    definition = {
+        "nodes": [_node("t1", "trigger_manual"), _node("api1", "api", {})],
+        "edges": [{"id": "e", "source": "t1", "target": "api1"}],
+    }
+    issues = validate_workflow_definition(_FakeSession(), definition, _User())
+    assert any(i["node_id"] == "api1" and i["field"] == "integration_id" and i["level"] == "error" for i in issues)
+
+
+def test_api_node_accepts_a_custom_api_connection_reference():
+    definition = {
+        "nodes": [
+            _node("t1", "trigger_manual"),
+            _node("api1", "api", {"integration_id": str(uuid.uuid4()), "body": "{{t1.payload}}"}),
+        ],
+        "edges": [{"id": "e", "source": "t1", "target": "api1"}],
+    }
+    issues = validate_workflow_definition(_FakeSession(), definition, _User())
+    assert not any(i["node_id"] == "api1" and i["level"] == "error" for i in issues)
+    assert any(i["node_id"] == "api1" and i["field"] == "integration_id" and i["level"] == "warning" for i in issues)
+
+
 def test_cycle_errors():
     definition = {
         "nodes": [_node("a", "trigger_manual"), _node("b", "transform", {"mappings": [{"target": "x", "value": "1"}]})],
