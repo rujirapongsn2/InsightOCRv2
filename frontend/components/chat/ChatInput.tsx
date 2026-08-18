@@ -46,8 +46,13 @@ export default function ChatInput({ value, onChange, onSend, disabled, streaming
                     className="flex-1 resize-none rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:opacity-50 min-h-[40px] max-h-[120px]"
                 />
                 <button
-                    onClick={onSend}
+                    // Do not pass the browser click event to callbacks that
+                    // expect no arguments (AgentPanel's sendMessage accepts
+                    // an optional text override).
+                    onClick={() => onSend()}
                     disabled={!value.trim() || disabled || streaming}
+                    type="button"
+                    aria-label="Send message"
                     className="flex-shrink-0 w-9 h-9 rounded-full bg-blue-600 text-white flex items-center justify-center hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
                 >
                     {streaming ? (
