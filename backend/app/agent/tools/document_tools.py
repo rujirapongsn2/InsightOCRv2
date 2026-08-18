@@ -213,7 +213,7 @@ tool_registry.register(ToolDef(
 
 tool_registry.register(ToolDef(
     name="search_documents", category="document",
-    description="Search documents by keyword in filename, OCR text, or extracted data.",
+    description="Search documents by keyword in filename, OCR text, or extracted data. Use one focused query per concept; do not repeat equivalent searches when a useful result is already available.",
     parameters_schema={"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
     handler=_search_documents_handler,
 ))

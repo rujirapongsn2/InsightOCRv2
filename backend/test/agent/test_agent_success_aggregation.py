@@ -20,6 +20,21 @@ from app.agent.loop import (
 # ── _aggregate_success ───────────────────────────────────────────────
 
 
+@pytest.mark.parametrize(
+    "result, expected",
+    [
+        ({"result": {"answer": "ok"}, "error": None}, False),
+        ({"result": 1, "error": "sandbox failed"}, True),
+        ({"ok": True, "verified": True}, False),
+        ({"ok": False, "error": "write failed"}, True),
+        ({"error": ""}, False),
+    ],
+)
+def test_tool_failed_only_marks_truthy_errors(result, expected):
+    """Tools may include an explicit null error field on successful results."""
+    assert _tool_failed(result) is expected
+
+
 def test_aggregate_success_pure_success():
     ok, steps = _aggregate_success(
         stopped=None,

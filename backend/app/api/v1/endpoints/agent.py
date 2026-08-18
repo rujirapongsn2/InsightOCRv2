@@ -707,7 +707,9 @@ async def export_skill(
 
 def _tool_result_failed(result) -> bool:
     """Mirror AgentLoop._tool_failed: a dict carrying an error or ok=false."""
-    return isinstance(result, dict) and ("error" in result or result.get("ok") is False)
+    if not isinstance(result, dict):
+        return False
+    return bool(result.get("error")) or result.get("ok") is False
 
 
 def _classify_runs(messages, max_iter_by_conv: dict, default_max_iter: int):

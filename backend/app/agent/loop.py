@@ -216,7 +216,16 @@ def _extract_json_objects(text: str) -> list[dict[str, Any]]:
 
 
 def _tool_failed(result: Any) -> bool:
-    return isinstance(result, dict) and ("error" in result or result.get("ok") is False)
+    """Return whether a tool result represents an actual failure.
+
+    Several tools, including ``execute_python``, always include an ``error``
+    field and set it to ``None`` on success. Checking only for key presence
+    incorrectly turned successful calls into failures and caused the model to
+    retry until it hit the iteration cap.
+    """
+    if not isinstance(result, dict):
+        return False
+    return bool(result.get("error")) or result.get("ok") is False
 
 
 def _aggregate_success(
