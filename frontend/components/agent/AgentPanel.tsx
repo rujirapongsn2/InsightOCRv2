@@ -99,7 +99,6 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
     const [thinkingIteration, setThinkingIteration] = useState<number | null>(null)
     const [planSteps, setPlanSteps] = useState<string[]>([])
     const [reflection, setReflection] = useState<{ complete: boolean; missing: string[] } | null>(null)
-    const [doneStatus, setDoneStatus] = useState<{ success: boolean; failedSteps: string[] } | null>(null)
     const [streamText, setStreamText] = useState("")
     const [pendingAction, setPendingAction] = useState<PendingAction | null>(null)
     const [autoConfirm, setAutoConfirm] = useState(false)
@@ -275,7 +274,6 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
         setThinkingIteration(null)
         setPlanSteps([])
         setReflection(null)
-        setDoneStatus(null)
 
         const userMsgObj: Message = { id: crypto.randomUUID(), role: "user", content: userMsg, created_at: new Date().toISOString() }
         setMessages(prev => [...prev, userMsgObj])
@@ -351,10 +349,6 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
                                 receivedDone = true
                                 setStreaming(false)
                                 setThinkingIteration(null)
-                                setDoneStatus({
-                                    success: evt.success !== false,
-                                    failedSteps: Array.isArray(evt.failed_steps) ? evt.failed_steps : [],
-                                })
                                 if (finalText) {
                                     setMessages(prev => [...prev, { id: crypto.randomUUID(), role: "assistant", content: finalText, created_at: new Date().toISOString() }])
                                     setStreamText("")
@@ -854,19 +848,6 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
                     <div className="mx-3 flex items-start gap-2 p-3 rounded-lg bg-red-50 border border-red-200">
                         <AlertTriangle className="h-4 w-4 text-red-500 mt-0.5 flex-shrink-0" />
                         <p className="text-xs text-red-700">{error}</p>
-                    </div>
-                )}
-                {doneStatus && !doneStatus.success && (
-                    <div className="mx-3 mb-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">
-                        <div className="flex items-center gap-2 font-medium">
-                            <AlertTriangle className="h-4 w-4" />
-                            การทำงานยังไม่สมบูรณ์ — ตรวจพบปัญหา:
-                        </div>
-                        {doneStatus.failedSteps.length > 0 && (
-                            <ul className="mt-1 list-disc pl-6 space-y-0.5">
-                                {doneStatus.failedSteps.map((s, i) => <li key={i}>{s}</li>)}
-                            </ul>
-                        )}
                     </div>
                 )}
                 <div ref={messagesEndRef} />
