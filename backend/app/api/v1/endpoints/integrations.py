@@ -239,9 +239,11 @@ router = APIRouter()
 CloudProvider = Literal["google", "microsoft"]
 
 
-def _cloud_redirect_url(**params: str) -> str:
+def _cloud_redirect_url(request: Request, **params: str) -> str:
+    from app.services.cloud_oauth import resolve_public_app_url
+
     query = urlencode(params)
-    return f"{settings.PUBLIC_APP_URL.rstrip('/')}/integrations?{query}"
+    return f"{resolve_public_app_url(request).rstrip('/')}/integrations?{query}"
 
 
 def _can_manage_cloud(current_user: User, integration: Integration) -> bool:
@@ -271,13 +273,25 @@ class DriveFolderResponse(BaseModel):
 @router.get("/oauth/{provider}/start")
 async def start_cloud_oauth(
     provider: CloudProvider,
+    request: Request,
+    db: Session = Depends(deps.get_db),
     current_user: User = Depends(deps.get_current_active_user),
 ):
     """Return an OAuth authorization URL for a user-owned cloud connection."""
     from app.services.cloud_oauth import authorization_url, CloudOAuthError
 
     try:
-        return {"provider": provider, "authorization_url": authorization_url(provider, str(current_user.id))}
+        from app.services.cloud_oauth import resolve_public_app_url
+
+        return {
+            "provider": provider,
+            "authorization_url": authorization_url(
+                provider,
+                str(current_user.id),
+                db=db,
+                public_app_url=resolve_public_app_url(request),
+            ),
+        }
     except CloudOAuthError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
@@ -285,6 +299,7 @@ async def start_cloud_oauth(
 @router.get("/oauth/{provider}/callback")
 async def complete_cloud_oauth(
     provider: CloudProvider,
+    request: Request,
     code: Optional[str] = None,
     state: Optional[str] = None,
     error: Optional[str] = None,
@@ -292,7 +307,7 @@ async def complete_cloud_oauth(
     db: Session = Depends(deps.get_db),
 ):
     """Exchange the provider callback and create/update the user's connection."""
-    from app.services.cloud_oauth import complete_authorization, consume_state, CloudOAuthError
+    from app.services.cloud_oauth import complete_authorization, consume_state, get_microsoft_oauth_config, CloudOAuthError
 
     if error:
         if state:
@@ -301,18 +316,25 @@ async def complete_cloud_oauth(
             except CloudOAuthError:
                 pass
         message = error_description or error
-        return RedirectResponse(_cloud_redirect_url(oauth="error", provider=provider, message=message[:240]))
+        return RedirectResponse(_cloud_redirect_url(request, oauth="error", provider=provider, message=message[:240]))
     if not code or not state:
-        return RedirectResponse(_cloud_redirect_url(oauth="error", provider=provider, message="OAuth callback ไม่สมบูรณ์"))
+        return RedirectResponse(_cloud_redirect_url(request, oauth="error", provider=provider, message="OAuth callback ไม่สมบูรณ์"))
 
     try:
         user_id = UUID(consume_state(state, provider))
         user = db.query(User).filter(User.id == user_id, User.is_active.is_(True)).first()
         if not user:
             raise CloudOAuthError("ไม่พบผู้ใช้สำหรับ OAuth session นี้")
-        oauth_data = complete_authorization(provider, code)
+        from app.services.cloud_oauth import resolve_public_app_url
+
+        oauth_data = complete_authorization(
+            provider,
+            code,
+            db=db,
+            public_app_url=resolve_public_app_url(request),
+        )
     except (ValueError, CloudOAuthError) as exc:
-        return RedirectResponse(_cloud_redirect_url(oauth="error", provider=provider, message=str(exc)[:240]))
+        return RedirectResponse(_cloud_redirect_url(request, oauth="error", provider=provider, message=str(exc)[:240]))
 
     integration_type = IntegrationType.GDRIVE if provider == "google" else IntegrationType.ONEDRIVE
     provider_label = "Google Drive" if provider == "google" else "OneDrive"
@@ -329,7 +351,7 @@ async def complete_cloud_oauth(
     }
     if provider == "microsoft":
         config.update({
-            "tenant_id": settings.MICROSOFT_OAUTH_TENANT,
+            "tenant_id": get_microsoft_oauth_config(db)["tenant"],
             "drive_id": oauth_data.get("drive_id"),
             "drive_name": oauth_data.get("drive_name"),
             "drive_type": oauth_data.get("drive_type"),
@@ -367,7 +389,9 @@ async def complete_cloud_oauth(
         db.flush()
         integration_id = existing.id
     db.commit()
-    return RedirectResponse(_cloud_redirect_url(oauth="success", provider=provider, integration_id=str(integration_id)))
+    return RedirectResponse(
+        _cloud_redirect_url(request, oauth="success", provider=provider, integration_id=str(integration_id))
+    )
 
 
 def _masked_response(integration) -> IntegrationResponse:

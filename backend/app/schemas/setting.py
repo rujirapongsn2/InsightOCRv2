@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from uuid import UUID
 
 class SettingBase(BaseModel):
@@ -30,3 +30,43 @@ class Setting(SettingBase):
 
     class Config:
         from_attributes = True
+
+
+class MicrosoftOAuthConfigUpdate(BaseModel):
+    client_id: str = Field(..., min_length=1, max_length=512)
+    client_secret: str | None = Field(default=None, max_length=4096)
+    tenant: str = Field(default="common", min_length=1, max_length=255)
+    redirect_uri: str | None = Field(default=None, max_length=2048)
+    scope: str = Field(
+        default="openid profile email offline_access User.Read Files.ReadWrite",
+        min_length=1,
+        max_length=2048,
+    )
+
+
+class MicrosoftOAuthConfigResponse(BaseModel):
+    client_id: str | None = None
+    client_secret: str | None = None
+    tenant: str = "common"
+    redirect_uri: str
+    scope: str
+    configured: bool = False
+
+
+class GoogleOAuthConfigUpdate(BaseModel):
+    client_id: str = Field(..., min_length=1, max_length=512)
+    client_secret: str | None = Field(default=None, max_length=4096)
+    redirect_uri: str | None = Field(default=None, max_length=2048)
+    scope: str = Field(
+        default="https://www.googleapis.com/auth/drive",
+        min_length=1,
+        max_length=2048,
+    )
+
+
+class GoogleOAuthConfigResponse(BaseModel):
+    client_id: str | None = None
+    client_secret: str | None = None
+    redirect_uri: str
+    scope: str
+    configured: bool = False

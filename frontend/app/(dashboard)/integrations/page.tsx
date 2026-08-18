@@ -232,13 +232,11 @@ function CloudConnectionWizard({
     token,
     onClose,
     onSaved,
-    onAdvanced,
 }: {
     integration: Integration
     token: string
     onClose: () => void
     onSaved: (integration: APIIntegration) => void
-    onAdvanced: () => void
 }) {
     const providerLabel = integration.type === "gdrive" ? "Google Drive" : "OneDrive"
     const rootName = integration.type === "gdrive" ? "My Drive" : "OneDrive"
@@ -359,8 +357,7 @@ function CloudConnectionWizard({
                 </div>
 
                 {error && <div role="alert" className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div>}
-                <div className="flex items-center justify-between gap-3 border-t border-slate-100 pt-3">
-                    <button type="button" className="text-xs font-medium text-slate-500 underline underline-offset-2 hover:text-slate-700" onClick={onAdvanced}>ตั้งค่าแบบผู้ดูแลระบบ</button>
+                <div className="flex items-center justify-end gap-3 border-t border-slate-100 pt-3">
                     <Button type="button" variant="outline" onClick={onClose}>ยกเลิก</Button>
                 </div>
             </div>
@@ -505,16 +502,7 @@ export default function IntegrationsPage() {
         } catch (err) {
             const message = err instanceof Error ? err.message : "เริ่มเชื่อมต่อ cloud storage ไม่สำเร็จ"
             alert(message)
-            if (!isUser) openManualCloud(type)
         }
-    }
-
-    const openManualCloud = (type: "gdrive" | "onedrive") => {
-        setFormState({ ...defaultFormState, type })
-        setEditingId(null)
-        setTestResult(null)
-        setTestInput("")
-        setShowForm(true)
     }
 
     const openCreate = (type?: IntegrationType) => {
@@ -550,6 +538,10 @@ export default function IntegrationsPage() {
     const openEdit = (integration: Integration) => {
         if ((integration.type === "gdrive" || integration.type === "onedrive") && integration.config.auth_mode === "oauth") {
             setCloudWizardIntegration(integration)
+            return
+        }
+        if (integration.type === "onedrive") {
+            alert("OneDrive App-only เป็นการเชื่อมต่อแบบเดิมที่ไม่สามารถตั้งค่าผ่าน UI ได้แล้ว กรุณาเชื่อมต่อใหม่ด้วยปุ่ม Connect")
             return
         }
         setFormState({
@@ -618,7 +610,9 @@ export default function IntegrationsPage() {
             }
             configData = { client_email: sa.client_email, private_key: sa.private_key, token_uri: sa.token_uri || "https://oauth2.googleapis.com/token" }
         } else if (formState.type === "onedrive") {
-            configData = { tenant_id: formState.tenant_id, client_id: formState.client_id, client_secret: formState.client_secret, drive_id: formState.drive_id }
+            setLoading(false)
+            alert("OneDrive ต้องเชื่อมต่อผ่าน OAuth ด้วยปุ่ม Connect")
+            return
         } else {
             configData = {
                 method: formState.method, endpoint: formState.endpoint, authHeader: formState.authHeader,
@@ -943,34 +937,6 @@ export default function IntegrationsPage() {
                         {editingId && <DriveTestButton id={editingId} />}
                     </div>
                 )
-            case "onedrive":
-                return (
-                    <div className="space-y-4 p-4 bg-slate-50 rounded-lg border">
-                        <div className="text-sm font-semibold text-slate-700">OneDrive / SharePoint — Azure App (client credentials)</div>
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            <div className="space-y-2">
-                                <label className="text-sm font-medium">Tenant ID *</label>
-                                <Input value={formState.tenant_id} disabled={isUser} onChange={(e) => setFormState({ ...formState, tenant_id: e.target.value })} />
-                            </div>
-                            <div className="space-y-2">
-                                <label className="text-sm font-medium">Client ID *</label>
-                                <Input value={formState.client_id} disabled={isUser} onChange={(e) => setFormState({ ...formState, client_id: e.target.value })} />
-                            </div>
-                            <div className="space-y-2">
-                                <label className="text-sm font-medium">Client Secret *</label>
-                                <Input type="password" value={formState.client_secret} disabled={isUser} onChange={(e) => setFormState({ ...formState, client_secret: e.target.value })} />
-                            </div>
-                            <div className="space-y-2">
-                                <label className="text-sm font-medium">Drive ID *</label>
-                                <Input value={formState.drive_id} disabled={isUser} onChange={(e) => setFormState({ ...formState, drive_id: e.target.value })} />
-                            </div>
-                        </div>
-                        <p className="text-xs text-slate-500">
-                            Azure app registration ต้องมีสิทธิ์ <span className="font-mono">Files.ReadWrite.All</span> (application) และ admin consent
-                        </p>
-                        {editingId && <DriveTestButton id={editingId} />}
-                    </div>
-                )
             default:
                 return null
         }
@@ -1216,11 +1182,6 @@ export default function IntegrationsPage() {
                                         <Plus className="h-3 w-3 mr-1" />
                                         {cat.type === "gdrive" || cat.type === "onedrive" ? "Connect" : "Add"}
                                     </Button>
-                                    {(isAdmin || isManager) && (cat.type === "gdrive" || cat.type === "onedrive") && (
-                                        <button type="button" className="text-xs font-medium text-slate-500 underline underline-offset-2 hover:text-slate-700" onClick={() => openManualCloud(cat.type as "gdrive" | "onedrive")}>
-                                            ตั้งค่าแบบผู้ดูแลระบบ
-                                        </button>
-                                    )}
                                 </div>
                             )}
                         </div>
@@ -1305,11 +1266,6 @@ export default function IntegrationsPage() {
                     onSaved={(updated) => {
                         setIntegrations((items) => items.map((item) => item.id === updated.id ? updated as Integration : item))
                         setCloudWizardIntegration(null)
-                    }}
-                    onAdvanced={() => {
-                        const integration = cloudWizardIntegration
-                        setCloudWizardIntegration(null)
-                        openManualCloud(integration.type as "gdrive" | "onedrive")
                     }}
                 />
             )}

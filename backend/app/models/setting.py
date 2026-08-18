@@ -23,3 +23,18 @@ class Setting(Base):
     verify_ssl = Column(Boolean, default=False)
     ocr_fallback_enabled = Column(Boolean, default=False, nullable=False)
     ocr_fallback_api_key = Column(String, nullable=True)
+
+    # Admin-managed Microsoft delegated OAuth configuration. The secret is
+    # encrypted with the application SECRET_KEY before it reaches the DB.
+    microsoft_oauth_client_id = Column(String, nullable=True)
+    microsoft_oauth_client_secret_encrypted = Column(String, nullable=True)
+    microsoft_oauth_tenant = Column(String, nullable=True)
+    microsoft_oauth_redirect_uri = Column(String, nullable=True)
+    microsoft_oauth_scope = Column(String, nullable=True)
+
+    # Admin-managed Google delegated OAuth configuration. The secret is
+    # encrypted with the application SECRET_KEY before it reaches the DB.
+    google_oauth_client_id = Column(String, nullable=True)
+    google_oauth_client_secret_encrypted = Column(String, nullable=True)
+    google_oauth_redirect_uri = Column(String, nullable=True)
+    google_oauth_scope = Column(String, nullable=True)

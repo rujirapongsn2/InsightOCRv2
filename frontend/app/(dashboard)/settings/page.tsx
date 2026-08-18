@@ -5,7 +5,7 @@ import { useAuth } from "@/components/auth-provider"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { AlertCircle, Bot, CheckCircle2, ChevronDown, Eye, EyeOff, Loader2, Pencil, Plus, Trash2 } from "lucide-react"
+import { AlertCircle, Bot, CheckCircle2, ChevronDown, Cloud, Eye, EyeOff, FileText, KeyRound, Loader2, Package, Pencil, Plus, Settings, ShieldCheck, Trash2 } from "lucide-react"
 import { getApiBaseUrl, getPublicApiBaseUrl } from "@/lib/api"
 import { ApiAccessTokens } from "@/components/settings/ApiAccessTokens"
 import { ApiWorkflowDocs } from "@/components/profile/ApiWorkflowDocs"
@@ -24,7 +24,7 @@ import {
   updateAIProvider,
 } from "@/lib/ai-settings-api"
 
-type SettingsTab = "ocr" | "tokens" | "mcp" | "api" | "skills"
+type SettingsTab = "ocr" | "oauth" | "google_oauth" | "tokens" | "mcp" | "api" | "skills"
 
 export default function SettingsPage() {
   const { user } = useAuth()
@@ -71,8 +71,31 @@ export default function SettingsPage() {
   const [activeTab, setActiveTab] = useState<SettingsTab>("ocr")
   const [publicApiBaseUrl, setPublicApiBaseUrl] = useState("/api/v1")
   const [tokenExample, setTokenExample] = useState("YOUR_API_ACCESS_TOKEN")
+  const [microsoftOAuth, setMicrosoftOAuth] = useState({
+    client_id: "",
+    client_secret: "",
+    tenant: "common",
+    redirect_uri: "",
+    scope: "openid profile email offline_access User.Read Files.ReadWrite",
+    configured: false,
+  })
+  const [microsoftOAuthLoading, setMicrosoftOAuthLoading] = useState(false)
+  const [microsoftOAuthSaving, setMicrosoftOAuthSaving] = useState(false)
+  const [microsoftOAuthError, setMicrosoftOAuthError] = useState<string | null>(null)
+  const [microsoftOAuthSuccess, setMicrosoftOAuthSuccess] = useState<string | null>(null)
+  const [googleOAuth, setGoogleOAuth] = useState({
+    client_id: "",
+    client_secret: "",
+    redirect_uri: "",
+    scope: "https://www.googleapis.com/auth/drive",
+    configured: false,
+  })
+  const [googleOAuthLoading, setGoogleOAuthLoading] = useState(false)
+  const [googleOAuthSaving, setGoogleOAuthSaving] = useState(false)
+  const [googleOAuthError, setGoogleOAuthError] = useState<string | null>(null)
+  const [googleOAuthSuccess, setGoogleOAuthSuccess] = useState<string | null>(null)
 
-  const isAdmin = normalizedRole === "admin"
+  const isAdmin = Boolean(user?.is_superuser || normalizedRole === "admin")
 
   const getAuthHeader = (): Record<string, string> => {
     const authToken = typeof window !== "undefined" ? localStorage.getItem("token") : null
@@ -128,8 +151,59 @@ export default function SettingsPage() {
   useEffect(() => { fetchAiProviders() }, [])
 
   useEffect(() => {
+    if (!isAdmin) return
+    const fetchMicrosoftOAuth = async () => {
+      setMicrosoftOAuthLoading(true)
+      setMicrosoftOAuthError(null)
+      try {
+        const res = await fetch(`${getApiBaseUrl()}/settings/microsoft-oauth`, { headers: getAuthHeader() })
+        const data = await res.json()
+        if (!res.ok) throw new Error(data.detail || "โหลด Microsoft OAuth settings ไม่สำเร็จ")
+        setMicrosoftOAuth({
+          client_id: data.client_id ?? "",
+          client_secret: data.client_secret ?? "",
+          tenant: data.tenant ?? "common",
+          redirect_uri: data.redirect_uri ?? "",
+          scope: data.scope ?? "openid profile email offline_access User.Read Files.ReadWrite",
+          configured: Boolean(data.configured),
+        })
+      } catch (err) {
+        setMicrosoftOAuthError(err instanceof Error ? err.message : "โหลด Microsoft OAuth settings ไม่สำเร็จ")
+      } finally {
+        setMicrosoftOAuthLoading(false)
+      }
+    }
+    fetchMicrosoftOAuth()
+  }, [isAdmin])
+
+  useEffect(() => {
+    if (!isAdmin) return
+    const fetchGoogleOAuth = async () => {
+      setGoogleOAuthLoading(true)
+      setGoogleOAuthError(null)
+      try {
+        const res = await fetch(`${getApiBaseUrl()}/settings/google-oauth`, { headers: getAuthHeader() })
+        const data = await res.json()
+        if (!res.ok) throw new Error(data.detail || "โหลด Google OAuth settings ไม่สำเร็จ")
+        setGoogleOAuth({
+          client_id: data.client_id ?? "",
+          client_secret: data.client_secret ?? "",
+          redirect_uri: data.redirect_uri ?? "",
+          scope: data.scope ?? "https://www.googleapis.com/auth/drive",
+          configured: Boolean(data.configured),
+        })
+      } catch (err) {
+        setGoogleOAuthError(err instanceof Error ? err.message : "โหลด Google OAuth settings ไม่สำเร็จ")
+      } finally {
+        setGoogleOAuthLoading(false)
+      }
+    }
+    fetchGoogleOAuth()
+  }, [isAdmin])
+
+  useEffect(() => {
     setPublicApiBaseUrl(getPublicApiBaseUrl())
-    if (!isAdmin && activeTab === "ocr") setActiveTab("tokens")
+    if (!isAdmin && (activeTab === "ocr" || activeTab === "oauth" || activeTab === "google_oauth")) setActiveTab("tokens")
   }, [activeTab, isAdmin])
 
   const openCreateForm = () => {
@@ -352,37 +426,133 @@ export default function SettingsPage() {
     }
   }
 
+  const handleSaveMicrosoftOAuth = async () => {
+    setMicrosoftOAuthSaving(true)
+    setMicrosoftOAuthError(null)
+    setMicrosoftOAuthSuccess(null)
+    try {
+      const secret = microsoftOAuth.client_secret.startsWith("****") ? null : microsoftOAuth.client_secret
+      const res = await fetch(`${getApiBaseUrl()}/settings/microsoft-oauth`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", ...getAuthHeader() },
+        body: JSON.stringify({
+          client_id: microsoftOAuth.client_id,
+          client_secret: secret,
+          tenant: microsoftOAuth.tenant,
+          redirect_uri: microsoftOAuth.redirect_uri || null,
+          scope: microsoftOAuth.scope,
+        }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.detail || "บันทึก Microsoft OAuth settings ไม่สำเร็จ")
+      setMicrosoftOAuth({
+        client_id: data.client_id ?? "",
+        client_secret: data.client_secret ?? "",
+        tenant: data.tenant ?? "common",
+        redirect_uri: data.redirect_uri ?? "",
+        scope: data.scope ?? microsoftOAuth.scope,
+        configured: Boolean(data.configured),
+      })
+      setMicrosoftOAuthSuccess("บันทึก Microsoft OAuth settings แล้ว")
+    } catch (err) {
+      setMicrosoftOAuthError(err instanceof Error ? err.message : "บันทึก Microsoft OAuth settings ไม่สำเร็จ")
+    } finally {
+      setMicrosoftOAuthSaving(false)
+    }
+  }
+
+  const handleSaveGoogleOAuth = async () => {
+    setGoogleOAuthSaving(true)
+    setGoogleOAuthError(null)
+    setGoogleOAuthSuccess(null)
+    try {
+      const secret = googleOAuth.client_secret.startsWith("****") ? null : googleOAuth.client_secret
+      const res = await fetch(`${getApiBaseUrl()}/settings/google-oauth`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", ...getAuthHeader() },
+        body: JSON.stringify({
+          client_id: googleOAuth.client_id,
+          client_secret: secret,
+          redirect_uri: googleOAuth.redirect_uri || null,
+          scope: googleOAuth.scope,
+        }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.detail || "บันทึก Google OAuth settings ไม่สำเร็จ")
+      setGoogleOAuth({
+        client_id: data.client_id ?? "",
+        client_secret: data.client_secret ?? "",
+        redirect_uri: data.redirect_uri ?? "",
+        scope: data.scope ?? googleOAuth.scope,
+        configured: Boolean(data.configured),
+      })
+      setGoogleOAuthSuccess("บันทึก Google OAuth settings แล้ว")
+    } catch (err) {
+      setGoogleOAuthError(err instanceof Error ? err.message : "บันทึก Google OAuth settings ไม่สำเร็จ")
+    } finally {
+      setGoogleOAuthSaving(false)
+    }
+  }
+
+  const renderSettingsTab = (tab: { id: SettingsTab; label: string; icon: typeof Settings }) => {
+    const Icon = tab.icon
+    const isSelected = activeTab === tab.id
+    return (
+      <button
+        key={tab.id}
+        type="button"
+        role="tab"
+        aria-selected={isSelected}
+        onClick={() => setActiveTab(tab.id)}
+        className={`flex min-h-10 min-w-0 items-center justify-center gap-2 rounded-md px-3 py-2 text-sm font-medium transition-colors ${isSelected
+          ? "bg-white text-[#1F6FA8] shadow-sm ring-1 ring-[#D5E8F5]"
+          : "text-slate-600 hover:bg-white/80 hover:text-slate-900"}`}
+      >
+        <Icon className="h-4 w-4 shrink-0" aria-hidden="true" />
+        <span className="truncate">{tab.label}</span>
+      </button>
+    )
+  }
+
+  const systemTabs = [
+    ...(isAdmin ? [{ id: "ocr" as const, label: "OCR & Providers", icon: Settings }] : []),
+    ...(isAdmin ? [{ id: "oauth" as const, label: "Microsoft OAuth", icon: Cloud }] : []),
+    ...(isAdmin ? [{ id: "google_oauth" as const, label: "Google OAuth", icon: Cloud }] : []),
+  ]
+  const accessTabs = [
+    { id: "tokens" as const, label: "API Access Tokens", icon: KeyRound },
+    { id: "mcp" as const, label: "MCP Access", icon: ShieldCheck },
+    { id: "api" as const, label: "API Workflow Docs", icon: FileText },
+    { id: "skills" as const, label: "AI Agent Skill Package", icon: Package },
+  ]
+
   return (
     <div className="max-w-6xl space-y-6">
       <div className="space-y-2">
         <h2 className="text-2xl font-bold tracking-tight">Settings</h2>
-        <p className="text-slate-600">Manage OCR, providers, API access, and agent connections.</p>
+        <p className="text-slate-600">Manage OCR, connections, API access, and agent tools.</p>
         <p className="text-xs text-slate-500">
           Update commit: <span className="font-mono text-slate-700">{appCommitSha || "unknown"}</span>
         </p>
       </div>
 
-      <div role="tablist" aria-label="Settings sections" className="grid grid-cols-2 gap-2 rounded-lg border border-slate-200 bg-white p-2 sm:grid-cols-5">
-        {[
-          ...(isAdmin ? [{ id: "ocr" as const, label: "OCR & Providers" }] : []),
-          { id: "tokens" as const, label: "API Access Tokens" },
-          { id: "mcp" as const, label: "MCP Access" },
-          { id: "api" as const, label: "API Workflow Docs" },
-          { id: "skills" as const, label: "AI Agent Skill Package" },
-        ].map((tab) => (
-          <button
-            key={tab.id}
-            type="button"
-            role="tab"
-            aria-selected={activeTab === tab.id}
-            onClick={() => setActiveTab(tab.id)}
-            className={`min-h-10 rounded-md px-3 py-2 text-sm font-medium transition-colors ${activeTab === tab.id
-              ? "bg-[#EBF4FB] text-[#1F6FA8]"
-              : "text-slate-600 hover:bg-slate-50 hover:text-slate-900"}`}
-          >
-            {tab.label}
-          </button>
-        ))}
+      <div role="tablist" aria-label="Settings sections" className="overflow-hidden rounded-xl border border-slate-200 bg-slate-50 p-2">
+        <div className="flex flex-col gap-2 md:flex-row md:items-center">
+          {systemTabs.length > 0 && (
+            <div className="flex min-w-0 flex-1 flex-col gap-1.5 border-b border-slate-200 pb-2 md:border-b-0 md:border-r md:pb-0 md:pr-2">
+              <span className="px-2 text-[11px] font-semibold uppercase tracking-wide text-slate-400">System & Connections</span>
+              <div className="grid grid-cols-1 gap-1 sm:grid-cols-3">
+                {systemTabs.map(renderSettingsTab)}
+              </div>
+            </div>
+          )}
+          <div className="flex min-w-0 flex-1 flex-col gap-1.5">
+            <span className="px-2 text-[11px] font-semibold uppercase tracking-wide text-slate-400">Access & Agent</span>
+            <div className="grid grid-cols-2 gap-1 sm:grid-cols-4">
+              {accessTabs.map(renderSettingsTab)}
+            </div>
+          </div>
+        </div>
       </div>
 
       {activeTab === "tokens" && (
@@ -396,6 +566,123 @@ export default function SettingsPage() {
       )}
       {activeTab === "skills" && (
         <AgentSkillDownloads apiBaseUrl={publicApiBaseUrl} getAuthHeader={getAuthHeader} />
+      )}
+
+      {isAdmin && activeTab === "oauth" && (
+        <Card>
+          <CardHeader>
+            <div className="flex items-center justify-between gap-3">
+              <CardTitle>Microsoft OAuth</CardTitle>
+              <span className={`rounded-full px-2 py-1 text-xs font-medium ${microsoftOAuth.configured ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
+                {microsoftOAuth.configured ? "Configured" : "Not configured"}
+              </span>
+            </div>
+            <p className="mt-1 text-sm text-slate-600">
+              ตั้งค่า Azure App เพียงครั้งเดียว แล้วผู้ใช้แต่ละคนกด Connect เพื่ออนุญาต OneDrive ของตนเอง
+            </p>
+            <details className="mt-3 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
+              <summary className="cursor-pointer text-sm font-semibold text-slate-700">วิธีตั้งค่า Microsoft OAuth</summary>
+              <ol className="mt-3 list-decimal space-y-1.5 pl-5 text-sm text-slate-600">
+                <li>เปิด Azure Portal ไปที่ <span className="font-medium">Microsoft Entra ID &gt; App registrations</span> แล้วสร้างแอปแบบ Web</li>
+                <li>ในเมนู Authentication เพิ่ม Redirect URI ที่แสดงด้านล่างเป็น Web redirect URI</li>
+                <li>ไปที่ Certificates &amp; secrets สร้าง Client secret แล้วคัดลอกค่า <span className="font-medium">Value</span> ทันที</li>
+                <li>ไปที่ API permissions เพิ่ม Microsoft Graph แบบ Delegated: <span className="font-medium">User.Read, Files.ReadWrite, offline_access, openid, profile, email</span></li>
+                <li>นำ Client ID, Tenant และ Secret มาวางในฟอร์ม ตรวจ Redirect URI และกดบันทึก</li>
+              </ol>
+              <p className="mt-3 text-xs text-slate-500">ใช้ Tenant เป็น <span className="font-medium">common</span> หากต้องการรองรับหลายองค์กร หรือใช้ Tenant ID ขององค์กรเดียว</p>
+            </details>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {microsoftOAuthError && <div role="alert" className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700">{microsoftOAuthError}</div>}
+            {microsoftOAuthSuccess && <div role="status" className="rounded-md border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-700">{microsoftOAuthSuccess}</div>}
+            <div className="grid gap-4 md:grid-cols-2">
+              <div className="space-y-2">
+                <label htmlFor="microsoft-oauth-client-id" className="text-sm font-medium">Application (Client) ID *</label>
+                <Input id="microsoft-oauth-client-id" value={microsoftOAuth.client_id} onChange={(e) => setMicrosoftOAuth((prev) => ({ ...prev, client_id: e.target.value }))} disabled={microsoftOAuthLoading || microsoftOAuthSaving} />
+              </div>
+              <div className="space-y-2">
+                <label htmlFor="microsoft-oauth-tenant" className="text-sm font-medium">Directory (Tenant) *</label>
+                <Input id="microsoft-oauth-tenant" value={microsoftOAuth.tenant} onChange={(e) => setMicrosoftOAuth((prev) => ({ ...prev, tenant: e.target.value }))} placeholder="common" disabled={microsoftOAuthLoading || microsoftOAuthSaving} />
+              </div>
+            </div>
+            <div className="space-y-2">
+              <label htmlFor="microsoft-oauth-client-secret" className="text-sm font-medium">Client Secret *</label>
+              <div className="relative">
+                <Input id="microsoft-oauth-client-secret" type="password" value={microsoftOAuth.client_secret} onChange={(e) => setMicrosoftOAuth((prev) => ({ ...prev, client_secret: e.target.value }))} placeholder="วาง secret ใหม่ หรือเว้นว่างเพื่อใช้ค่าที่บันทึกไว้" className="pr-10" disabled={microsoftOAuthLoading || microsoftOAuthSaving} />
+              </div>
+              <p className="text-xs text-slate-500">ระบบจะเก็บแบบเข้ารหัสและไม่แสดงค่าเต็มกลับมา</p>
+            </div>
+            <div className="space-y-2">
+              <label htmlFor="microsoft-oauth-redirect-uri" className="text-sm font-medium">Redirect URI</label>
+              <Input id="microsoft-oauth-redirect-uri" value={microsoftOAuth.redirect_uri} onChange={(e) => setMicrosoftOAuth((prev) => ({ ...prev, redirect_uri: e.target.value }))} placeholder="เว้นว่างเพื่อใช้ URL ของระบบ" disabled={microsoftOAuthLoading || microsoftOAuthSaving} />
+              <p className="text-xs text-slate-500">ต้องเพิ่ม URL นี้เป็น Web redirect URI ใน Azure App Registration</p>
+            </div>
+            <div className="space-y-2">
+              <label htmlFor="microsoft-oauth-scope" className="text-sm font-medium">Delegated scopes *</label>
+              <Input id="microsoft-oauth-scope" value={microsoftOAuth.scope} onChange={(e) => setMicrosoftOAuth((prev) => ({ ...prev, scope: e.target.value }))} disabled={microsoftOAuthLoading || microsoftOAuthSaving} />
+            </div>
+            <Button type="button" onClick={handleSaveMicrosoftOAuth} disabled={microsoftOAuthLoading || microsoftOAuthSaving}>
+              {microsoftOAuthSaving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              บันทึก Microsoft OAuth
+            </Button>
+          </CardContent>
+        </Card>
+      )}
+
+      {isAdmin && activeTab === "google_oauth" && (
+        <Card>
+          <CardHeader>
+            <div className="flex items-center justify-between gap-3">
+              <CardTitle>Google OAuth</CardTitle>
+              <span className={`rounded-full px-2 py-1 text-xs font-medium ${googleOAuth.configured ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
+                {googleOAuth.configured ? "Configured" : "Not configured"}
+              </span>
+            </div>
+            <p className="mt-1 text-sm text-slate-600">
+              ตั้งค่า Google Cloud App เพียงครั้งเดียว แล้วผู้ใช้แต่ละคนกด Connect เพื่ออนุญาต Google Drive ของตนเอง
+            </p>
+            <details className="mt-3 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
+              <summary className="cursor-pointer text-sm font-semibold text-slate-700">วิธีตั้งค่า Google OAuth</summary>
+              <ol className="mt-3 list-decimal space-y-1.5 pl-5 text-sm text-slate-600">
+                <li>เปิด Google Cloud Console แล้วเลือกหรือสร้าง Project</li>
+                <li>ไปที่ APIs &amp; Services &gt; Library และเปิดใช้งาน <span className="font-medium">Google Drive API</span></li>
+                <li>ตั้งค่า OAuth consent screen; หากเป็น External ให้เพิ่มบัญชีทดสอบที่ต้องการใช้งาน</li>
+                <li>ไปที่ Credentials &gt; Create credentials &gt; OAuth client ID เลือกประเภท Web application</li>
+                <li>เพิ่ม Redirect URI ที่แสดงด้านล่างใน Authorized redirect URIs แล้วคัดลอก Client ID และ Client Secret</li>
+                <li>นำค่ามาวางในฟอร์ม ตรวจ Scopes และกดบันทึก จากนั้นผู้ใช้จึงกด Connect Google Drive ได้</li>
+              </ol>
+              <p className="mt-3 text-xs text-slate-500">Redirect URI ต้องตรงทุกตัวอักษร รวมถึง https และ path ห้ามใช้ localhost กับระบบจริง</p>
+            </details>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {googleOAuthError && <div role="alert" className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700">{googleOAuthError}</div>}
+            {googleOAuthSuccess && <div role="status" className="rounded-md border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-700">{googleOAuthSuccess}</div>}
+            <div className="grid gap-4 md:grid-cols-2">
+              <div className="space-y-2">
+                <label htmlFor="google-oauth-client-id" className="text-sm font-medium">Client ID *</label>
+                <Input id="google-oauth-client-id" value={googleOAuth.client_id} onChange={(e) => setGoogleOAuth((prev) => ({ ...prev, client_id: e.target.value }))} disabled={googleOAuthLoading || googleOAuthSaving} />
+              </div>
+              <div className="space-y-2">
+                <label htmlFor="google-oauth-client-secret" className="text-sm font-medium">Client Secret *</label>
+                <Input id="google-oauth-client-secret" type="password" value={googleOAuth.client_secret} onChange={(e) => setGoogleOAuth((prev) => ({ ...prev, client_secret: e.target.value }))} placeholder="วาง secret ใหม่ หรือเว้นว่างเพื่อใช้ค่าที่บันทึกไว้" disabled={googleOAuthLoading || googleOAuthSaving} />
+                <p className="text-xs text-slate-500">ระบบจะเก็บแบบเข้ารหัสและไม่แสดงค่าเต็มกลับมา</p>
+              </div>
+            </div>
+            <div className="space-y-2">
+              <label htmlFor="google-oauth-redirect-uri" className="text-sm font-medium">Redirect URI</label>
+              <Input id="google-oauth-redirect-uri" value={googleOAuth.redirect_uri} onChange={(e) => setGoogleOAuth((prev) => ({ ...prev, redirect_uri: e.target.value }))} placeholder="เว้นว่างเพื่อใช้ URL ของระบบ" disabled={googleOAuthLoading || googleOAuthSaving} />
+              <p className="text-xs text-slate-500">ต้องเพิ่ม URL นี้เป็น Authorized redirect URI ใน Google Cloud Console</p>
+            </div>
+            <div className="space-y-2">
+              <label htmlFor="google-oauth-scope" className="text-sm font-medium">Scopes *</label>
+              <Input id="google-oauth-scope" value={googleOAuth.scope} onChange={(e) => setGoogleOAuth((prev) => ({ ...prev, scope: e.target.value }))} disabled={googleOAuthLoading || googleOAuthSaving} />
+            </div>
+            <Button type="button" onClick={handleSaveGoogleOAuth} disabled={googleOAuthLoading || googleOAuthSaving}>
+              {googleOAuthSaving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              บันทึก Google OAuth
+            </Button>
+          </CardContent>
+        </Card>
       )}
 
       {isAdmin && activeTab === "ocr" && (

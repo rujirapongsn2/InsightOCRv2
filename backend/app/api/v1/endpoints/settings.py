@@ -1,18 +1,28 @@
 import json
 from pathlib import Path
 from typing import Any, Optional
-from fastapi import APIRouter, Depends, HTTPException
+from urllib.parse import urlparse
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, HttpUrl
 import requests
 from sqlalchemy.orm import Session
 from app.api import deps
+from app.core.config import settings
 from app.models.user import User
 from app.models.setting import Setting
-from app.schemas.setting import Setting as SettingSchema, SettingUpdate
+from app.schemas.setting import (
+    GoogleOAuthConfigResponse,
+    GoogleOAuthConfigUpdate,
+    MicrosoftOAuthConfigResponse,
+    MicrosoftOAuthConfigUpdate,
+    Setting as SettingSchema,
+    SettingUpdate,
+)
 from app.services.tls import warn_ssl_verification_disabled
 from app.services.ocr_fallback import fallback_configuration_error, resolve_fallback_api_key
 from app.utils.activity_logger import log_activity, Actions
 from app.utils.redact import is_masked, mask_secret
+from app.utils.secret_store import SecretStoreError, encrypt_secret
 
 router = APIRouter()
 BUILD_INFO_PATH = Path(__file__).resolve().parents[4] / ".build-info.json"
@@ -50,6 +60,186 @@ def get_app_commit_sha() -> str | None:
 class EndpointTestRequest(BaseModel):
     url: HttpUrl
     token: Optional[str] = None
+
+
+def _microsoft_oauth_payload(db: Session, request: Request) -> MicrosoftOAuthConfigResponse:
+    from app.services.cloud_oauth import (
+        DEFAULT_MICROSOFT_OAUTH_SCOPE,
+        get_microsoft_oauth_config,
+        resolve_public_app_url,
+    )
+
+    config = get_microsoft_oauth_config(db)
+    public_app_url = resolve_public_app_url(request)
+    local_hosts = {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
+    redirect_uri = config["redirect_uri"] or (
+        f"{public_app_url.rstrip('/')}{settings.API_V1_STR}/integrations/oauth/microsoft/callback"
+    )
+    if config["redirect_uri"]:
+        parsed = urlparse(config["redirect_uri"])
+        public_hostname = urlparse(public_app_url).hostname
+        if parsed.hostname in local_hosts and public_hostname not in local_hosts:
+            redirect_uri = f"{public_app_url.rstrip('/')}{settings.API_V1_STR}/integrations/oauth/microsoft/callback"
+    secret = config["client_secret"]
+    return MicrosoftOAuthConfigResponse(
+        client_id=config["client_id"],
+        client_secret=mask_secret(secret) if secret else None,
+        tenant=config["tenant"] or "common",
+        redirect_uri=redirect_uri,
+        scope=config["scope"] or DEFAULT_MICROSOFT_OAUTH_SCOPE,
+        configured=bool(config["client_id"] and secret and config["scope"]),
+    )
+
+
+def _validate_microsoft_oauth_input(payload: MicrosoftOAuthConfigUpdate) -> tuple[str, str | None, str, str | None, str]:
+    tenant = payload.tenant.strip()
+    if "/" in tenant or " " in tenant:
+        raise HTTPException(status_code=422, detail="Tenant ต้องเป็น common, organizations, tenant ID หรือโดเมนที่ไม่มีช่องว่าง")
+
+    redirect_uri = payload.redirect_uri.strip() if payload.redirect_uri else None
+    if redirect_uri:
+        parsed = urlparse(redirect_uri)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise HTTPException(status_code=422, detail="Redirect URI ต้องเป็น URL แบบ http หรือ https")
+
+    scope = " ".join(payload.scope.split())
+    if not scope:
+        raise HTTPException(status_code=422, detail="ต้องระบุ Microsoft OAuth scope")
+    return payload.client_id.strip(), payload.client_secret, tenant, redirect_uri, scope
+
+
+def _google_oauth_payload(db: Session, request: Request) -> GoogleOAuthConfigResponse:
+    from app.services.cloud_oauth import DEFAULT_GOOGLE_OAUTH_SCOPE, get_google_oauth_config, resolve_public_app_url
+
+    config = get_google_oauth_config(db)
+    public_app_url = resolve_public_app_url(request)
+    local_hosts = {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
+    redirect_uri = config["redirect_uri"] or (
+        f"{public_app_url.rstrip('/')}{settings.API_V1_STR}/integrations/oauth/google/callback"
+    )
+    if config["redirect_uri"]:
+        parsed = urlparse(config["redirect_uri"])
+        public_hostname = urlparse(public_app_url).hostname
+        if parsed.hostname in local_hosts and public_hostname not in local_hosts:
+            redirect_uri = f"{public_app_url.rstrip('/')}{settings.API_V1_STR}/integrations/oauth/google/callback"
+    secret = config["client_secret"]
+    return GoogleOAuthConfigResponse(
+        client_id=config["client_id"],
+        client_secret=mask_secret(secret) if secret else None,
+        redirect_uri=redirect_uri,
+        scope=config["scope"] or DEFAULT_GOOGLE_OAUTH_SCOPE,
+        configured=bool(config["client_id"] and secret and config["scope"]),
+    )
+
+
+def _validate_google_oauth_input(payload: GoogleOAuthConfigUpdate) -> tuple[str, str | None, str | None, str]:
+    redirect_uri = payload.redirect_uri.strip() if payload.redirect_uri else None
+    if redirect_uri:
+        parsed = urlparse(redirect_uri)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise HTTPException(status_code=422, detail="Redirect URI ต้องเป็น URL แบบ http หรือ https")
+    scope = " ".join(payload.scope.split())
+    if not scope:
+        raise HTTPException(status_code=422, detail="ต้องระบุ Google OAuth scope")
+    return payload.client_id.strip(), payload.client_secret, redirect_uri, scope
+
+
+@router.get("/google-oauth", response_model=GoogleOAuthConfigResponse)
+def get_google_oauth_settings(
+    request: Request,
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_active_admin),
+) -> GoogleOAuthConfigResponse:
+    """Return masked Google OAuth configuration for system admins only."""
+    return _google_oauth_payload(db, request)
+
+
+@router.put("/google-oauth", response_model=GoogleOAuthConfigResponse)
+def update_google_oauth_settings(
+    payload: GoogleOAuthConfigUpdate,
+    request: Request,
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_active_admin),
+) -> GoogleOAuthConfigResponse:
+    """Save delegated Google OAuth configuration without exposing its secret."""
+    client_id, client_secret, redirect_uri, scope = _validate_google_oauth_input(payload)
+    setting = db.query(Setting).first()
+    if not setting:
+        setting = Setting()
+        db.add(setting)
+        db.flush()
+
+    setting.google_oauth_client_id = client_id
+    setting.google_oauth_redirect_uri = redirect_uri
+    setting.google_oauth_scope = scope
+    if client_secret and not is_masked(client_secret):
+        try:
+            setting.google_oauth_client_secret_encrypted = encrypt_secret(client_secret)
+        except SecretStoreError as exc:
+            raise HTTPException(status_code=422, detail="Google OAuth Client Secret ไม่ถูกต้อง") from exc
+
+    db.add(setting)
+    db.commit()
+    db.refresh(setting)
+    log_activity(
+        db=db,
+        user_id=current_user.id,
+        action=Actions.UPDATE_SETTINGS,
+        resource_type="settings",
+        resource_id=setting.id,
+        details={"google_oauth_configured": True},
+    )
+    return _google_oauth_payload(db, request)
+
+
+@router.get("/microsoft-oauth", response_model=MicrosoftOAuthConfigResponse)
+def get_microsoft_oauth_settings(
+    request: Request,
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_active_admin),
+) -> MicrosoftOAuthConfigResponse:
+    """Return masked Microsoft OAuth configuration for system admins only."""
+    return _microsoft_oauth_payload(db, request)
+
+
+@router.put("/microsoft-oauth", response_model=MicrosoftOAuthConfigResponse)
+def update_microsoft_oauth_settings(
+    payload: MicrosoftOAuthConfigUpdate,
+    request: Request,
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_active_admin),
+) -> MicrosoftOAuthConfigResponse:
+    """Save delegated Microsoft OAuth configuration without exposing its secret."""
+    client_id, client_secret, tenant, redirect_uri, scope = _validate_microsoft_oauth_input(payload)
+    setting = db.query(Setting).first()
+    if not setting:
+        setting = Setting()
+        db.add(setting)
+        db.flush()
+
+    setting.microsoft_oauth_client_id = client_id
+    setting.microsoft_oauth_tenant = tenant
+    setting.microsoft_oauth_redirect_uri = redirect_uri
+    setting.microsoft_oauth_scope = scope
+    # An empty or masked value means “keep the existing encrypted secret”.
+    if client_secret and not is_masked(client_secret):
+        try:
+            setting.microsoft_oauth_client_secret_encrypted = encrypt_secret(client_secret)
+        except SecretStoreError as exc:
+            raise HTTPException(status_code=422, detail="Microsoft OAuth Client Secret ไม่ถูกต้อง") from exc
+
+    db.add(setting)
+    db.commit()
+    db.refresh(setting)
+    log_activity(
+        db=db,
+        user_id=current_user.id,
+        action=Actions.UPDATE_SETTINGS,
+        resource_type="settings",
+        resource_id=setting.id,
+        details={"microsoft_oauth_configured": True, "microsoft_oauth_tenant": tenant},
+    )
+    return _microsoft_oauth_payload(db, request)
 
 
 @router.get("/config", response_model=SettingSchema)

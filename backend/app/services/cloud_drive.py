@@ -259,7 +259,7 @@ class OneDriveClient:
 
     def _token(self) -> str:
         if self.auth_mode == "oauth":
-            from app.services.cloud_oauth import CloudOAuthError, decrypt_refresh_token, encrypt_refresh_token
+            from app.services.cloud_oauth import CloudOAuthError, decrypt_refresh_token, encrypt_refresh_token, get_microsoft_oauth_config
 
             try:
                 refresh_token = decrypt_refresh_token(self.refresh_token_encrypted)
@@ -267,17 +267,24 @@ class OneDriveClient:
                 raise CloudDriveError(
                     "OneDrive OAuth credential ใช้งานไม่ได้ กรุณาเชื่อมต่อบัญชีใหม่"
                 ) from exc
-            tenant = self.tenant_id or settings.MICROSOFT_OAUTH_TENANT
-            if not settings.MICROSOFT_OAUTH_SCOPE:
-                raise CloudDriveError("ยังไม่ได้ตั้งค่า Microsoft OAuth scope ใน backend/.env")
+            try:
+                oauth_config = get_microsoft_oauth_config(self.db)
+            except CloudOAuthError as exc:
+                raise CloudDriveError(str(exc)) from exc
+            tenant = self.tenant_id or oauth_config["tenant"]
+            client_id = oauth_config["client_id"]
+            client_secret = oauth_config["client_secret"]
+            scope = oauth_config["scope"]
+            if not client_id or not client_secret or not scope:
+                raise CloudDriveError("ยังไม่ได้ตั้งค่า Microsoft OAuth ใน Settings")
             try:
                 resp = requests.post(
                     f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token",
                     data={
-                        "client_id": settings.MICROSOFT_OAUTH_CLIENT_ID,
-                        "client_secret": settings.MICROSOFT_OAUTH_CLIENT_SECRET,
+                        "client_id": client_id,
+                        "client_secret": client_secret,
                         "refresh_token": refresh_token,
-                        "scope": settings.MICROSOFT_OAUTH_SCOPE,
+                        "scope": scope,
                         "grant_type": "refresh_token",
                     },
                     timeout=DEFAULT_TIMEOUT,

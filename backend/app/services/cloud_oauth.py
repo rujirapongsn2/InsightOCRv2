@@ -6,13 +6,15 @@ import hashlib
 import secrets
 import time
 from typing import Any, Dict, Literal
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 import requests
 from cryptography.fernet import Fernet, InvalidToken
 from jose import JWTError, jwt
 
 from app.core.config import settings
+from app.models.setting import Setting
+from app.utils.secret_store import SecretStoreError, decrypt_secret
 
 CloudProvider = Literal["google", "microsoft"]
 
@@ -23,10 +25,41 @@ MICROSOFT_TOKEN_URL = "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/to
 OAUTH_STATE_TTL_SECONDS = 10 * 60
 OAUTH_TIMEOUT = 30
 OAUTH_STATE_PREFIX = "insightdoc:oauth-state:"
+DEFAULT_MICROSOFT_OAUTH_SCOPE = "openid profile email offline_access User.Read Files.ReadWrite"
+DEFAULT_GOOGLE_OAUTH_SCOPE = "https://www.googleapis.com/auth/drive"
 
 
 class CloudOAuthError(Exception):
     """A user-facing OAuth setup or token exchange error."""
+
+
+def _is_local_origin(value: str | None) -> bool:
+    """Return whether an origin points to a local development host."""
+    if not value:
+        return True
+    try:
+        hostname = (urlsplit(value).hostname or "").lower()
+    except ValueError:
+        return False
+    return hostname in {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
+
+
+def resolve_public_app_url(request: Any = None) -> str:
+    """Resolve the public origin, preferring the configured deployment URL.
+
+    Localhost is the development default. When it is still configured in a
+    deployed instance, use the origin forwarded by nginx so OAuth links do
+    not point users back to localhost. Deployments can still pin a canonical
+    origin with PUBLIC_APP_URL.
+    """
+    configured = (settings.PUBLIC_APP_URL or "").strip().rstrip("/")
+    if request is not None and _is_local_origin(configured):
+        forwarded_host = request.headers.get("x-forwarded-host") or request.headers.get("host")
+        forwarded_proto = request.headers.get("x-forwarded-proto") or request.url.scheme
+        host = (forwarded_host or "").split(",", 1)[0].strip()
+        if host and not _is_local_origin(f"{forwarded_proto}://{host}"):
+            return f"{forwarded_proto}://{host}".rstrip("/")
+    return configured or "http://localhost:3000"
 
 
 def _fernet() -> Fernet:
@@ -45,30 +78,74 @@ def decrypt_refresh_token(value: str) -> str:
         raise CloudOAuthError("ไม่สามารถถอดรหัส credential ของ cloud storage ได้") from exc
 
 
-def _redirect_uri(provider: CloudProvider) -> str:
+def get_microsoft_oauth_config(db: Any = None) -> Dict[str, str | None]:
+    """Resolve admin DB settings first, then deployment env defaults."""
+    stored = db.query(Setting).first() if db is not None else None
+    client_secret = settings.MICROSOFT_OAUTH_CLIENT_SECRET
+    encrypted_secret = getattr(stored, "microsoft_oauth_client_secret_encrypted", None)
+    if encrypted_secret:
+        try:
+            client_secret = decrypt_secret(encrypted_secret)
+        except SecretStoreError as exc:
+            raise CloudOAuthError("ไม่สามารถถอดรหัส Microsoft OAuth Client Secret ได้") from exc
+    return {
+        "client_id": getattr(stored, "microsoft_oauth_client_id", None) or settings.MICROSOFT_OAUTH_CLIENT_ID,
+        "client_secret": client_secret,
+        "tenant": getattr(stored, "microsoft_oauth_tenant", None) or settings.MICROSOFT_OAUTH_TENANT,
+        "redirect_uri": getattr(stored, "microsoft_oauth_redirect_uri", None) or settings.MICROSOFT_OAUTH_REDIRECT_URI,
+        "scope": getattr(stored, "microsoft_oauth_scope", None) or settings.MICROSOFT_OAUTH_SCOPE or DEFAULT_MICROSOFT_OAUTH_SCOPE,
+    }
+
+
+def get_google_oauth_config(db: Any = None) -> Dict[str, str | None]:
+    """Resolve admin DB settings first, then deployment env defaults."""
+    stored = db.query(Setting).first() if db is not None else None
+    client_secret = settings.GOOGLE_OAUTH_CLIENT_SECRET
+    encrypted_secret = getattr(stored, "google_oauth_client_secret_encrypted", None)
+    if encrypted_secret:
+        try:
+            client_secret = decrypt_secret(encrypted_secret)
+        except SecretStoreError as exc:
+            raise CloudOAuthError("ไม่สามารถถอดรหัส Google OAuth Client Secret ได้") from exc
+    return {
+        "client_id": getattr(stored, "google_oauth_client_id", None) or settings.GOOGLE_OAUTH_CLIENT_ID,
+        "client_secret": client_secret,
+        "redirect_uri": getattr(stored, "google_oauth_redirect_uri", None) or settings.GOOGLE_OAUTH_REDIRECT_URI,
+        "scope": getattr(stored, "google_oauth_scope", None) or settings.GOOGLE_OAUTH_SCOPE or DEFAULT_GOOGLE_OAUTH_SCOPE,
+    }
+
+
+def _redirect_uri(provider: CloudProvider, db: Any = None, public_app_url: str | None = None) -> str:
     configured = (
-        settings.GOOGLE_OAUTH_REDIRECT_URI if provider == "google"
-        else settings.MICROSOFT_OAUTH_REDIRECT_URI
+        get_google_oauth_config(db)["redirect_uri"] if provider == "google"
+        else get_microsoft_oauth_config(db)["redirect_uri"]
     )
-    return configured or f"{settings.PUBLIC_APP_URL.rstrip('/')}{settings.API_V1_STR}/integrations/oauth/{provider}/callback"
+    public_origin = public_app_url or resolve_public_app_url()
+    # A stale localhost value can remain from an earlier development setup.
+    # Do not send production users to localhost when a public origin is known.
+    if configured and not (_is_local_origin(configured) and not _is_local_origin(public_origin)):
+        return configured
+    return f"{public_origin.rstrip('/')}{settings.API_V1_STR}/integrations/oauth/{provider}/callback"
 
 
-def _client_config(provider: CloudProvider) -> tuple[str, str]:
+def _client_config(provider: CloudProvider, db: Any = None) -> tuple[str, str]:
     if provider == "google":
-        client_id, client_secret = settings.GOOGLE_OAUTH_CLIENT_ID, settings.GOOGLE_OAUTH_CLIENT_SECRET
+        config = get_google_oauth_config(db)
+        client_id, client_secret = config["client_id"], config["client_secret"]
     else:
-        client_id, client_secret = settings.MICROSOFT_OAUTH_CLIENT_ID, settings.MICROSOFT_OAUTH_CLIENT_SECRET
+        config = get_microsoft_oauth_config(db)
+        client_id, client_secret = config["client_id"], config["client_secret"]
     if not client_id or not client_secret:
         label = "Google Drive" if provider == "google" else "OneDrive"
-        raise CloudOAuthError(f"ยังไม่ได้ตั้งค่า OAuth สำหรับ {label} ใน backend/.env")
+        raise CloudOAuthError(f"ยังไม่ได้ตั้งค่า OAuth สำหรับ {label} ใน Settings")
     return client_id, client_secret
 
 
-def _scope_config(provider: CloudProvider) -> str:
-    scope = settings.GOOGLE_OAUTH_SCOPE if provider == "google" else settings.MICROSOFT_OAUTH_SCOPE
+def _scope_config(provider: CloudProvider, db: Any = None) -> str:
+    scope = get_google_oauth_config(db)["scope"] if provider == "google" else get_microsoft_oauth_config(db)["scope"]
     if not scope or not scope.strip():
         label = "Google Drive" if provider == "google" else "OneDrive"
-        raise CloudOAuthError(f"ยังไม่ได้ตั้งค่า OAuth scope สำหรับ {label} ใน backend/.env")
+        raise CloudOAuthError(f"ยังไม่ได้ตั้งค่า OAuth scope สำหรับ {label} ใน Settings")
     return scope.strip()
 
 
@@ -123,10 +200,15 @@ def consume_state(state: str, provider: CloudProvider) -> str:
     return user_id
 
 
-def authorization_url(provider: CloudProvider, user_id: str) -> str:
-    client_id, _ = _client_config(provider)
-    scope = _scope_config(provider)
-    redirect_uri = _redirect_uri(provider)
+def authorization_url(
+    provider: CloudProvider,
+    user_id: str,
+    db: Any = None,
+    public_app_url: str | None = None,
+) -> str:
+    client_id, _ = _client_config(provider, db)
+    scope = _scope_config(provider, db)
+    redirect_uri = _redirect_uri(provider, db, public_app_url)
     state = _state_token(provider, user_id)
     if provider == "google":
         params = {
@@ -148,16 +230,22 @@ def authorization_url(provider: CloudProvider, user_id: str) -> str:
         "response_mode": "query",
         "state": state,
     }
-    return f"{MICROSOFT_AUTHORIZE_URL.format(tenant=settings.MICROSOFT_OAUTH_TENANT)}?{urlencode(params)}"
+    tenant = get_microsoft_oauth_config(db)["tenant"]
+    return f"{MICROSOFT_AUTHORIZE_URL.format(tenant=tenant)}?{urlencode(params)}"
 
 
-def _exchange_code(provider: CloudProvider, code: str) -> Dict[str, Any]:
-    client_id, client_secret = _client_config(provider)
-    redirect_uri = _redirect_uri(provider)
+def _exchange_code(
+    provider: CloudProvider,
+    code: str,
+    db: Any = None,
+    public_app_url: str | None = None,
+) -> Dict[str, Any]:
+    client_id, client_secret = _client_config(provider, db)
+    redirect_uri = _redirect_uri(provider, db, public_app_url)
     if provider == "google":
         url = GOOGLE_TOKEN_URL
     else:
-        url = MICROSOFT_TOKEN_URL.format(tenant=settings.MICROSOFT_OAUTH_TENANT)
+        url = MICROSOFT_TOKEN_URL.format(tenant=get_microsoft_oauth_config(db)["tenant"])
     try:
         response = requests.post(
             url,
@@ -223,8 +311,13 @@ def _profile(provider: CloudProvider, access_token: str) -> Dict[str, Any]:
     }
 
 
-def complete_authorization(provider: CloudProvider, code: str) -> Dict[str, Any]:
-    tokens = _exchange_code(provider, code)
+def complete_authorization(
+    provider: CloudProvider,
+    code: str,
+    db: Any = None,
+    public_app_url: str | None = None,
+) -> Dict[str, Any]:
+    tokens = _exchange_code(provider, code, db, public_app_url)
     refresh_token = tokens.get("refresh_token")
     if not refresh_token:
         raise CloudOAuthError("ไม่ได้รับ refresh token จาก provider กรุณาอนุญาตการเข้าถึงอีกครั้ง")
