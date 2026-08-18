@@ -5,6 +5,8 @@ Optimizations (Phase 6):
   - System prompt sent only once (saves tokens across iterations)
   - Parallel tool execution via asyncio.gather when no confirmation needed
 """
+from __future__ import annotations
+
 import json
 import asyncio
 import logging
@@ -20,7 +22,13 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-from app.agent.context import AgentContext, build_system_prompt, tool_content_for_llm
+from app.agent.context import (
+    AgentContext,
+    FOCUSED_LEGAL_QA_TOOLS,
+    build_system_prompt,
+    is_focused_legal_qa,
+    tool_content_for_llm,
+)
 from app.agent.events import sse_event, SSEEventType
 from app.agent.confirmations import requires_confirmation, describe_action
 from app.agent.tools.registry import tool_registry
@@ -73,18 +81,29 @@ async def _chat_with_retry(client: AsyncOpenAI, **kwargs):
     raise last_exc
 
 
-def _max_iterations_fallback_text(user_message: str) -> str:
+def _max_iterations_fallback_text(user_message: str, evidence_notes: list[str] | None = None) -> str:
     thai = bool(re.search(r"[\u0e00-\u0e7f]", user_message or ""))
+    evidence = "\n".join(evidence_notes[-4:]) if evidence_notes else ""
     if thai:
+        if evidence:
+            return (
+                "ผมพบหลักฐานจากเอกสารแล้ว แต่ยังสรุปคำตอบให้เสร็จภายในรอบการทำงานนี้ไม่ได้ครับ\n\n"
+                f"หลักฐานที่พบ:\n{evidence[:5000]}\n\n"
+                "กรุณาสั่งให้ตอบจากเอกสารที่พบโดยระบุชื่อไฟล์หรือมาตราที่ต้องการอีกครั้ง"
+            )
         return (
             "ผมใช้จำนวนรอบการทำงานครบกำหนดแล้วแต่ยังทำงานไม่เสร็จสมบูรณ์ครับ "
-            "ผลลัพธ์บางส่วนอาจถูกบันทึกไว้แล้ว — ลองสั่งต่อโดยระบุขอบเขตให้แคบลง "
-            "เช่น เลือกเอกสารหรือขั้นตอนที่ต้องการเป็นพิเศษ"
+            "ยังไม่พบหลักฐานเพียงพอสำหรับตอบคำถามนี้ — ลองระบุเอกสารหรือขั้นตอนที่ต้องการเป็นพิเศษ"
+        )
+    if evidence:
+        return (
+            "I found document evidence but could not finish the answer within the working limit.\n\n"
+            f"Evidence found:\n{evidence[:5000]}\n\n"
+            "Please retry with a specific document or section."
         )
     return (
         "I reached the maximum number of working iterations before fully completing the task. "
-        "Partial results may already be saved — please retry with a narrower request, "
-        "such as a specific document or step."
+        "No sufficient evidence was found — please retry with a specific document or step."
     )
 
 
@@ -139,6 +158,27 @@ async def _blocked_skill_policy_result(tool_name: str) -> dict:
             "alone before the next turn"
         ),
         "blocked_by_skill_policy": True,
+    }
+
+
+async def _focused_legal_policy_result(tool_name: str) -> dict:
+    return {
+        "error": (
+            f"Tool '{tool_name}' is not available in focused legal Q&A mode. "
+            "Use document search and detail tools, then answer from the Job evidence."
+        ),
+        "blocked_by_request_policy": True,
+    }
+
+
+async def _focused_duplicate_search_result(query: str) -> dict:
+    return {
+        "ok": True,
+        "reused_search": True,
+        "query": query,
+        "count": 0,
+        "documents": [],
+        "message": "Equivalent document search already ran; use its previous evidence and answer now.",
     }
 
 
@@ -261,6 +301,65 @@ def _tool_error_summary(tool_name: str, result: Any) -> str:
     else:
         message = str(error or result.get("stderr") or "unknown error")
     return f"{tool_name}: {message}"
+
+
+def _compact_wrapup_messages(messages: list[dict], user_message: str, evidence_notes: list[str]) -> list[dict]:
+    """Build a small tool-free transcript for the final answer call.
+
+    Sending the complete tool-call transcript at the iteration cap can exceed an
+    OpenAI-compatible provider's context window. It can also contain assistant
+    tool-call messages whose matching tool messages were truncated. A compact,
+    plain transcript is valid for a no-tool wrap-up and preserves the evidence
+    needed to explain what was found.
+    """
+    evidence = "\n\n".join(evidence_notes[-8:])
+    if len(evidence) > 12000:
+        evidence = evidence[-12000:]
+    return [
+        {
+            "role": "system",
+            "content": (
+                "Answer the user's request now without calling tools. Use only the evidence below. "
+                "Reply in the user's language, answer directly, cite filenames when possible, and say "
+                "clearly when the evidence is insufficient. Do not mention internal iteration limits or "
+                "invent facts that are not present in the evidence.\n\nEvidence:\n" + evidence
+            ),
+        },
+        {"role": "user", "content": user_message},
+    ]
+
+
+def _evidence_note(tool_name: str, result: Any) -> str | None:
+    """Extract a bounded, human-readable evidence note for final fallback."""
+    if not isinstance(result, dict):
+        return None
+    if tool_name == "list_documents":
+        documents = result.get("documents") or []
+        names = [str(item.get("filename")) for item in documents if isinstance(item, dict) and item.get("filename")]
+        return f"list_documents: {', '.join(names[:20])}" if names else None
+    if tool_name == "search_documents":
+        documents = result.get("documents") or []
+        rows = []
+        for item in documents[:8]:
+            if not isinstance(item, dict):
+                continue
+            row = str(item.get("filename") or item.get("id") or "document")
+            snippets = item.get("snippets") or []
+            if snippets:
+                row += f": {' | '.join(str(s) for s in snippets[:2])[:600]}"
+            rows.append(row)
+        return f"search_documents ({result.get('query', '')}): {'; '.join(rows)}" if rows else None
+    if tool_name == "get_document_detail":
+        filename = result.get("filename") or result.get("id") or "document"
+        text = str(result.get("ocr_text") or "").strip()
+        extracted = result.get("reviewed_data") or result.get("extracted_data")
+        parts = [f"get_document_detail ({filename})"]
+        if text:
+            parts.append(text[:2500])
+        if extracted:
+            parts.append(json.dumps(extracted, ensure_ascii=False, default=str)[:1800])
+        return ":\n".join(parts)
+    return None
 
 
 def _is_file_write_success(tool_name: str, result: Any) -> bool:
@@ -642,6 +741,8 @@ class AgentLoop:
         crud_msg.add(self.db, conversation_id=self.conversation_id, role="user", content=user_message, iteration=0)
         crud_conv.update_title(self.db, self.conversation_id, user_message[:60])
         self.context.clear_active_skill_tool_policy()
+        self.context.current_request = user_message
+        focused_legal_qa = is_focused_legal_qa(user_message)
 
         if self.kind == "workflow_builder":
             async for event in self._run_workflow_builder(user_message):
@@ -677,6 +778,13 @@ class AgentLoop:
         latest_report_success: dict[str, Any] | None = None
         unresolved_tool_errors: list[dict[str, Any]] = []
         critical_tool_failures: list[dict[str, Any]] = []
+        evidence_notes: list[str] = []
+        evidence_found = False
+        no_progress_streak = 0
+        seen_search_queries: set[str] = set()
+        seen_tool_signatures: set[str] = set()
+        legal_search_calls = 0
+        force_tool_free_next = False
         reflection_result: dict[str, Any] | None = None
         current_turn_tools: set[str] = set()
         current_turn_file_success = False
@@ -706,7 +814,7 @@ class AgentLoop:
         plan_steps: list[str] = []
         plan_msg = None
         reflected = False
-        if _is_complex_request(user_message):
+        if _is_complex_request(user_message) and not focused_legal_qa:
             plan_steps = await self._build_plan(client, model, user_message, history)
             if plan_steps:
                 yield sse_event(SSEEventType.PLAN, {"steps": plan_steps})
@@ -730,7 +838,17 @@ class AgentLoop:
             yield sse_event(SSEEventType.THINKING, {"iteration": iteration})
 
             allowed_tools = self.context.active_skill_allowed_tools
-            visible_tools = allowed_tools
+            if force_tool_free_next:
+                visible_tools = set()
+                tool_choice = "none"
+            elif focused_legal_qa:
+                visible_tools = set(FOCUSED_LEGAL_QA_TOOLS)
+                if allowed_tools is not None:
+                    visible_tools &= allowed_tools
+                tool_choice = "auto"
+            else:
+                visible_tools = allowed_tools
+                tool_choice = "auto"
             tools_schema = tool_registry.get_openai_schemas(allowed_names=visible_tools)
 
             try:
@@ -739,7 +857,7 @@ class AgentLoop:
                     model=model,
                     messages=messages,
                     tools=tools_schema,
-                    tool_choice="auto",
+                    tool_choice=tool_choice,
                     temperature=LLM_TEMPERATURE,
                     stream=False,
                 )
@@ -786,10 +904,16 @@ class AgentLoop:
                     yield sse_event(SSEEventType.TOOL_CALL, {"id": tc.id, "name": name, "arguments": args})
 
                 policy_blocked_call_ids = _skill_policy_blocked_call_ids(parsed)
+                request_policy_blocked_call_ids = {
+                    tc.id for tc, name, _ in parsed
+                    if focused_legal_qa and name not in FOCUSED_LEGAL_QA_TOOLS
+                }
 
                 # Determine execution strategy
                 needs_confirmation = any(
-                    tc.id not in policy_blocked_call_ids and requires_confirmation(name, args)
+                    tc.id not in policy_blocked_call_ids
+                    and tc.id not in request_policy_blocked_call_ids
+                    and requires_confirmation(name, args)
                     for tc, name, args in parsed
                 )
 
@@ -803,7 +927,9 @@ class AgentLoop:
                 if needs_confirmation:
                     # Sequential — confirmation gates require per-tool user interaction
                     for tc, tool_name, tool_args in parsed:
-                        if tc.id in policy_blocked_call_ids:
+                        if tc.id in request_policy_blocked_call_ids:
+                            result = await _focused_legal_policy_result(tool_name)
+                        elif tc.id in policy_blocked_call_ids:
                             result = await _blocked_skill_policy_result(tool_name)
                         elif requires_confirmation(tool_name, tool_args):
                             pending = crud_pending.create(
@@ -849,6 +975,34 @@ class AgentLoop:
                         })
                         tool_events_seen += 1
                         current_turn_tools.add(tool_name)
+                        tool_signature = f"{tool_name}:{json.dumps(tool_args, sort_keys=True, ensure_ascii=False)}"
+                        duplicate_tool_call = tool_signature in seen_tool_signatures
+                        seen_tool_signatures.add(tool_signature)
+                        if focused_legal_qa and duplicate_tool_call:
+                            no_progress_streak += 1
+                        note = _evidence_note(tool_name, result)
+                        if note:
+                            evidence_notes.append(note)
+                        if focused_legal_qa:
+                            if tool_name == "search_documents":
+                                legal_search_calls += 1
+                                documents = result.get("documents") or [] if isinstance(result, dict) else []
+                                has_snippet = any(
+                                    isinstance(item, dict) and item.get("snippets")
+                                    for item in documents
+                                )
+                                if has_snippet and not duplicate_tool_call:
+                                    evidence_found = True
+                                    no_progress_streak = 0
+                                else:
+                                    no_progress_streak += 1
+                            elif tool_name == "get_document_detail" and isinstance(result, dict):
+                                if (
+                                    not duplicate_tool_call
+                                    and (result.get("ocr_text") or result.get("extracted_data") or result.get("reviewed_data"))
+                                ):
+                                    evidence_found = True
+                                    no_progress_streak = 0
                         if _is_file_write_success(tool_name, result):
                             current_turn_file_success = True
                             latest_file_success_result = result
@@ -866,15 +1020,25 @@ class AgentLoop:
                             unresolved_tool_errors.clear()
                 else:
                     # Parallel — all read-only tools, execute concurrently
-                    tasks = [
-                        _blocked_skill_policy_result(name)
-                        if tc.id in policy_blocked_call_ids
-                        else _exec_single(name, args, self.context)
-                        for tc, name, args in parsed
-                    ]
+                    tasks = []
+                    for tc, name, args in parsed:
+                        if tc.id in request_policy_blocked_call_ids:
+                            tasks.append(_focused_legal_policy_result(name))
+                        elif tc.id in policy_blocked_call_ids:
+                            tasks.append(_blocked_skill_policy_result(name))
+                        elif focused_legal_qa and name == "search_documents":
+                            search_key = document_tools.normalize_search_text(args.get("query", ""))
+                            if search_key in seen_search_queries:
+                                tasks.append(_focused_duplicate_search_result(search_key))
+                            else:
+                                seen_search_queries.add(search_key)
+                                legal_search_calls += 1
+                                tasks.append(_exec_single(name, args, self.context))
+                        else:
+                            tasks.append(_exec_single(name, args, self.context))
                     results = await asyncio.gather(*tasks, return_exceptions=True)
 
-                    for (tc, tool_name, _), result in zip(parsed, results):
+                    for (tc, tool_name, tool_args), result in zip(parsed, results):
                         if isinstance(result, Exception):
                             result = {"error": str(result)}
                         else:
@@ -891,6 +1055,35 @@ class AgentLoop:
                         })
                         tool_events_seen += 1
                         current_turn_tools.add(tool_name)
+                        tool_signature = f"{tool_name}:{json.dumps(tool_args, sort_keys=True, ensure_ascii=False)}"
+                        duplicate_tool_call = tool_signature in seen_tool_signatures
+                        seen_tool_signatures.add(tool_signature)
+                        if focused_legal_qa and duplicate_tool_call:
+                            no_progress_streak += 1
+                        note = _evidence_note(tool_name, result)
+                        if note:
+                            evidence_notes.append(note)
+                        if focused_legal_qa:
+                            if tool_name == "search_documents":
+                                documents = result.get("documents") or [] if isinstance(result, dict) else []
+                                has_snippet = any(
+                                    isinstance(item, dict) and item.get("snippets")
+                                    for item in documents
+                                )
+                                if isinstance(result, dict) and result.get("reused_search"):
+                                    no_progress_streak += 1
+                                elif has_snippet and not duplicate_tool_call:
+                                    evidence_found = True
+                                    no_progress_streak = 0
+                                elif not isinstance(result, dict) or not result.get("reused_search"):
+                                    no_progress_streak += 1
+                            elif tool_name == "get_document_detail" and isinstance(result, dict):
+                                if (
+                                    not duplicate_tool_call
+                                    and (result.get("ocr_text") or result.get("extracted_data") or result.get("reviewed_data"))
+                                ):
+                                    evidence_found = True
+                                    no_progress_streak = 0
                         if _is_file_write_success(tool_name, result):
                             current_turn_file_success = True
                             latest_file_success_result = result
@@ -911,6 +1104,19 @@ class AgentLoop:
                 # this assistant turn are contiguous, system messages are safe.
                 for note in failure_notes:
                     messages.append({"role": "system", "content": note})
+
+                if focused_legal_qa and not created_skill_result and (
+                    evidence_found or no_progress_streak >= 2 or legal_search_calls >= 4
+                ):
+                    force_tool_free_next = True
+                    messages.append({
+                        "role": "system",
+                        "content": (
+                            "Focused legal Q&A has enough evidence or has made no further progress. "
+                            "Answer the user's question in the next response using the collected document "
+                            "evidence. Do not call another tool."
+                        ),
+                    })
 
                 # Skill creation is a terminal action for this user turn. Do
                 # not let the model immediately execute the newly saved Skill
@@ -1039,21 +1245,13 @@ class AgentLoop:
                 })
                 return
 
-        # Out of iterations — force one tool-free wrap-up call so the user gets
-        # a real answer (what was done, what's missing) instead of silence.
-        messages.append({
-            "role": "system",
-            "content": (
-                "You have used the maximum number of tool iterations. Do not call any more tools. "
-                "Summarize for the user, in the user's language: what was accomplished, what remains "
-                "unfinished, and any errors encountered. Never claim a file was created or saved "
-                "unless a tool already returned ok=true."
-            ),
-        })
+        # Out of iterations — use a compact, tool-free wrap-up. The full
+        # transcript can exceed provider context limits after repeated calls.
         final_text = ""
         try:
             response = await _chat_with_retry(
-                client, model=model, messages=messages,
+                client, model=model,
+                messages=_compact_wrapup_messages(messages, user_message, evidence_notes),
                 temperature=LLM_TEMPERATURE, stream=False,
             )
             final_text = (response.choices[0].message.content or "").strip()
@@ -1063,7 +1261,7 @@ class AgentLoop:
             final_text = (
                 _file_success_final_text(latest_file_success_result, user_message)
                 if current_turn_file_success and latest_file_success_result
-                else _max_iterations_fallback_text(user_message)
+                else _max_iterations_fallback_text(user_message, evidence_notes)
             )
         if current_turn_file_success and latest_file_success_result and _claims_failure(final_text):
             final_text = _file_success_final_text(latest_file_success_result, user_message)

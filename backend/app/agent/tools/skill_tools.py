@@ -14,6 +14,7 @@ import logging
 from pathlib import Path
 import re
 
+from app.agent.context import FOCUSED_LEGAL_QA_TOOLS, is_focused_legal_qa
 from app.agent.tools.registry import ToolDef, tool_registry
 from app.crud.crud_agent_skill import agent_skill as crud_skill
 from app.services.skill_discovery import (
@@ -315,7 +316,7 @@ async def _execute_skill_handler(args: dict, context) -> dict:
     if getattr(skill, "compatibility", None):
         instruction += f"**Requirements**: {skill.compatibility}\n\n"
 
-    if getattr(skill, "allowed_tools", None):
+    if getattr(skill, "allowed_tools", None) and not is_focused_legal_qa(getattr(context, "current_request", "")):
         instruction += f"**Pre-approved tools**: {skill.allowed_tools}\n\n"
 
     instruction += (
@@ -333,11 +334,24 @@ async def _execute_skill_handler(args: dict, context) -> dict:
         allowed_tool_names, _ = _normalize_allowed_tools(getattr(skill, "allowed_tools", None))
     except ValueError:
         return {"error": f"Skill '{skill.name}' contains unknown platform tools and cannot run"}
+
+    # Older database skills may contain broad artifact/code tools. A legal
+    # question is read-only by default, so narrow the active policy at runtime
+    # without mutating the saved skill or changing its contract-analysis use.
+    if is_focused_legal_qa(getattr(context, "current_request", "")):
+        allowed_tool_names = sorted(FOCUSED_LEGAL_QA_TOOLS - {"execute_skill"})
+        instruction += (
+            "\n\n**Focused legal Q&A policy:** Answer the current legal question from the Job's documents. "
+            "Use one focused search per concept, load the relevant document detail, and stop when the "
+            "evidence is sufficient. Do not create files, run Python, search the web, compare documents, "
+            "or perform write/integration actions for this question."
+        )
     metadata = getattr(skill, "metadata_", None)
     enforce_tools = bool(
         (isinstance(metadata, dict) and metadata.get("tool_policy") == "strict")
         or (getattr(skill, "source", None) == "file" and getattr(skill, "allowed_tools", None))
     )
+    enforce_tools = enforce_tools or is_focused_legal_qa(getattr(context, "current_request", ""))
 
     return {
         "ok": True,

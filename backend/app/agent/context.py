@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from uuid import UUID
 import json
 import re
@@ -10,6 +12,34 @@ from app.crud.crud_agent_skill import agent_skill as crud_skill
 # the DB; only the model-facing copy is truncated so giant OCR payloads don't
 # blow the context window or drown the model in noise.
 TOOL_RESULT_MAX_CHARS = 12000
+
+# Focused legal questions should be answered from the current Job's evidence.
+# Keep this allowlist intentionally small so legacy legal skills cannot expand a
+# read-only Q&A turn into Python execution or file generation.
+FOCUSED_LEGAL_QA_TOOLS = {
+    "execute_skill",
+    "list_documents",
+    "get_document_detail",
+    "search_documents",
+}
+
+_LEGAL_QA_HINTS = (
+    "กฎหมาย", "มาตรา", "ข้อกฎหมาย", "ข้อกำหนด", "หน้าที่", "สิทธิ", "คุณสมบัติ",
+    "ผู้ควบคุมข้อมูล", "ผู้ประมวลผล", "ข้อมูลส่วนบุคคล", "pdpa", "พระราชบัญญัติ",
+    "section", "article", "legal requirement", "legal duty", "law",
+)
+_LEGAL_ARTIFACT_HINTS = (
+    "รายงาน", "ไฟล์", "ส่งออก", "export", "pdf", "docx", "csv", "html", "report",
+    "เปรียบเทียบสัญญา", "contract comparison", "generate a report",
+)
+
+
+def is_focused_legal_qa(query: str | None) -> bool:
+    """Return True for evidence-based legal Q&A that does not request an artifact."""
+    text = (query or "").strip().lower()
+    if not text or not any(hint in text for hint in _LEGAL_QA_HINTS):
+        return False
+    return not any(hint in text for hint in _LEGAL_ARTIFACT_HINTS)
 
 
 def _looks_like_prior_file_claim(content: str | None) -> bool:
@@ -130,6 +160,7 @@ class AgentContext:
         self.job_id = job_id
         self.conversation_id = conversation_id
         self.kind = kind
+        self.current_request: str = ""
         # None keeps legacy skills unrestricted. An empty set means a strict
         # skill intentionally has no tool access.
         self.active_skill_allowed_tools: set[str] | None = None
@@ -300,6 +331,19 @@ def build_system_prompt(context: AgentContext, user_message: str) -> str:
         lines.append("If a skill matches the current task, you must call execute_skill(name=...) before solving so the full procedure is loaded.")
         skills_section = "\n".join(lines)
 
+    legal_qa_section = ""
+    if is_focused_legal_qa(user_message):
+        legal_qa_section = """
+## Focused Legal Q&A Mode
+- Answer the legal question from evidence in the current Job only.
+- Use only `execute_skill`, `list_documents`, `search_documents`, and `get_document_detail`.
+- Search each legal concept once; Thai and Arabic digit variants are normalized automatically.
+- After finding the relevant document or section, load its detail and answer. Do not call Python,
+  web search, file, comparison, or integration tools for this read-only question.
+- Cite the document filename and section/article when available. If the evidence is incomplete,
+  say exactly what was found and what is still missing instead of continuing to search indefinitely.
+"""
+
     return f"""You are Agent DOC, an Agentic Document Management assistant inside InsightDOC.
 
 ## Mission
@@ -313,6 +357,8 @@ Help users understand, validate, correct, enrich, approve, route, and export doc
 {memory_section}
 
 {skills_section}
+
+{legal_qa_section}
 
 ## Core Workflow
 1. Observe: use `list_documents` first, then `get_document_detail` for relevant documents.

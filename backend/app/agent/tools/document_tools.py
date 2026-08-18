@@ -1,7 +1,39 @@
+from __future__ import annotations
+
 from datetime import datetime, timezone
+import re
+import unicodedata
+
 from app.agent.tools.registry import ToolDef, tool_registry
 from app.models.document import Document
 from app.utils.activity_logger import log_activity
+
+
+_THAI_DIGIT_TRANSLATION = str.maketrans("๐๑๒๓๔๕๖๗๘๙", "0123456789")
+
+
+def normalize_search_text(value: object) -> str:
+    """Normalize Thai/Arabic digits and whitespace for document search."""
+    text = unicodedata.normalize("NFKC", str(value or "")).translate(_THAI_DIGIT_TRANSLATION)
+    return re.sub(r"\s+", " ", text.casefold()).strip()
+
+
+def _compact_search_text(value: object) -> str:
+    return re.sub(r"\s+", "", normalize_search_text(value))
+
+
+def _search_snippets(text: str | None, normalized_query: str, limit: int = 3) -> list[str]:
+    if not text or not normalized_query:
+        return []
+    compact_query = _compact_search_text(normalized_query)
+    snippets: list[str] = []
+    for raw_line in str(text).splitlines():
+        line = " ".join(raw_line.split()).strip()
+        if line and compact_query in _compact_search_text(line):
+            snippets.append(line[:600])
+            if len(snippets) >= limit:
+                break
+    return snippets
 
 
 async def _list_documents_handler(args: dict, context) -> dict:
@@ -38,19 +70,35 @@ async def _get_document_detail_handler(args: dict, context) -> dict:
 
 
 async def _search_documents_handler(args: dict, context) -> dict:
-    query = args.get("query", "").lower()
+    query = normalize_search_text(args.get("query", ""))
+    compact_query = _compact_search_text(query)
     docs = context.db.query(Document).filter(Document.job_id == context.job_id).all()
     results = []
     for d in docs:
         score = 0
-        if query and d.filename and query in d.filename.lower():
+        matched_sources: list[str] = []
+        snippets = _search_snippets(d.ocr_text, query)
+        filename_match = bool(compact_query and compact_query in _compact_search_text(d.filename))
+        extracted_match = bool(
+            compact_query
+            and d.extracted_data
+            and compact_query in _compact_search_text(d.extracted_data)
+        )
+        ocr_match = bool(snippets)
+        if filename_match:
             score = 3
-        if query and d.extracted_data and query in str(d.extracted_data).lower():
+            matched_sources.append("filename")
+        if extracted_match:
             score = max(score, 2)
-        if query and d.ocr_text and query in d.ocr_text.lower():
+            matched_sources.append("extracted_data")
+        if ocr_match:
             score = max(score, 1)
+            matched_sources.append("ocr_text")
         if score > 0 or not query:
-            results.append({"id": str(d.id), "filename": d.filename, "score": score, "status": d.status})
+            results.append({
+                "id": str(d.id), "filename": d.filename, "score": score, "status": d.status,
+                "matched_sources": matched_sources, "snippets": snippets,
+            })
     results.sort(key=lambda x: x["score"], reverse=True)
     return {"query": query, "count": len(results), "documents": results[:10]}
 

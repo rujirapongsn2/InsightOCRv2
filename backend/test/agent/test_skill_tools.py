@@ -260,6 +260,21 @@ class TestExecuteSkill:
         assert result["enforce_tools"] is True
         assert result["allowed_tool_names"] == ["list_skills"]
 
+    async def test_execute_legacy_skill_is_narrowed_for_legal_qa(self):
+        ctx = _make_context()
+        ctx.current_request = "การส่งข้อมูลข้ามแดนตามมาตรา 28 มีข้อกำหนดอย่างไร"
+        skill = _fake_skill(
+            allowed_tools="list_skills create_skill",
+        )
+        with patch.object(crud_skill, "get_by_name", return_value=skill), \
+             patch.object(crud_skill, "increment_usage"):
+            result = await _execute_skill_handler({"name": "test-skill"}, ctx)
+        assert result["enforce_tools"] is True
+        assert result["allowed_tool_names"] == [
+            "get_document_detail", "list_documents", "search_documents",
+        ]
+        assert "Do not create files" in result["instruction"]
+
 
 # ── list_skills ────────────────────────────────────────────────────────────────
 
