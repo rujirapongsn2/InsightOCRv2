@@ -18,6 +18,7 @@ from app.services.extraction_profiles import (
     supports_anydoc_source,
     validate_extraction_profile,
 )
+from app.services.anydoc_pipeline import normalize_ocr_engine
 from app.services.storage import get_storage_service
 from app.utils.activity_logger import log_activity, Actions
 from app.utils.job_logger import get_job_logger
@@ -270,6 +271,9 @@ class ProcessRequest(BaseModel):
     schema_id: Optional[uuid.UUID] = None
     # Kept for older API clients. The UI no longer exposes a pipeline choice.
     extraction_profile: Optional[Literal["legacy", "anydoc_hybrid"]] = None
+    # Optional manual override used by Preview > Retry OCR. Automatic
+    # processing keeps the Tesseract -> Softnix -> fallback chain.
+    ocr_engine: Optional[str] = None
 
 class ProcessResponse(BaseModel):
     document_id: str
@@ -326,6 +330,15 @@ def process_document(
         process_request.extraction_profile,
         document,
     )
+    try:
+        requested_ocr_engine = normalize_ocr_engine(process_request.ocr_engine)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if requested_ocr_engine and not supports_anydoc_source(document.filename, document.mime_type):
+        raise HTTPException(
+            status_code=422,
+            detail="Manual OCR engine selection is supported for PDF and image documents only",
+        )
 
     # Atomically claim the document so concurrent /process calls cannot
     # dispatch two Celery tasks for the same document.
@@ -340,6 +353,10 @@ def process_document(
                 "schema_id": process_request.schema_id,
                 "status": "queued",
                 "processing_error": None,
+                "reviewed_data": None,
+                "review_decision": None,
+                "reviewed_at": None,
+                "reviewed_by": None,
             },
             synchronize_session=False,
         )
@@ -367,6 +384,7 @@ def process_document(
             str(document.id),
             str(process_request.schema_id) if process_request.schema_id else None,
             validated_profile,
+            requested_ocr_engine,
         )
     except Exception:
         # Broker unavailable — release the claim so the user can retry.

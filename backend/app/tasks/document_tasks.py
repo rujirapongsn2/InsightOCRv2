@@ -25,6 +25,7 @@ from app.services.anydoc_pipeline import (
     AnydocFallbackToLegacy,
     AnydocTerminalError,
     extract_anydoc_document,
+    normalize_ocr_engine,
 )
 from app.services.anydoc_bbox import BboxLocatorError, extract_fixed_position_fields
 from app.services.extraction_profiles import supports_anydoc_source, validate_extraction_profile
@@ -1006,6 +1007,7 @@ def process_document_task(
     document_id: str,
     schema_id: str | None = None,
     requested_extraction_profile: str | None = None,
+    requested_ocr_engine: str | None = None,
 ):
     """
     Background task to process a document through external AI processing API.
@@ -1082,6 +1084,10 @@ def process_document_task(
                 )
         except ValueError as exc:
             raise ValueError(f"Invalid extraction pipeline for selected schema: {exc}") from exc
+        try:
+            requested_ocr_engine = normalize_ocr_engine(requested_ocr_engine)
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
         if extraction_profile != "anydoc_hybrid" and (not setting.api_token or not ocr_endpoint):
             raise ValueError("Softnix OCR endpoint and API token are required in Settings.")
 
@@ -1103,7 +1109,12 @@ def process_document_task(
         with storage.get_local_path(document.file_path) as local_file_path:
             if extraction_profile == "anydoc_hybrid":
                 try:
-                    anydoc_result = extract_anydoc_document(local_file_path, db, schema)
+                    anydoc_result = extract_anydoc_document(
+                        local_file_path,
+                        db,
+                        schema,
+                        requested_ocr_engine=requested_ocr_engine,
+                    )
                     document.ocr_text = anydoc_result.markdown
                     document.ocr_pages = anydoc_result.pages
                     document.page_count = len(anydoc_result.pages)
@@ -1151,6 +1162,28 @@ def process_document_task(
                         "pipeline": "anydoc_hybrid",
                     }
                 except AnydocFallbackToLegacy as anydoc_error:
+                    if requested_ocr_engine:
+                        document.status = "failed"
+                        document.processing_error = (
+                            f"Manual {requested_ocr_engine} retry could not enter AnyDoc: {anydoc_error}"
+                        )
+                        document.extraction_metadata = {
+                            "pipeline": "anydoc_hybrid",
+                            "requested_ocr_engine": requested_ocr_engine,
+                            "failure": {"reason": str(anydoc_error), "terminal": True},
+                        }
+                        db.add(document)
+                        db.commit()
+                        job_logger.error(
+                            "Manual OCR retry failed for %s: %s",
+                            document.filename,
+                            anydoc_error,
+                        )
+                        return {
+                            "status": "failed",
+                            "document_id": document_id,
+                            "error": str(anydoc_error),
+                        }
                     document.extraction_metadata = {
                         "pipeline": "legacy_fallback",
                         "legacy_fallback": {"reason": str(anydoc_error), "from": "anydoc_hybrid"},

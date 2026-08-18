@@ -7,14 +7,17 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
+import subprocess
 import tempfile
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from io import BytesIO
 from typing import Any
 
 from PIL import Image, ImageOps, UnidentifiedImageError
-from pypdf import PdfReader
+from pypdf import PdfReader, PdfWriter
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -32,6 +35,15 @@ logger = logging.getLogger(__name__)
 
 ANYDOC_REF = "82e23481480d5b54a4f4e0b3d99950f09108685c"
 
+OCR_ENGINE_ALIASES = {
+    "tesseract": "tesseract_ocr",
+    "tesseract_ocr": "tesseract_ocr",
+    "softnix": "softnix_ocr",
+    "softnix_ocr": "softnix_ocr",
+    "fallback": "ocr_fallback",
+    "ocr_fallback": "ocr_fallback",
+}
+
 _IMAGE_MIME_TYPES = {
     "BMP": "image/bmp",
     "JPEG": "image/jpeg",
@@ -47,6 +59,19 @@ class AnydocFallbackToLegacy(Exception):
 
 class AnydocTerminalError(Exception):
     """The pilot completed its attempts but no trustworthy extraction exists."""
+
+
+def normalize_ocr_engine(engine: str | None) -> str | None:
+    """Normalize a manual OCR selection; ``None`` means automatic routing."""
+    value = str(engine or "").strip().lower()
+    if not value or value == "auto":
+        return None
+    normalized = OCR_ENGINE_ALIASES.get(value)
+    if not normalized:
+        raise ValueError(
+            "Unsupported OCR engine. Choose tesseract_ocr, softnix_ocr, or ocr_fallback."
+        )
+    return normalized
 
 
 @dataclass
@@ -120,6 +145,75 @@ def _pdf_text_pages(file_path: str) -> list[dict[str, Any]]:
         raise AnydocFallbackToLegacy(f"Unable to inspect PDF pages: {exc}") from exc
 
 
+def _text_layer_quality(text: str) -> dict[str, Any]:
+    """Detect text layers that contain a font/ToUnicode mapping failure.
+
+    A non-empty text layer is not automatically usable. Broken Thai PDF fonts
+    commonly produce control characters and visible ASCII noise while the
+    rendered page remains readable. Empty pages are left to AnyDoc's native
+    OCR decision; only a non-empty but demonstrably corrupt layer is forced to
+    the page OCR path here.
+    """
+    value = text or ""
+    controls = [
+        char for char in value
+        if ord(char) < 32 and char not in {"\n", "\r", "\t"}
+    ]
+    replacement_count = value.count("\ufffd")
+    reasons: list[str] = []
+    if controls:
+        reasons.append("control_characters")
+    if replacement_count:
+        reasons.append("replacement_characters")
+    return {
+        "usable": bool(value.strip()) and not reasons,
+        "reasons": reasons,
+        "control_character_count": len(controls),
+        "replacement_character_count": replacement_count,
+    }
+
+
+def _single_pdf_page_bytes(file_path: str, page_number: int) -> bytes:
+    reader = PdfReader(file_path)
+    writer = PdfWriter()
+    writer.add_page(reader.pages[page_number - 1])
+    output = BytesIO()
+    writer.write(output)
+    return output.getvalue()
+
+
+def _render_pdf_page(file_path: str, page_number: int) -> str:
+    """Render one PDF page for OCR and return a temporary PNG path."""
+    directory = tempfile.mkdtemp(prefix="anydoc-ocr-")
+    output_prefix = os.path.join(directory, "page")
+    try:
+        result = subprocess.run(
+            [
+                "pdftoppm", "-png", "-f", str(page_number), "-l", str(page_number),
+                "-r", "300", file_path, output_prefix,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=max(1, settings.TESSERACT_OCR_TIMEOUT_SECONDS),
+        )
+    except FileNotFoundError as exc:
+        shutil.rmtree(directory, ignore_errors=True)
+        raise AnydocTerminalError("pdftoppm is not installed") from exc
+    except subprocess.TimeoutExpired as exc:
+        shutil.rmtree(directory, ignore_errors=True)
+        raise AnydocTerminalError(f"Rendering PDF page {page_number} timed out") from exc
+    rendered_path = f"{output_prefix}-{page_number}.png"
+    if result.returncode != 0 or not os.path.isfile(rendered_path):
+        shutil.rmtree(directory, ignore_errors=True)
+        raise AnydocTerminalError(f"Unable to render PDF page {page_number} for OCR")
+    return rendered_path
+
+
+def _cleanup_rendered_page(image_path: str) -> None:
+    shutil.rmtree(os.path.dirname(image_path), ignore_errors=True)
+
+
 def _extract_text(result: dict[str, Any]) -> str:
     parts: list[str] = []
 
@@ -185,6 +279,7 @@ def _ocr_page_with_providers(
     deadline_monotonic: float,
     *,
     allow_softnix_ocr: bool = True,
+    forced_provider: str | None = None,
 ) -> dict[str, Any]:
     """Run the configured OCR chain for one rendered PDF page or image.
 
@@ -193,7 +288,7 @@ def _ocr_page_with_providers(
     return text for the page. Schema samples deliberately skip Softnix OCR so
     schema design remains independent from the legacy external OCR endpoint.
     """
-    try:
+    def run_tesseract() -> dict[str, Any]:
         text = process_tesseract_ocr(
             image_path,
             language=settings.TESSERACT_OCR_LANGUAGE,
@@ -202,70 +297,83 @@ def _ocr_page_with_providers(
                 settings.TESSERACT_OCR_TIMEOUT_SECONDS,
             ),
         )
-        if text:
-            return {
-                "page_number": page_number,
-                "ocr_text": text,
-                "provider": "tesseract_ocr",
-            }
-    except TesseractOcrError as error:
-        logger.info("TesseractOCR did not produce text for page %s: %s", page_number, error)
+        if not text:
+            raise TesseractOcrError("TesseractOCR returned no text")
+        return {"page_number": page_number, "ocr_text": text, "provider": "tesseract_ocr"}
+
+    def run_softnix() -> dict[str, Any]:
+        if not allow_softnix_ocr:
+            raise AnydocTerminalError("Softnix OCR is not available for this operation")
+        softnix_result = process_ocr(
+            image_path,
+            db,
+            page_number=1,
+            filename=f"page-{page_number}.png",
+            mime_type="image/png",
+            timeout=_remaining_timeout(
+                deadline_monotonic,
+                settings.ANYDOC_PRIMARY_OCR_TIMEOUT_SECONDS,
+            ),
+        )
+        text = _extract_text(softnix_result)
+        if not text:
+            raise RuntimeError("Softnix OCR returned no readable text")
+        return {"page_number": page_number, "ocr_text": text, "provider": "softnix_ocr"}
+
+    def run_fallback() -> dict[str, Any]:
+        fallback_key, fallback_source = resolve_fallback_api_key(setting)
+        failure = fallback_configuration_error(setting, bool(setting.ocr_fallback_enabled))
+        if failure:
+            raise AnydocTerminalError(failure)
+        fallback_result = process_fallback_ocr(
+            image_path,
+            api_key=fallback_key,
+            filename=f"page-{page_number}.png",
+            mime_type="image/png",
+            verify_ssl=get_verify_ssl(setting, "OCR fallback requests"),
+            request_timeout=settings.ANYDOC_FALLBACK_REQUEST_TIMEOUT_SECONDS,
+            deadline_monotonic=deadline_monotonic,
+        )
+        text = _extract_text(fallback_result)
+        if not text:
+            raise RuntimeError("OCR fallback returned no readable text")
+        return {
+            "page_number": page_number,
+            "ocr_text": text,
+            "provider": "ocr_fallback",
+            "key_source": fallback_source,
+        }
+
+    runners = {
+        "tesseract_ocr": run_tesseract,
+        "softnix_ocr": run_softnix,
+        "ocr_fallback": run_fallback,
+    }
+    if forced_provider:
+        try:
+            return runners[forced_provider]()
+        except Exception as error:
+            logger.warning("Forced %s failed for page %s: %s", forced_provider, page_number, error)
+            raise AnydocTerminalError(
+                f"{forced_provider} returned no readable text for page {page_number}"
+            ) from error
+
+    try:
+        return run_tesseract()
     except Exception as error:
-        # A local runtime fault must not prevent the remaining OCR providers
-        # from attempting this page.
-        logger.warning("TesseractOCR failed for page %s: %s", page_number, error)
+        logger.info("TesseractOCR did not produce text for page %s: %s", page_number, error)
 
     if allow_softnix_ocr:
         try:
-            softnix_result = process_ocr(
-                image_path,
-                db,
-                page_number=1,
-                filename=f"page-{page_number}.png",
-                mime_type="image/png",
-                timeout=_remaining_timeout(
-                    deadline_monotonic,
-                    settings.ANYDOC_PRIMARY_OCR_TIMEOUT_SECONDS,
-                ),
-            )
-            text = _extract_text(softnix_result)
-            if text:
-                return {
-                    "page_number": page_number,
-                    "ocr_text": text,
-                    "provider": "softnix_ocr",
-                }
+            return run_softnix()
         except Exception as error:
             logger.warning("Softnix OCR failed for page %s: %s", page_number, error)
 
-    fallback_key, fallback_source = resolve_fallback_api_key(setting)
-    fallback_failure: str | None = fallback_configuration_error(
-        setting,
-        bool(setting.ocr_fallback_enabled),
-    )
-    if fallback_failure is None:
-        try:
-            fallback_result = process_fallback_ocr(
-                image_path,
-                api_key=fallback_key,
-                filename=f"page-{page_number}.png",
-                mime_type="image/png",
-                verify_ssl=get_verify_ssl(setting, "OCR fallback requests"),
-                request_timeout=settings.ANYDOC_FALLBACK_REQUEST_TIMEOUT_SECONDS,
-                deadline_monotonic=deadline_monotonic,
-            )
-            text = _extract_text(fallback_result)
-            if text:
-                return {
-                    "page_number": page_number,
-                    "ocr_text": text,
-                    "provider": "ocr_fallback",
-                    "key_source": fallback_source,
-                }
-            fallback_failure = "OCR fallback returned no readable text"
-        except Exception as error:
-            fallback_failure = "OCR fallback request failed"
-            logger.warning("OCR fallback failed for page %s: %s", page_number, error)
+    try:
+        return run_fallback()
+    except Exception as error:
+        logger.warning("OCR fallback failed for page %s: %s", page_number, error)
+        fallback_failure = str(error)
 
     attempted_providers = "TesseractOCR, Softnix OCR, and OCR fallback" if allow_softnix_ocr else "TesseractOCR and OCR fallback"
     raise AnydocTerminalError(
@@ -296,6 +404,7 @@ def _extract_anydoc_pdf_document(
     *,
     allow_softnix_ocr: bool = True,
     pipeline_name: str = "anydoc_hybrid",
+    requested_ocr_engine: str | None = None,
 ) -> AnydocExtractionResult:
     """Normalize a PDF and retain an optional Schema as extraction context."""
     anydoc = _load_anydoc()
@@ -309,6 +418,16 @@ def _extract_anydoc_pdf_document(
         ) from exc
 
     text_pages = _pdf_text_pages(file_path)
+    text_layer_quality = {
+        int(page["page_number"]): _text_layer_quality(page.get("ocr_text", ""))
+        for page in text_pages
+    }
+    invalid_text_layer_pages = [
+        page_number
+        for page_number, quality in text_layer_quality.items()
+        if quality["reasons"]
+    ]
+    forced_provider = normalize_ocr_engine(requested_ocr_engine)
     # Let pypdf classify encrypted PDFs as terminal failures before AnyDoc's
     # format detector runs. Parser format errors remain safe legacy fallbacks.
     detected_format = _detect_pdf_format(anydoc, file_bytes)
@@ -337,6 +456,7 @@ def _extract_anydoc_pdf_document(
                 setting,
                 deadline_monotonic,
                 allow_softnix_ocr=allow_softnix_ocr,
+                forced_provider=forced_provider,
             )
             ocr_pages[page_number] = page
             return page["ocr_text"]
@@ -348,7 +468,40 @@ def _extract_anydoc_pdf_document(
                     logger.warning("Unable to remove temporary AnyDoc page image")
 
     try:
-        markdown = anydoc.to_markdown_with_ocr(file_bytes, "pdf", recognize).strip()
+        if forced_provider or invalid_text_layer_pages:
+            # AnyDoc's OCR callback only runs for pages it considers empty. A
+            # corrupt but non-empty text layer therefore needs an explicit
+            # page-level route so the bad font mapping cannot reach the user.
+            pages: list[dict[str, Any]] = []
+            for text_page in text_pages:
+                page_number = int(text_page["page_number"])
+                if forced_provider or page_number in invalid_text_layer_pages:
+                    image_path = _render_pdf_page(file_path, page_number)
+                    try:
+                        pages.append(_ocr_page_with_providers(
+                            image_path,
+                            page_number,
+                            db,
+                            setting,
+                            deadline_monotonic,
+                            allow_softnix_ocr=allow_softnix_ocr,
+                            forced_provider=forced_provider,
+                        ))
+                    finally:
+                        _cleanup_rendered_page(image_path)
+                    continue
+
+                page_bytes = _single_pdf_page_bytes(file_path, page_number)
+                page_markdown = anydoc.to_markdown_bytes(page_bytes, "pdf").strip()
+                pages.append({
+                    "page_number": page_number,
+                    "ocr_text": page_markdown or text_page.get("ocr_text", ""),
+                    "provider": "text_layer",
+                })
+            markdown = "\n\n".join(page["ocr_text"] for page in pages if page.get("ocr_text")).strip()
+        else:
+            markdown = anydoc.to_markdown_with_ocr(file_bytes, "pdf", recognize).strip()
+            pages = _merge_page_texts(text_pages, ocr_pages)
     except AnydocTerminalError:
         raise
     except Exception as exc:
@@ -359,7 +512,6 @@ def _extract_anydoc_pdf_document(
     if not markdown:
         raise AnydocTerminalError("AnyDoc and OCR providers returned no text")
 
-    pages = _merge_page_texts(text_pages, ocr_pages)
     metadata = {
         "pipeline": pipeline_name,
         "parser": "anydoc",
@@ -369,7 +521,15 @@ def _extract_anydoc_pdf_document(
         "text_layer_pages": [
             page["page_number"] for page in pages if page.get("provider") == "text_layer"
         ],
-        "ocr_pages": sorted(ocr_pages),
+        "text_layer_invalid_pages": invalid_text_layer_pages,
+        "text_layer_quality": text_layer_quality,
+        "ocr_pages": sorted(
+            set(ocr_pages) | {
+                int(page["page_number"])
+                for page in pages
+                if page.get("provider") in {"tesseract_ocr", "softnix_ocr", "ocr_fallback"}
+            }
+        ),
         "tesseract_pages": _provider_pages(pages, "tesseract_ocr"),
         "softnix_ocr_pages": _provider_pages(pages, "softnix_ocr"),
         "fallback_pages": _provider_pages(pages, "ocr_fallback"),
@@ -378,6 +538,7 @@ def _extract_anydoc_pdf_document(
             for page in pages
         ],
         "provider_counts": _provider_counts(pages),
+        "requested_ocr_engine": forced_provider,
         # Mapping is applied by the task only after canonical Markdown has been
         # produced, so all OCR routes share one Schema validation path.
         "mapping": "pending" if schema else "not_requested",
@@ -457,6 +618,7 @@ def _extract_anydoc_image_document(
     *,
     allow_softnix_ocr: bool = True,
     pipeline_name: str = "anydoc_hybrid",
+    requested_ocr_engine: str | None = None,
 ) -> AnydocExtractionResult:
     """Run the AnyDoc hybrid policy for an image through configured OCR providers."""
     setting = db.query(Setting).first()
@@ -465,6 +627,7 @@ def _extract_anydoc_image_document(
 
     normalized_path = ""
     deadline_monotonic = time.monotonic() + max(60, settings.ANYDOC_DOCUMENT_TIMEOUT_SECONDS)
+    forced_provider = normalize_ocr_engine(requested_ocr_engine)
     try:
         normalized_path, normalized_mime_type, image_metadata = _prepare_image_for_ocr(file_path)
         page = _ocr_page_with_providers(
@@ -474,6 +637,7 @@ def _extract_anydoc_image_document(
             setting,
             deadline_monotonic,
             allow_softnix_ocr=allow_softnix_ocr,
+            forced_provider=forced_provider,
         )
         text = page["ocr_text"]
 
@@ -494,6 +658,7 @@ def _extract_anydoc_image_document(
             "fallback_pages": [1] if page.get("provider") == "ocr_fallback" else [],
             "page_sources": [{"page": 1, "provider": page["provider"]}],
             "provider_counts": _provider_counts(pages),
+            "requested_ocr_engine": forced_provider,
             "mapping": "pending" if schema else "not_requested",
             "schema_context": schema.name if schema else None,
             "processed_at": datetime.now(timezone.utc).isoformat(),
@@ -511,6 +676,7 @@ def extract_anydoc_document(
     file_path: str,
     db: Session,
     schema: DocumentSchema | None,
+    requested_ocr_engine: str | None = None,
 ) -> AnydocExtractionResult:
     """Extract a PDF through AnyDoc or a supported image through OCR normalization."""
     try:
@@ -519,8 +685,18 @@ def extract_anydoc_document(
     except OSError as exc:
         raise AnydocFallbackToLegacy(f"AnyDoc could not read the document: {exc}") from exc
     if is_pdf:
-        return _extract_anydoc_pdf_document(file_path, db, schema)
-    return _extract_anydoc_image_document(file_path, db, schema)
+        return _extract_anydoc_pdf_document(
+            file_path,
+            db,
+            schema,
+            requested_ocr_engine=requested_ocr_engine,
+        )
+    return _extract_anydoc_image_document(
+        file_path,
+        db,
+        schema,
+        requested_ocr_engine=requested_ocr_engine,
+    )
 
 
 def extract_schema_sample(file_path: str, db: Session) -> AnydocExtractionResult:

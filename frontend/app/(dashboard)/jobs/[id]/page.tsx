@@ -3,7 +3,7 @@
 import { useEffect, useState, useRef, useMemo } from "react"
 import { useParams, useRouter } from "next/navigation"
 import Link from "next/link"
-import { ArrowLeft, Upload, FileText, Loader2, Eye, X, Trash2, AlertTriangle, Bot, ChevronDown, Pencil, Check, Plug, Workflow, Cloud, Send, Braces } from "lucide-react"
+import { ArrowLeft, Upload, FileText, Loader2, Eye, X, Trash2, AlertTriangle, Bot, ChevronDown, Pencil, Check, Plug, Workflow, Cloud, Send, Braces, RefreshCw } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Modal } from "@/components/ui/modal"
 import { Input } from "@/components/ui/input"
@@ -57,6 +57,8 @@ interface Document {
         pipeline?: string
         source?: "image"
         text_layer_pages?: number[]
+        text_layer_invalid_pages?: number[]
+        requested_ocr_engine?: "tesseract_ocr" | "softnix_ocr" | "ocr_fallback" | null
         tesseract_pages?: number[]
         softnix_ocr_pages?: number[]
         fallback_pages?: number[]
@@ -68,6 +70,13 @@ interface Document {
         }
     }
 }
+type OcrEngine = "tesseract_ocr" | "softnix_ocr" | "ocr_fallback"
+
+const ocrEngineOptions: Array<{ value: OcrEngine; label: string }> = [
+    { value: "tesseract_ocr", label: "TesseractOCR" },
+    { value: "softnix_ocr", label: "Softnix OCR" },
+    { value: "ocr_fallback", label: "OCR fallback" },
+]
 type IntegrationType = "api" | "workflow" | "llm" | "softnix_genai" | "gdrive" | "onedrive"
 
 interface IntegrationConfig {
@@ -126,6 +135,8 @@ export default function JobDetailPage() {
     const [structuredDataTab, setStructuredDataTab] = useState<"fields" | "advanced">("fields")
     const [structuredJsonDraft, setStructuredJsonDraft] = useState("{}")
     const [structuredJsonError, setStructuredJsonError] = useState<string | null>(null)
+    const [retryEngine, setRetryEngine] = useState<OcrEngine>("tesseract_ocr")
+    const [retryingDocId, setRetryingDocId] = useState<string | null>(null)
     const fileInputRef = useRef<HTMLInputElement>(null)
     const pollingIntervalsRef = useRef<Map<string, AbortController>>(new Map())
     const [showIntegrationModal, setShowIntegrationModal] = useState(false)
@@ -492,6 +503,41 @@ export default function JobDetailPage() {
         }
     }
 
+    const handleRetryOcr = async () => {
+        if (!reviewDoc || retryingDocId) return
+
+        try {
+            setRetryingDocId(reviewDoc.id)
+            const token = typeof window !== "undefined" ? localStorage.getItem("token") : null
+            const res = await fetch(`${apiBase}/documents/${reviewDoc.id}/process`, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+                },
+                body: JSON.stringify({
+                    schema_id: reviewDoc.schema_id || null,
+                    extraction_profile: "anydoc_hybrid",
+                    ocr_engine: retryEngine,
+                }),
+            })
+            if (!res.ok) {
+                const payload = await res.json().catch(() => null)
+                throw new Error(payload?.detail || "Failed to retry OCR")
+            }
+
+            const docId = reviewDoc.id
+            setReviewDoc(null)
+            await fetchDocuments()
+            startPolling(docId)
+        } catch (error) {
+            console.error("OCR retry error", error)
+            alert(error instanceof Error ? error.message : "OCR retry failed")
+        } finally {
+            setRetryingDocId(null)
+        }
+    }
+
     const handleProcessAll = async () => {
         const docsToProcess = documents.filter(d => d.status === "uploaded")
 
@@ -699,6 +745,7 @@ export default function JobDetailPage() {
         setStructuredDataTab("fields")
         setStructuredJsonDraft(JSON.stringify(structuredData && typeof structuredData === "object" ? structuredData : {}, null, 2))
         setStructuredJsonError(null)
+        setRetryEngine("tesseract_ocr")
     }
 
     const handleSaveReview = async () => {
@@ -1303,6 +1350,7 @@ export default function JobDetailPage() {
                                                 <div className="mb-3 flex flex-wrap items-center gap-2 text-xs">
                                                     {pipeline === "anydoc_hybrid" && doc.extraction_metadata?.source === "image" && <span className="rounded-full bg-slate-100 px-2 py-1 font-medium text-slate-700">Image</span>}
                                                     {pipeline === "anydoc_hybrid" && (doc.extraction_metadata?.text_layer_pages?.length ?? 0) > 0 && <span className="rounded-full bg-sky-50 px-2 py-1 font-medium text-sky-700">AnyDoc Text Layer</span>}
+                                                    {(doc.extraction_metadata?.text_layer_invalid_pages?.length ?? 0) > 0 && <span className="rounded-full bg-amber-50 px-2 py-1 font-medium text-amber-700">Text Layer repaired</span>}
                                                     {(doc.extraction_metadata?.tesseract_pages?.length ?? 0) > 0 && <span className="rounded-full bg-violet-50 px-2 py-1 font-medium text-violet-700">TesseractOCR</span>}
                                                     {(doc.extraction_metadata?.softnix_ocr_pages?.length ?? 0) > 0 && <span className="rounded-full bg-blue-50 px-2 py-1 font-medium text-blue-700">Softnix OCR</span>}
                                                     {(pipeline === "ocr_fallback" || doc.extraction_metadata?.fallback_pages?.length) ? <span className="rounded-full bg-amber-50 px-2 py-1 font-medium text-amber-700">OCR fallback</span> : null}
@@ -1471,6 +1519,46 @@ export default function JobDetailPage() {
                                         </div>
                                     </div>
                                 )}
+
+                                {/* Manual OCR retry */}
+                                <div className="flex shrink-0 flex-wrap items-end justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50 p-3">
+                                    <div className="min-w-0">
+                                        <p className="text-sm font-semibold text-slate-700">Re-run OCR</p>
+                                        <p className="mt-0.5 text-xs text-slate-500">
+                                            เลือก engine เพื่ออ่านเอกสารใหม่แทนผลเดิม
+                                            {(reviewDoc.extraction_metadata?.text_layer_invalid_pages?.length ?? 0) > 0 && " พบ Text Layer encoding ผิด"}
+                                        </p>
+                                    </div>
+                                    <div className="flex items-end gap-2">
+                                        <label className="text-xs font-medium text-slate-600">
+                                            OCR engine
+                                            <select
+                                                value={retryEngine}
+                                                onChange={(event) => setRetryEngine(event.target.value as OcrEngine)}
+                                                disabled={retryingDocId === reviewDoc.id}
+                                                className="mt-1 flex h-9 min-w-40 rounded-md border border-slate-200 bg-white px-2.5 text-sm font-normal text-slate-800"
+                                            >
+                                                {ocrEngineOptions.map((option) => (
+                                                    <option key={option.value} value={option.value}>{option.label}</option>
+                                                ))}
+                                            </select>
+                                        </label>
+                                        <Button
+                                            type="button"
+                                            variant="outline"
+                                            onClick={handleRetryOcr}
+                                            disabled={retryingDocId === reviewDoc.id}
+                                            className="h-9"
+                                        >
+                                            {retryingDocId === reviewDoc.id ? (
+                                                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                                            ) : (
+                                                <RefreshCw className="mr-2 h-4 w-4" />
+                                            )}
+                                            {retryingDocId === reviewDoc.id ? "Retrying..." : "Retry OCR"}
+                                        </Button>
+                                    </div>
+                                </div>
 
                                 {/* OCR Text Section */}
                                 <div className="flex min-h-0 flex-1 flex-col rounded-lg border bg-white p-4">

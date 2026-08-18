@@ -236,6 +236,71 @@ def test_anydoc_hybrid_uses_tesseract_before_softnix_ocr(monkeypatch, tmp_path):
     assert result.metadata["softnix_ocr_pages"] == []
 
 
+def test_anydoc_quality_gate_routes_nonempty_corrupt_text_layer_to_tesseract(monkeypatch, tmp_path):
+    class CorruptTextLayerAnydoc(FakeAnydoc):
+        @staticmethod
+        def to_markdown_bytes(_data, _format):
+            return "unused valid page markdown"
+
+        @staticmethod
+        def to_markdown_with_ocr(*_args, **_kwargs):
+            raise AssertionError("Corrupt text layer must use the explicit page OCR path")
+
+    monkeypatch.setattr(anydoc_pipeline, "_load_anydoc", lambda: CorruptTextLayerAnydoc())
+    monkeypatch.setattr(
+        anydoc_pipeline,
+        "_pdf_text_pages",
+        lambda _path: [
+            {"page_number": 1, "ocr_text": "เพี้ยน\x1f@0N"},
+            {"page_number": 2, "ocr_text": "เพี้ยน\x1e@1N"},
+        ],
+    )
+    monkeypatch.setattr(anydoc_pipeline, "_single_pdf_page_bytes", lambda *_args: b"page")
+    monkeypatch.setattr(anydoc_pipeline, "_render_pdf_page", lambda *_args: "/tmp/page.png")
+    monkeypatch.setattr(anydoc_pipeline, "_cleanup_rendered_page", lambda _path: None)
+    monkeypatch.setattr(anydoc_pipeline, "process_tesseract_ocr", lambda *_args, **_kwargs: "Readable Thai OCR")
+
+    result = extract_anydoc_document(_write_pdf_placeholder(tmp_path), FakeDb(_setting()), _schema())
+
+    assert result.markdown == "Readable Thai OCR\n\nReadable Thai OCR"
+    assert result.metadata["text_layer_invalid_pages"] == [1, 2]
+    assert result.metadata["tesseract_pages"] == [1, 2]
+    assert result.metadata["ocr_pages"] == [1, 2]
+
+
+def test_manual_ocr_engine_forces_selected_provider_for_every_pdf_page(monkeypatch, tmp_path):
+    class ManualEngineAnydoc(FakeAnydoc):
+        @staticmethod
+        def to_markdown_bytes(_data, _format):
+            return "unused text layer"
+
+    monkeypatch.setattr(anydoc_pipeline, "_load_anydoc", lambda: ManualEngineAnydoc())
+    monkeypatch.setattr(
+        anydoc_pipeline,
+        "_pdf_text_pages",
+        lambda _path: [{"page_number": 1, "ocr_text": "Good text layer"}],
+    )
+    monkeypatch.setattr(anydoc_pipeline, "_render_pdf_page", lambda *_args: "/tmp/page.png")
+    monkeypatch.setattr(anydoc_pipeline, "_cleanup_rendered_page", lambda _path: None)
+    monkeypatch.setattr(anydoc_pipeline, "process_tesseract_ocr", lambda *_args, **_kwargs: pytest.fail("Tesseract must not run"))
+    monkeypatch.setattr(
+        anydoc_pipeline,
+        "process_ocr",
+        lambda *_args, **_kwargs: {"results": {"pages": [{"ocr_text": "Softnix manual OCR"}]}},
+    )
+
+    result = extract_anydoc_document(
+        _write_pdf_placeholder(tmp_path),
+        FakeDb(_setting()),
+        _schema(),
+        requested_ocr_engine="softnix_ocr",
+    )
+
+    assert result.markdown == "Softnix manual OCR"
+    assert result.pages[0]["provider"] == "softnix_ocr"
+    assert result.metadata["requested_ocr_engine"] == "softnix_ocr"
+
+
 def test_anydoc_hybrid_continues_when_tesseract_has_an_unexpected_error(monkeypatch, tmp_path):
     monkeypatch.setattr(
         anydoc_pipeline,
