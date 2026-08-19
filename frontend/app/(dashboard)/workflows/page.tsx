@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { useRouter } from "next/navigation"
 import {
     Plus, Play, Trash2, Pencil, CalendarClock, Loader2, Workflow as WorkflowIcon,
-    CheckCircle2, XCircle, Clock, Sparkles, PencilRuler, Download, Upload,
+    CheckCircle2, XCircle, Clock, Sparkles, PencilRuler, Download, Upload, LayoutGrid, Table2,
 } from "lucide-react"
 import {
     Workflow, getWorkflows, createWorkflow, deleteWorkflow, runWorkflow, updateWorkflow,
@@ -16,11 +16,15 @@ const statusBadge = (wf: Workflow) => {
     return <span className="px-2 py-0.5 rounded-full text-xs bg-emerald-50 text-emerald-600">Active</span>
 }
 
+const WORKFLOWS_PAGE_SIZE = 10
+
 export default function WorkflowsPage() {
     const router = useRouter()
     const token = typeof window !== "undefined" ? localStorage.getItem("token") : null
 
     const [workflows, setWorkflows] = useState<Workflow[]>([])
+    const [visibleWorkflowCount, setVisibleWorkflowCount] = useState(WORKFLOWS_PAGE_SIZE)
+    const [viewMode, setViewMode] = useState<"cards" | "table">("cards")
     const [loading, setLoading] = useState(true)
     const [error, setError] = useState<string | null>(null)
     const [showCreate, setShowCreate] = useState(false)
@@ -39,15 +43,28 @@ export default function WorkflowsPage() {
             setLoading(true)
             const data = await getWorkflows(token)
             setWorkflows(data.workflows)
+            setVisibleWorkflowCount(WORKFLOWS_PAGE_SIZE)
             setError(null)
-        } catch (e: any) {
-            setError(e.message || "Failed to load workflows")
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : "Failed to load workflows")
         } finally {
             setLoading(false)
         }
     }, [token])
 
     useEffect(() => { load() }, [load])
+
+    useEffect(() => {
+        const savedViewMode = window.localStorage.getItem("workflows-view-mode")
+        if (savedViewMode === "cards" || savedViewMode === "table") {
+            setViewMode(savedViewMode)
+        }
+    }, [])
+
+    const changeViewMode = (mode: "cards" | "table") => {
+        setViewMode(mode)
+        window.localStorage.setItem("workflows-view-mode", mode)
+    }
 
     const handleCreate = async () => {
         if (createMode === "ai") {
@@ -72,8 +89,8 @@ export default function WorkflowsPage() {
                 },
             })
             router.push(`/workflows/${wf.id}`)
-        } catch (e: any) {
-            setError(e.message)
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : "Failed to create workflow")
             setCreating(false)
         }
     }
@@ -83,8 +100,8 @@ export default function WorkflowsPage() {
         try {
             const data = await exportWorkflow(token, wf.id)
             downloadWorkflowJson(data)
-        } catch (e: any) {
-            setNotice(`Export failed: ${e.message}`)
+        } catch (e: unknown) {
+            setNotice(`Export failed: ${e instanceof Error ? e.message : "Unknown error"}`)
         }
     }
 
@@ -107,8 +124,8 @@ export default function WorkflowsPage() {
             })
             const warnCount = res.warnings?.length || 0
             router.push(`/workflows/${res.workflow.id}${warnCount ? "?warnings=1" : ""}`)
-        } catch (e: any) {
-            setNotice(`Import failed: ${e.message}`)
+        } catch (e: unknown) {
+            setNotice(`Import failed: ${e instanceof Error ? e.message : "Unknown error"}`)
             setImporting(false)
         }
     }
@@ -119,8 +136,8 @@ export default function WorkflowsPage() {
             setRunningId(wf.id)
             const run = await runWorkflow(token, wf.id)
             router.push(`/workflows/${wf.id}?run=${run.id}`)
-        } catch (e: any) {
-            setNotice(`Run failed: ${e.message}`)
+        } catch (e: unknown) {
+            setNotice(`Run failed: ${e instanceof Error ? e.message : "Unknown error"}`)
             setRunningId(null)
         }
     }
@@ -131,8 +148,8 @@ export default function WorkflowsPage() {
         try {
             await deleteWorkflow(token, wf.id)
             setWorkflows((prev) => prev.filter((w) => w.id !== wf.id))
-        } catch (e: any) {
-            setNotice(`Delete failed: ${e.message}`)
+        } catch (e: unknown) {
+            setNotice(`Delete failed: ${e instanceof Error ? e.message : "Unknown error"}`)
         }
     }
 
@@ -141,15 +158,18 @@ export default function WorkflowsPage() {
         try {
             const updated = await updateWorkflow(token, wf.id, { is_active: !wf.is_active })
             setWorkflows((prev) => prev.map((w) => (w.id === wf.id ? updated : w)))
-        } catch (e: any) {
-            setNotice(`Update failed: ${e.message}`)
+        } catch (e: unknown) {
+            setNotice(`Update failed: ${e instanceof Error ? e.message : "Unknown error"}`)
         }
     }
 
+    const visibleWorkflows = workflows.slice(0, visibleWorkflowCount)
+    const hasMoreWorkflows = visibleWorkflowCount < workflows.length
+
     return (
-        <div className="max-w-6xl mx-auto">
-            <div className="flex items-center justify-between mb-6">
-                <div>
+        <div className="w-full min-w-0 max-w-6xl mx-auto overflow-hidden">
+            <div className="mb-6 flex min-w-0 flex-wrap items-center justify-between gap-3">
+                <div className="min-w-0 flex-1">
                     <h1 className="text-2xl font-bold text-[#0D1B2A] flex items-center gap-2">
                         <WorkflowIcon className="h-6 w-6 text-[#2786C2]" /> Workflow
                     </h1>
@@ -157,7 +177,31 @@ export default function WorkflowsPage() {
                         สร้าง automation process สำหรับเอกสารแบบ drag & drop — รันเองหรือตั้งเวลาอัตโนมัติ
                     </p>
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+                    <div className="flex items-center rounded-lg border border-[#CBD5E1] bg-white p-1" role="group" aria-label="Workflow view">
+                        <button
+                            type="button"
+                            aria-label="Card view"
+                            aria-pressed={viewMode === "cards"}
+                            title="Card view"
+                            onClick={() => changeViewMode("cards")}
+                            className={`inline-flex h-8 items-center gap-2 rounded px-2.5 text-sm transition-colors ${viewMode === "cards" ? "bg-[#EBF4FB] text-[#1F6FA3]" : "text-[#778DA9] hover:text-[#0D1B2A]"}`}
+                        >
+                            <LayoutGrid className="h-4 w-4" />
+                            <span className="hidden sm:inline">Cards</span>
+                        </button>
+                        <button
+                            type="button"
+                            aria-label="Table view"
+                            aria-pressed={viewMode === "table"}
+                            title="Table view"
+                            onClick={() => changeViewMode("table")}
+                            className={`inline-flex h-8 items-center gap-2 rounded px-2.5 text-sm transition-colors ${viewMode === "table" ? "bg-[#EBF4FB] text-[#1F6FA3]" : "text-[#778DA9] hover:text-[#0D1B2A]"}`}
+                        >
+                            <Table2 className="h-4 w-4" />
+                            <span className="hidden sm:inline">Table</span>
+                        </button>
+                    </div>
                     <input
                         ref={importInputRef}
                         type="file"
@@ -209,76 +253,120 @@ export default function WorkflowsPage() {
                     </button>
                 </div>
             ) : (
-                <div className="grid gap-3">
-                    {workflows.map((wf) => (
-                        <div
-                            key={wf.id}
-                            className="bg-white border border-[#E2E8F0] rounded-xl px-5 py-4 flex items-center gap-4 hover:shadow-sm transition-shadow"
-                        >
-                            <div className="flex-1 min-w-0 cursor-pointer" onClick={() => router.push(`/workflows/${wf.id}`)}>
-                                <div className="flex items-center gap-2">
-                                    <span className="font-semibold text-[#0D1B2A] truncate">{wf.name}</span>
-                                    {statusBadge(wf)}
-                                    {wf.schedule_enabled && wf.schedule_cron && (
-                                        <span className="flex items-center gap-1 px-2 py-0.5 rounded-full text-xs bg-[#EBF4FB] text-[#2786C2]">
-                                            <CalendarClock className="h-3 w-3" /> {wf.schedule_cron}
-                                        </span>
-                                    )}
-                                </div>
-                                {wf.description && <p className="text-sm text-[#778DA9] truncate mt-0.5">{wf.description}</p>}
-                                <p className="text-xs text-[#9AA8BC] mt-1 flex items-center gap-3">
-                                    <span>{(wf.definition?.nodes || []).length} nodes</span>
-                                    {wf.last_run_at && (
-                                        <span className="flex items-center gap-1">
-                                            <Clock className="h-3 w-3" /> last run {new Date(wf.last_run_at).toLocaleString()}
-                                        </span>
-                                    )}
-                                </p>
-                            </div>
-
-                            <div className="flex items-center gap-1 shrink-0">
-                                <button
-                                    onClick={() => handleRun(wf)}
-                                    disabled={runningId === wf.id || !wf.is_active}
-                                    title="Run now"
-                                    className="p-2 rounded-lg text-emerald-600 hover:bg-emerald-50 disabled:opacity-40"
-                                >
-                                    {runningId === wf.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
-                                </button>
-                                <button
-                                    onClick={() => router.push(`/workflows/${wf.id}`)}
-                                    title="Edit"
-                                    className="p-2 rounded-lg text-[#2786C2] hover:bg-[#EBF4FB]"
-                                >
-                                    <Pencil className="h-4 w-4" />
-                                </button>
-                                <button
-                                    onClick={() => handleExport(wf)}
-                                    title="Export JSON"
-                                    className="p-2 rounded-lg text-[#778DA9] hover:bg-gray-50"
-                                >
-                                    <Download className="h-4 w-4" />
-                                </button>
-                                <button
-                                    onClick={() => toggleActive(wf)}
-                                    title={wf.is_active ? "Deactivate" : "Activate"}
-                                    className="p-2 rounded-lg hover:bg-gray-50"
-                                >
-                                    {wf.is_active
-                                        ? <CheckCircle2 className="h-4 w-4 text-emerald-500" />
-                                        : <XCircle className="h-4 w-4 text-gray-400" />}
-                                </button>
-                                <button
-                                    onClick={() => handleDelete(wf)}
-                                    title="Delete"
-                                    className="p-2 rounded-lg text-red-500 hover:bg-red-50"
-                                >
-                                    <Trash2 className="h-4 w-4" />
-                                </button>
+                <>
+                    {viewMode === "table" ? (
+                        <div className="max-w-full overflow-hidden rounded-xl border border-[#E2E8F0] bg-white shadow-sm">
+                            <div className="max-w-full overflow-x-auto">
+                                <table className="w-full min-w-[960px] table-fixed text-sm">
+                                    <caption className="sr-only">Automation workflows</caption>
+                                    <colgroup>
+                                        <col className="w-[32%]" />
+                                        <col className="w-[10%]" />
+                                        <col className="w-[14%]" />
+                                        <col className="w-[8%]" />
+                                        <col className="w-[17%]" />
+                                        <col className="w-[19%]" />
+                                    </colgroup>
+                                    <thead className="border-b border-[#E2E8F0] bg-[#F8FAFC] text-left text-xs uppercase tracking-wide text-[#778DA9]">
+                                        <tr>
+                                            <th scope="col" className="px-5 py-3 font-semibold">Workflow</th>
+                                            <th scope="col" className="px-5 py-3 font-semibold">Status</th>
+                                            <th scope="col" className="px-5 py-3 font-semibold">Schedule</th>
+                                            <th scope="col" className="px-5 py-3 font-semibold">Nodes</th>
+                                            <th scope="col" className="px-5 py-3 font-semibold">Last run</th>
+                                            <th scope="col" className="px-5 py-3 text-right font-semibold">Actions</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-[#E2E8F0]">
+                                        {visibleWorkflows.map((wf) => (
+                                            <tr key={wf.id} className="transition-colors hover:bg-[#F8FAFC]">
+                                                <td className="min-w-0 overflow-hidden px-5 py-4">
+                                                    <button type="button" onClick={() => router.push(`/workflows/${wf.id}`)} className="block w-full min-w-0 overflow-hidden text-left">
+                                                        <span className="block truncate font-semibold text-[#0D1B2A]" title={wf.name}>{wf.name}</span>
+                                                        {wf.description && <span className="mt-0.5 block truncate text-sm text-[#778DA9]" title={wf.description}>{wf.description}</span>}
+                                                    </button>
+                                                </td>
+                                                <td className="whitespace-nowrap px-5 py-4">{statusBadge(wf)}</td>
+                                                <td className="min-w-0 overflow-hidden whitespace-nowrap px-5 py-4 text-[#778DA9]">
+                                                    {wf.schedule_enabled && wf.schedule_cron ? (
+                                                        <span className="inline-flex max-w-full items-center gap-1 truncate text-[#2786C2]" title={wf.schedule_cron}>
+                                                            <CalendarClock className="h-3.5 w-3.5" /> {wf.schedule_cron}
+                                                        </span>
+                                                    ) : "-"}
+                                                </td>
+                                                <td className="whitespace-nowrap px-5 py-4 text-[#778DA9]">{(wf.definition?.nodes || []).length}</td>
+                                                <td className="min-w-0 overflow-hidden whitespace-nowrap px-5 py-4 text-[#778DA9]">
+                                                    {wf.last_run_at ? (
+                                                        <span className="inline-flex max-w-full items-center gap-1 truncate" title={new Date(wf.last_run_at).toLocaleString()}>
+                                                            <Clock className="h-3.5 w-3.5" /> {new Date(wf.last_run_at).toLocaleString()}
+                                                        </span>
+                                                    ) : "-"}
+                                                </td>
+                                                <td className="px-4 py-4">
+                                                    <div className="flex justify-end gap-0.5">
+                                                        <button type="button" onClick={() => handleRun(wf)} disabled={runningId === wf.id || !wf.is_active} title="Run now" aria-label={`Run ${wf.name} now`} className="rounded-lg p-2 text-emerald-600 hover:bg-emerald-50 disabled:opacity-40">
+                                                            {runningId === wf.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+                                                        </button>
+                                                        <button type="button" onClick={() => router.push(`/workflows/${wf.id}`)} title="Edit" aria-label={`Edit ${wf.name}`} className="rounded-lg p-2 text-[#2786C2] hover:bg-[#EBF4FB]"><Pencil className="h-4 w-4" /></button>
+                                                        <button type="button" onClick={() => handleExport(wf)} title="Export JSON" aria-label={`Export ${wf.name}`} className="rounded-lg p-2 text-[#778DA9] hover:bg-gray-50"><Download className="h-4 w-4" /></button>
+                                                        <button type="button" onClick={() => toggleActive(wf)} title={wf.is_active ? "Deactivate" : "Activate"} aria-label={`${wf.is_active ? "Deactivate" : "Activate"} ${wf.name}`} className="rounded-lg p-2 hover:bg-gray-50">
+                                                            {wf.is_active ? <CheckCircle2 className="h-4 w-4 text-emerald-500" /> : <XCircle className="h-4 w-4 text-gray-400" />}
+                                                        </button>
+                                                        <button type="button" onClick={() => handleDelete(wf)} title="Delete" aria-label={`Delete ${wf.name}`} className="rounded-lg p-2 text-red-500 hover:bg-red-50"><Trash2 className="h-4 w-4" /></button>
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
                             </div>
                         </div>
-                    ))}
-                </div>
+                    ) : (
+                        <div className="grid min-w-0 gap-3">
+                            {visibleWorkflows.map((wf) => (
+                                <div key={wf.id} className="flex w-full min-w-0 max-w-full items-center gap-3 overflow-hidden rounded-xl border border-[#E2E8F0] bg-white px-4 py-4 transition-shadow hover:shadow-sm sm:gap-4 sm:px-5">
+                                    <div className="min-w-0 flex-1 cursor-pointer overflow-hidden" onClick={() => router.push(`/workflows/${wf.id}`)}>
+                                        <div className="flex min-w-0 items-center gap-2 overflow-hidden">
+                                            <span className="min-w-0 flex-1 truncate font-semibold text-[#0D1B2A]" title={wf.name}>{wf.name}</span>
+                                            {statusBadge(wf)}
+                                            {wf.schedule_enabled && wf.schedule_cron && (
+                                                <span className="hidden max-w-[180px] shrink-0 items-center gap-1 truncate rounded-full bg-[#EBF4FB] px-2 py-0.5 text-xs text-[#2786C2] sm:flex" title={wf.schedule_cron}>
+                                                    <CalendarClock className="h-3 w-3" /> {wf.schedule_cron}
+                                                </span>
+                                            )}
+                                        </div>
+                                        {wf.description && <p className="mt-0.5 truncate text-sm text-[#778DA9]" title={wf.description}>{wf.description}</p>}
+                                        <p className="mt-1 flex items-center gap-3 text-xs text-[#9AA8BC]">
+                                            <span>{(wf.definition?.nodes || []).length} nodes</span>
+                                            {wf.last_run_at && <span className="flex items-center gap-1"><Clock className="h-3 w-3" /> last run {new Date(wf.last_run_at).toLocaleString()}</span>}
+                                        </p>
+                                    </div>
+                                    <div className="flex shrink-0 items-center gap-0.5 sm:gap-1">
+                                        <button type="button" onClick={() => handleRun(wf)} disabled={runningId === wf.id || !wf.is_active} title="Run now" aria-label={`Run ${wf.name} now`} className="rounded-lg p-2 text-emerald-600 hover:bg-emerald-50 disabled:opacity-40">{runningId === wf.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}</button>
+                                        <button type="button" onClick={() => router.push(`/workflows/${wf.id}`)} title="Edit" aria-label={`Edit ${wf.name}`} className="rounded-lg p-2 text-[#2786C2] hover:bg-[#EBF4FB]"><Pencil className="h-4 w-4" /></button>
+                                        <button type="button" onClick={() => handleExport(wf)} title="Export JSON" aria-label={`Export ${wf.name}`} className="rounded-lg p-2 text-[#778DA9] hover:bg-gray-50"><Download className="h-4 w-4" /></button>
+                                        <button type="button" onClick={() => toggleActive(wf)} title={wf.is_active ? "Deactivate" : "Activate"} aria-label={`${wf.is_active ? "Deactivate" : "Activate"} ${wf.name}`} className="rounded-lg p-2 hover:bg-gray-50">{wf.is_active ? <CheckCircle2 className="h-4 w-4 text-emerald-500" /> : <XCircle className="h-4 w-4 text-gray-400" />}</button>
+                                        <button type="button" onClick={() => handleDelete(wf)} title="Delete" aria-label={`Delete ${wf.name}`} className="rounded-lg p-2 text-red-500 hover:bg-red-50"><Trash2 className="h-4 w-4" /></button>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                    <div className="mt-5 flex flex-col items-center gap-2">
+                        {hasMoreWorkflows && (
+                            <button
+                                type="button"
+                                onClick={() => setVisibleWorkflowCount((count) => Math.min(count + WORKFLOWS_PAGE_SIZE, workflows.length))}
+                                className="rounded-lg border border-[#CBD5E1] bg-white px-4 py-2 text-sm font-medium text-[#0D1B2A] hover:bg-gray-50"
+                            >
+                                Load more
+                            </button>
+                        )}
+                        <p className="text-sm text-[#778DA9]">
+                            Showing {visibleWorkflows.length} of {workflows.length} workflows
+                        </p>
+                    </div>
+                </>
             )}
 
             {/* Create modal */}

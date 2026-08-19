@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react"
 import Link from "next/link"
-import { Plus, FileText, Calendar, Trash2, Loader2 } from "lucide-react"
+import { Plus, FileText, Calendar, Trash2, Loader2, LayoutGrid, Table2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { getApiBaseUrl } from "@/lib/api"
 import { useAuth } from "@/components/auth-provider"
@@ -16,11 +16,16 @@ interface Job {
     user_id?: string
 }
 
+type SortOption = "newest" | "oldest" | "name_asc" | "name_desc"
+const JOBS_PAGE_SIZE = 10
+
 export default function JobsPage() {
     const { user } = useAuth()
     const [jobs, setJobs] = useState<Job[]>([])
     const [loading, setLoading] = useState(true)
-    const [sortOption, setSortOption] = useState<"newest" | "oldest" | "name_asc" | "name_desc">("newest")
+    const [sortOption, setSortOption] = useState<SortOption>("newest")
+    const [viewMode, setViewMode] = useState<"table" | "cards">("table")
+    const [visibleJobCount, setVisibleJobCount] = useState(JOBS_PAGE_SIZE)
     const [deleteConfirmJob, setDeleteConfirmJob] = useState<Job | null>(null)
     const [deletingJob, setDeletingJob] = useState(false)
 
@@ -44,6 +49,22 @@ export default function JobsPage() {
     useEffect(() => {
         fetchJobs()
     }, [])
+
+    useEffect(() => {
+        const savedViewMode = window.localStorage.getItem("jobs-view-mode")
+        if (savedViewMode === "cards" || savedViewMode === "table") {
+            setViewMode(savedViewMode)
+        }
+    }, [])
+
+    useEffect(() => {
+        setVisibleJobCount(JOBS_PAGE_SIZE)
+    }, [sortOption])
+
+    const changeViewMode = (mode: "table" | "cards") => {
+        setViewMode(mode)
+        window.localStorage.setItem("jobs-view-mode", mode)
+    }
 
     const handleDeleteJob = async () => {
         if (!deleteConfirmJob) return
@@ -84,6 +105,8 @@ export default function JobsPage() {
         }
         return b.name.localeCompare(a.name)
     })
+    const visibleJobs = sortedJobs.slice(0, visibleJobCount)
+    const hasMoreJobs = visibleJobCount < sortedJobs.length
 
     return (
         <div className="space-y-6">
@@ -93,6 +116,30 @@ export default function JobsPage() {
                     <p className="text-slate-500">Manage your document processing jobs.</p>
                 </div>
                 <div className="flex items-center gap-3">
+                    <div className="flex items-center rounded-md border border-slate-200 bg-white p-1" role="group" aria-label="Job view">
+                        <button
+                            type="button"
+                            aria-label="Table view"
+                            aria-pressed={viewMode === "table"}
+                            title="Table view"
+                            onClick={() => changeViewMode("table")}
+                            className={`inline-flex h-8 items-center gap-2 rounded px-2.5 text-sm transition-colors ${viewMode === "table" ? "bg-slate-100 text-slate-900" : "text-slate-500 hover:text-slate-900"}`}
+                        >
+                            <Table2 className="h-4 w-4" />
+                            <span className="hidden sm:inline">Table</span>
+                        </button>
+                        <button
+                            type="button"
+                            aria-label="Card view"
+                            aria-pressed={viewMode === "cards"}
+                            title="Card view"
+                            onClick={() => changeViewMode("cards")}
+                            className={`inline-flex h-8 items-center gap-2 rounded px-2.5 text-sm transition-colors ${viewMode === "cards" ? "bg-slate-100 text-slate-900" : "text-slate-500 hover:text-slate-900"}`}
+                        >
+                            <LayoutGrid className="h-4 w-4" />
+                            <span className="hidden sm:inline">Cards</span>
+                        </button>
+                    </div>
                     <label className="text-sm text-slate-500" htmlFor="sort">
                         Sort by
                     </label>
@@ -100,7 +147,7 @@ export default function JobsPage() {
                         id="sort"
                         className="flex h-9 rounded-md border border-slate-200 bg-white px-3 py-1 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-200"
                         value={sortOption}
-                        onChange={(e) => setSortOption(e.target.value as any)}
+                        onChange={(e) => setSortOption(e.target.value as SortOption)}
                     >
                         <option value="newest">Newest first</option>
                         <option value="oldest">Oldest first</option>
@@ -132,46 +179,124 @@ export default function JobsPage() {
                     </Link>
                 </div>
             ) : (
-                <div className="grid gap-4">
-                    {sortedJobs.map((job) => (
-                        <div key={job.id} className="flex items-center justify-between rounded-lg border bg-white p-6 shadow-sm hover:shadow-md transition-shadow">
-                            <Link href={`/jobs/${job.id}`} className="flex items-center gap-4 flex-1 cursor-pointer">
-                                <div className="h-10 w-10 rounded-full bg-blue-100 flex items-center justify-center text-blue-600">
-                                    <FileText className="h-5 w-5" />
-                                </div>
-                                <div>
-                                    <h3 className="font-semibold text-lg">{job.name}</h3>
-                                    <p className="text-sm text-slate-500">{job.description}</p>
-                                </div>
-                            </Link>
-                            <div className="flex items-center gap-4">
-                                <span className={`px-2.5 py-0.5 rounded-full text-xs font-medium ${job.status === 'completed' ? 'bg-green-100 text-green-800' :
-                                    job.status === 'processing' ? 'bg-blue-100 text-blue-800' :
-                                        'bg-slate-100 text-slate-800'
-                                    }`}>
-                                    {job.status.toUpperCase()}
-                                </span>
-                                <div className="flex items-center text-sm text-slate-500">
-                                    <Calendar className="mr-2 h-4 w-4" />
-                                    {new Date(job.created_at).toLocaleDateString()}
-                                </div>
-                                {canDeleteJob(job) && (
-                                    <Button
-                                        variant="outline"
-                                        size="icon"
-                                        className="text-red-600 hover:text-red-700 hover:bg-red-50 border-red-200 h-8 w-8"
-                                        onClick={(e) => {
-                                            e.preventDefault()
-                                            e.stopPropagation()
-                                            setDeleteConfirmJob(job)
-                                        }}
-                                    >
-                                        <Trash2 className="h-4 w-4" />
-                                    </Button>
-                                )}
-                            </div>
+                viewMode === "table" ? (
+                    <div className="overflow-hidden rounded-lg border bg-white shadow-sm">
+                        <div className="overflow-x-auto">
+                            <table className="w-full min-w-[680px] text-sm">
+                                <caption className="sr-only">Document processing jobs</caption>
+                                <thead className="border-b bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
+                                    <tr>
+                                        <th scope="col" className="px-5 py-3 font-semibold">Job</th>
+                                        <th scope="col" className="px-5 py-3 font-semibold">Status</th>
+                                        <th scope="col" className="px-5 py-3 font-semibold">Created</th>
+                                        <th scope="col" className="px-5 py-3 text-right font-semibold">Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="divide-y divide-slate-100">
+                                    {visibleJobs.map((job) => (
+                                        <tr key={job.id} className="transition-colors hover:bg-slate-50">
+                                            <td className="max-w-[520px] px-5 py-4">
+                                                <Link href={`/jobs/${job.id}`} className="flex min-w-0 items-center gap-3">
+                                                    <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-blue-100 text-blue-600">
+                                                        <FileText className="h-4 w-4" />
+                                                    </span>
+                                                    <span className="min-w-0">
+                                                        <span className="block truncate font-semibold text-slate-900">{job.name}</span>
+                                                        {job.description && <span className="mt-0.5 block truncate text-sm text-slate-500">{job.description}</span>}
+                                                    </span>
+                                                </Link>
+                                            </td>
+                                            <td className="whitespace-nowrap px-5 py-4">
+                                                <span className={`inline-flex rounded-full px-2.5 py-0.5 text-xs font-medium ${job.status === "completed" ? "bg-green-100 text-green-800" :
+                                                    job.status === "processing" ? "bg-blue-100 text-blue-800" :
+                                                        "bg-slate-100 text-slate-800"
+                                                    }`}>
+                                                    {job.status.toUpperCase()}
+                                                </span>
+                                            </td>
+                                            <td className="whitespace-nowrap px-5 py-4 text-slate-500">
+                                                <span className="inline-flex items-center">
+                                                    <Calendar className="mr-2 h-4 w-4" />
+                                                    {new Date(job.created_at).toLocaleDateString()}
+                                                </span>
+                                            </td>
+                                            <td className="px-5 py-4 text-right">
+                                                {canDeleteJob(job) && (
+                                                    <Button
+                                                        variant="outline"
+                                                        size="icon"
+                                                        aria-label={`Delete ${job.name}`}
+                                                        title="Delete job"
+                                                        className="h-8 w-8 border-red-200 text-red-600 hover:bg-red-50 hover:text-red-700"
+                                                        onClick={() => setDeleteConfirmJob(job)}
+                                                    >
+                                                        <Trash2 className="h-4 w-4" />
+                                                    </Button>
+                                                )}
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
                         </div>
-                    ))}
+                    </div>
+                ) : (
+                    <div className="grid gap-4">
+                        {visibleJobs.map((job) => (
+                            <div key={job.id} className="flex items-center justify-between rounded-lg border bg-white p-6 shadow-sm transition-shadow hover:shadow-md">
+                                <Link href={`/jobs/${job.id}`} className="flex flex-1 cursor-pointer items-center gap-4">
+                                    <div className="flex h-10 w-10 items-center justify-center rounded-full bg-blue-100 text-blue-600">
+                                        <FileText className="h-5 w-5" />
+                                    </div>
+                                    <div>
+                                        <h3 className="text-lg font-semibold">{job.name}</h3>
+                                        <p className="text-sm text-slate-500">{job.description}</p>
+                                    </div>
+                                </Link>
+                                <div className="flex items-center gap-4">
+                                    <span className={`rounded-full px-2.5 py-0.5 text-xs font-medium ${job.status === "completed" ? "bg-green-100 text-green-800" :
+                                        job.status === "processing" ? "bg-blue-100 text-blue-800" :
+                                            "bg-slate-100 text-slate-800"
+                                        }`}>
+                                        {job.status.toUpperCase()}
+                                    </span>
+                                    <div className="flex items-center text-sm text-slate-500">
+                                        <Calendar className="mr-2 h-4 w-4" />
+                                        {new Date(job.created_at).toLocaleDateString()}
+                                    </div>
+                                    {canDeleteJob(job) && (
+                                        <Button
+                                            variant="outline"
+                                            size="icon"
+                                            aria-label={`Delete ${job.name}`}
+                                            title="Delete job"
+                                            className="h-8 w-8 border-red-200 text-red-600 hover:bg-red-50 hover:text-red-700"
+                                            onClick={() => setDeleteConfirmJob(job)}
+                                        >
+                                            <Trash2 className="h-4 w-4" />
+                                        </Button>
+                                    )}
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                )
+            )}
+
+            {!loading && sortedJobs.length > 0 && (
+                <div className="flex flex-col items-center gap-2 pt-1">
+                    {hasMoreJobs && (
+                        <Button
+                            type="button"
+                            variant="outline"
+                            onClick={() => setVisibleJobCount((count) => Math.min(count + JOBS_PAGE_SIZE, sortedJobs.length))}
+                        >
+                            Load more
+                        </Button>
+                    )}
+                    <p className="text-sm text-slate-500">
+                        Showing {visibleJobs.length} of {sortedJobs.length} jobs
+                    </p>
                 </div>
             )}
 
