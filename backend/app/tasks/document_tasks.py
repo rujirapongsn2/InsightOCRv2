@@ -35,7 +35,8 @@ import requests
 import re
 import redis as redis_lib
 import threading
-from typing import Any, List
+from typing import Any, List, Optional, Dict
+from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 
@@ -983,6 +984,59 @@ def extract_structured_data(result_payload: dict[str, Any]) -> Any:
     return None
 
 
+def _finalize_document_success(
+    document: Document,
+    db: Session,
+    schema_id: Optional[str],
+    schema_source: str,
+    pipeline: str,
+    job_logger: Any,
+    auto_review: bool = False,
+) -> Dict[str, Any]:
+    if auto_review:
+        document.status = "reviewed"
+        document.review_decision = "confirmed"
+        document.reviewed_at = datetime.utcnow()
+        document.reviewed_data = dict(document.extracted_data or {}) if isinstance(document.extracted_data, dict) else document.extracted_data
+    else:
+        document.status = "extraction_completed"
+
+    document.processed_at = datetime.utcnow()
+    db.add(document)
+    db.commit()
+
+    if document.job and document.job.user_id:
+        review_status = "reviewed" if (document.status == "reviewed" or document.reviewed_data is not None) else "pending"
+        log_activity(
+            db=db,
+            user_id=document.job.user_id,
+            action=Actions.PROCESS_DOCUMENT,
+            resource_type="document",
+            resource_id=document.id,
+            details={
+                "job_name": document.job.name or f"Job-{str(document.job.id)[:8]}",
+                "filename": document.filename,
+                "extraction_status": "completed",
+                "review_status": review_status,
+                "integration_status": None,
+                "schema_id": str(schema_id) if schema_id else None,
+                "schema_source": schema_source,
+                "pipeline": pipeline,
+                "document_status": document.status,
+            },
+        )
+
+    job_logger.info(
+        f"Processing completed for {document.filename} with status {document.status} (auto_review={auto_review})"
+    )
+    return {
+        "status": document.status,
+        "document_id": str(document.id),
+        "extracted_data": document.extracted_data,
+        "pipeline": pipeline,
+    }
+
+
 def should_attempt_ocr_fallback(
     *,
     fallback_eligible: bool,
@@ -1008,6 +1062,7 @@ def process_document_task(
     schema_id: str | None = None,
     requested_extraction_profile: str | None = None,
     requested_ocr_engine: str | None = None,
+    auto_review: bool = False,
 ):
     """
     Background task to process a document through external AI processing API.
@@ -1127,40 +1182,22 @@ def process_document_task(
                         file_path=local_file_path,
                     )
                     document.extraction_metadata = extraction_metadata
-                    document.status = "extraction_completed"
+                    mapping_error_str = str(mapping_error) if mapping_error else None
                     document.processing_error = (
-                        f"Structured mapping failed: {mapping_error}"
-                        if mapping_error
+                        f"Structured mapping failed: {mapping_error_str}"
+                        if mapping_error_str
                         else None
                     )
-                    document.processed_at = datetime.utcnow()
-                    db.add(document)
-                    db.commit()
-
-                    if document.job and document.job.user_id:
-                        log_activity(
-                            db=db,
-                            user_id=document.job.user_id,
-                            action=Actions.PROCESS_DOCUMENT,
-                            resource_type="document",
-                            resource_id=document.id,
-                            details={
-                                "job_name": document.job.name or f"Job-{str(document.job.id)[:8]}",
-                                "filename": document.filename,
-                                "extraction_status": "completed",
-                                "review_status": "pending",
-                                "schema_id": str(schema_id),
-                                "schema_source": schema_source,
-                                "pipeline": "anydoc_hybrid",
-                            },
-                        )
-                    job_logger.info("AnyDoc hybrid extraction completed for %s", document.filename)
-                    return {
-                        "status": document.status,
-                        "document_id": document_id,
-                        "extracted_data": document.extracted_data,
-                        "pipeline": "anydoc_hybrid",
-                    }
+                    fallback_eligible = False
+                    return _finalize_document_success(
+                        document=document,
+                        db=db,
+                        schema_id=str(schema_id) if schema_id else None,
+                        schema_source=schema_source,
+                        pipeline="anydoc_hybrid",
+                        job_logger=job_logger,
+                        auto_review=auto_review,
+                    )
                 except AnydocFallbackToLegacy as anydoc_error:
                     if requested_ocr_engine:
                         document.status = "failed"
@@ -1433,54 +1470,21 @@ def process_document_task(
                 file_path=local_file_path,
             )
             document.extraction_metadata = legacy_metadata
-            document.status = "extraction_completed"
             processing_errors = ai_processing_errors[:]
             if mapping_error:
                 processing_errors.append(f"Structured mapping failed: {mapping_error}")
             document.processing_error = " | ".join(processing_errors) if processing_errors else None
-            document.processed_at = datetime.utcnow()
-
-            db.add(document)
-            db.commit()
             fallback_eligible = False
 
-            job_logger.info(
-                f"External OCR processing completed for {document.filename}; "
-                f"schema_source={schema_source}; mapping={legacy_metadata['mapping']}"
-            )
-
-        # Log activity
-        if document.job and document.job.user_id:
-            # Determine extraction status
-            extraction_status = "completed" if document.status in ["extraction_completed", "reviewed"] else "failed" if document.status == "failed" else "processing"
-
-            # Determine review status
-            review_status = "reviewed" if document.reviewed_data or document.status == "reviewed" else "pending"
-
-            log_activity(
+            return _finalize_document_success(
+                document=document,
                 db=db,
-                user_id=document.job.user_id,
-                action=Actions.PROCESS_DOCUMENT,
-                resource_type="document",
-                resource_id=document.id,
-                details={
-                    "job_name": document.job.name or f"Job-{str(document.job.id)[:8]}",
-                    "filename": document.filename,
-                    "extraction_status": extraction_status,
-                    "review_status": review_status,
-                    "integration_status": None,  # Will be updated when sent to integration
-                    "schema_id": str(schema_id) if schema_id else None,
-                    "schema_source": schema_source,
-                    "document_status": document.status
-                }
+                schema_id=str(schema_id) if schema_id else None,
+                schema_source=schema_source,
+                pipeline="legacy_fallback" if legacy_metadata.get("legacy_fallback") else "legacy",
+                job_logger=job_logger,
+                auto_review=auto_review,
             )
-
-        job_logger.info(f"Document {document.filename} processing completed with status: {document.status}")
-        return {
-            "status": document.status,
-            "document_id": document_id,
-            "extracted_data": document.extracted_data
-        }
 
     except SoftTimeLimitExceeded:
         logger.error(f"Soft time limit exceeded for document {document_id} — marking as failed")
@@ -1558,22 +1562,19 @@ def process_document_task(
                         file_path=mapping_path,
                     )
                 fallback_document.extraction_metadata = fallback_metadata
-                fallback_document.status = "extraction_completed"
+                mapping_error_str = str(mapping_error) if mapping_error else None
                 fallback_document.processing_error = (
-                    f"Structured mapping failed: {mapping_error}" if mapping_error else None
+                    f"Structured mapping failed: {mapping_error_str}" if mapping_error_str else None
                 )
-                fallback_document.processed_at = datetime.utcnow()
-                fallback_db.add(fallback_document)
-                fallback_db.commit()
-                fallback_logger.info(
-                    f"Fallback OCR completed for {fallback_document.filename}; primary error was recovered"
+                return _finalize_document_success(
+                    document=fallback_document,
+                    db=fallback_db,
+                    schema_id=str(fallback_schema.id) if fallback_schema else None,
+                    schema_source="fallback",
+                    pipeline="ocr_fallback",
+                    job_logger=fallback_logger,
+                    auto_review=auto_review,
                 )
-                return {
-                    "status": fallback_document.status,
-                    "document_id": document_id,
-                    "extracted_data": fallback_document.extracted_data,
-                    "ocr_fallback": True,
-                }
         except Exception as fallback_error:
             logger.warning("Fallback OCR failed for document %s: %s", document_id, fallback_error)
         finally:

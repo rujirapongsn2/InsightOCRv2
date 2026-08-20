@@ -294,6 +294,20 @@ def _resolve_path(job_id: str, path: str) -> str:
     return scoped
 
 
+def _coerce_outputs_path(path: str) -> str:
+    """Force a deliverable path under ``outputs/`` so it is always captured as
+    an artifact and stays on the safe download surface.
+
+    A path already under ``outputs/`` (or its nested subdirectories) is kept;
+    anything else — including a bare name or a sibling directory — is moved
+    under ``outputs/``.
+    """
+    cleaned = path.strip().lstrip("/")
+    if cleaned.startswith("outputs/"):
+        return cleaned
+    return f"outputs/{cleaned}"
+
+
 def _safe_read(
     storage,
     path: str,
@@ -445,8 +459,7 @@ async def _write_file_handler(args: dict, context) -> dict:
         return {"error": "content or content_base64 is required"}
 
     # Scope writes to outputs/ by default for safety
-    if not path.startswith("outputs/") and "/" not in path:
-        path = f"outputs/{path}"
+    path = _coerce_outputs_path(path)
 
     try:
         path = _normalize_job_path(str(context.job_id), path)
@@ -615,16 +628,21 @@ def _build_docx_bytes(content: str, title: str = "InsightDOC Export") -> bytes:
 
 
 async def _create_docx_handler(args: dict, context) -> dict:
-    path = (args.get("path") or "").strip()
+    path = (args.get("path") or args.get("filename") or args.get("output_path") or "").strip()
     title = (args.get("title") or "InsightDOC Export").strip()
     content = args.get("content") or ""
 
+    # The path is the only argument the model occasionally omits. Rather than
+    # failing the whole node, derive a safe, deterministic filename from the
+    # title (or a timestamped default) so a DOCX still gets produced.
     if not path:
-        return {"error": "path is required"}
-    if not path.endswith(".docx"):
-        path = f"{path}.docx"
-    if not path.startswith("outputs/") and "/" not in path:
-        path = f"outputs/{path}"
+        slug = re.sub(r"[^a-zA-Z0-9_\-\u0e00-\u0e7f]+", "-", title.strip()).strip("-")
+        slug = slug if slug else "document"
+        path = f"outputs/{slug}.docx"
+    else:
+        if not path.endswith(".docx"):
+            path = f"{path}.docx"
+        path = _coerce_outputs_path(path)
     if not str(content).strip():
         return {"error": "content is required"}
 
@@ -677,8 +695,7 @@ async def _convert_to_xlsx_handler(args: dict, context) -> dict:
         output_path = f"outputs/{source_name}.xlsx"
     if not output_path.endswith(".xlsx"):
         output_path = f"{output_path}.xlsx"
-    if not output_path.startswith("outputs/") and "/" not in output_path:
-        output_path = f"outputs/{output_path}"
+    output_path = _coerce_outputs_path(output_path)
 
     try:
         scoped_output = _resolve_path(str(context.job_id), output_path)
@@ -813,7 +830,7 @@ tool_registry.register(ToolDef(
         "properties": {
             "path": {
                 "type": "string",
-                "description": "Output path relative to job root, e.g. 'outputs/quotation_Q26050014-9.docx'.",
+                "description": "Output path relative to job root, e.g. 'outputs/quotation_Q26050014-9.docx'. Optional — a safe name is derived from `title` when omitted.",
             },
             "title": {
                 "type": "string",
@@ -824,7 +841,7 @@ tool_registry.register(ToolDef(
                 "description": "Plain text content. Lines starting '# ', '## ', '- ', or '* ' are formatted lightly.",
             },
         },
-        "required": ["path", "content"],
+        "required": ["content"],
     },
     handler=_create_docx_handler,
 ))

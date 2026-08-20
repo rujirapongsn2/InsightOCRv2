@@ -88,6 +88,18 @@ export interface NodeTypeField {
   placeholder?: string
   hint?: string
   provider?: string
+  option_labels?: Record<string, string>
+  visible_when?: { field: string; equals: any }
+  advanced?: boolean
+}
+
+export interface WorkflowAgentSkill {
+  id: string
+  name: string
+  description: string
+  scope: string
+  version?: string | null
+  allowed_tools?: string | null
 }
 
 export interface OutputField {
@@ -133,6 +145,11 @@ async function request<T>(token: string, path: string, init?: RequestInit): Prom
   }
   if (response.status === 204) return undefined as T
   return response.json()
+}
+
+export async function getWorkflowAgentSkills(token: string): Promise<WorkflowAgentSkill[]> {
+  const result = await request<{ skills: WorkflowAgentSkill[] }>(token, "/agent/skills")
+  return result.skills || []
 }
 
 // ── API calls ────────────────────────────────────────────────────────
@@ -185,6 +202,9 @@ export const getRun = (token: string, runId: string) =>
 export const runOutputDownloadUrl = (runId: string, filename: string) =>
   apiUrl(`/workflows/runs/${runId}/outputs/${encodeURIComponent(filename)}`)
 
+export const runArtifactDownloadUrl = (runId: string, nodeRunId: string, artifactIndex: number) =>
+  apiUrl(`/workflows/runs/${runId}/artifacts/${encodeURIComponent(nodeRunId)}/${artifactIndex}`)
+
 /**
  * Download a workflow run output file. The endpoint requires auth, so we fetch
  * with the Bearer token and trigger a blob download (a plain <a> link can't
@@ -196,6 +216,37 @@ export async function downloadRunOutput(
   filename: string
 ): Promise<void> {
   const response = await fetch(runOutputDownloadUrl(runId, filename), {
+    headers: { Authorization: `Bearer ${token}` },
+  })
+  handleAuthError(response)
+  if (!response.ok) {
+    let message = `Download failed (${response.status})`
+    try {
+      const data = await response.json()
+      message = data?.detail || message
+    } catch { /* keep default */ }
+    throw new Error(message)
+  }
+  const blob = await response.blob()
+  const objectUrl = URL.createObjectURL(blob)
+  const link = document.createElement("a")
+  link.href = objectUrl
+  link.download = filename
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  URL.revokeObjectURL(objectUrl)
+}
+
+/** Download a verified artifact produced by any Workflow node, including Agent. */
+export async function downloadRunArtifact(
+  token: string,
+  runId: string,
+  nodeRunId: string,
+  artifactIndex: number,
+  filename: string
+): Promise<void> {
+  const response = await fetch(runArtifactDownloadUrl(runId, nodeRunId, artifactIndex), {
     headers: { Authorization: `Bearer ${token}` },
   })
   handleAuthError(response)

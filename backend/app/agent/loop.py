@@ -277,18 +277,30 @@ def _aggregate_success(
 ) -> tuple[bool, list[str]]:
     """Combine all signals into a single success verdict + human-readable gaps.
 
-    Returns (success, failed_steps). `success` is True only when every signal
-    is clean. `failed_steps` is the union of reasons — surfaced to the UI.
+    Returns (success, failed_steps). `failed_steps` is the union of every
+    reason surfaced to the UI. A produced + verified file deliverable is the
+    success contract: recoverable intermediate signals (self-review gaps, tool
+    errors the agent later recovered from) are reported but do NOT sink a
+    delivered file — only an iteration-cap stop is a hard failure in that case.
+    For non-file output, every signal must stay clean (guards against false
+    success when the agent produced nothing real).
     """
     failed_steps: list[str] = []
     if stopped == "max_iterations":
         failed_steps.append("Reached max tool iterations without completing")
     if reflection is not None and not reflection.get("complete"):
-        failed_steps.extend(reflection.get("missing") or [])
+        for gap in (reflection.get("missing") or []):
+            if gap not in failed_steps:
+                failed_steps.append(gap)
     for f in critical_failures:
-        failed_steps.append(f["error"])
+        if f["error"] not in failed_steps:
+            failed_steps.append(f["error"])
     if requires_file and not current_turn_file_success:
         failed_steps.append("Requested file output was not produced or verified")
+
+    if requires_file and current_turn_file_success and stopped != "max_iterations":
+        return True, failed_steps
+
     return (len(failed_steps) == 0), failed_steps
 
 
@@ -470,11 +482,38 @@ def _requires_web_search(user_message: str) -> bool:
     ])
 
 
+def _format_tool_name(output_format: str) -> str:
+    mapping = {
+        "docx": "create_docx",
+        "pdf": "create_pdf",
+        "xlsx": "convert_to_xlsx",
+        "html": "run_report_code",
+    }
+    return mapping.get(output_format, "appropriate file tool")
+
+
 def _requires_file_output(user_message: str) -> bool:
     text = (user_message or "").lower()
     file_tokens = ["ไฟล์", "pdf", "excel", "xlsx", "csv", "docx", "word", "ใบเสนอราคา", "quotation", "บันทึก"]
     action_tokens = ["สร้าง", "ทำ", "เขียน", "แก้", "แก้ไข", "เพิ่ม", "อัปเดต", "แปลง", "update", "export", "save", "convert"]
     return any(token in text for token in file_tokens) and any(token in text for token in action_tokens)
+
+
+_FILE_OUTPUT_FORMATS = frozenset({"html", "docx", "pdf", "xlsx"})
+
+
+def _node_requires_file(output_format: str, user_message: str, autonomous: bool) -> bool:
+    """Whether this turn must produce a file deliverable.
+
+    For an autonomous Workflow Agent node the node's ``output_format`` is the
+    authoritative contract — a ``docx``/``pdf``/``xlsx``/``html`` node always
+    requires a file, regardless of prompt wording. Only interactive turns fall
+    back to prompt-keyword matching. This keeps the false-failure fix from
+    regressing when a prompt happens to omit the word "ไฟล์".
+    """
+    if autonomous and output_format in _FILE_OUTPUT_FORMATS:
+        return True
+    return _requires_file_output(user_message)
 
 
 def _is_xlsx_conversion_request(user_message: str) -> bool:
@@ -707,7 +746,22 @@ def _extract_tool_calls_from_content(text: str | None) -> list:
 class AgentLoop:
     """One agent run for one user message."""
 
-    def __init__(self, db: Session, conversation_id: UUID, user_id: UUID, job_id: UUID | None, llm_config: dict, max_iterations: int = 15, kind: str = "document"):
+    def __init__(
+        self,
+        db: Session,
+        conversation_id: UUID,
+        user_id: UUID,
+        job_id: UUID | None,
+        llm_config: dict,
+        max_iterations: int = 15,
+        kind: str = "document",
+        *,
+        initial_allowed_tools: set[str] | None = None,
+        additional_system_prompt: str | None = None,
+        autonomous: bool = False,
+        output_format: str = "text",
+        output_filename: str | None = None,
+    ):
         self.db = db
         self.conversation_id = conversation_id
         self.user_id = user_id
@@ -715,7 +769,23 @@ class AgentLoop:
         self.llm_config = llm_config
         self.max_iterations = max_iterations
         self.kind = kind
+        self.initial_allowed_tools = initial_allowed_tools
+        self.additional_system_prompt = (additional_system_prompt or "").strip()
+        self.autonomous = autonomous
+        self.output_format = output_format
+        self.output_filename = output_filename
         self.context = AgentContext(db=db, user_id=user_id, job_id=job_id, conversation_id=conversation_id, kind=kind)
+
+    def _build_system_prompt(self, user_message: str) -> str:
+        prompt = build_system_prompt(self.context, user_message)
+        if self.additional_system_prompt:
+            prompt = f"{prompt}\n\n{self.additional_system_prompt}"
+        return prompt
+
+    def _tool_requires_confirmation(self, tool_name: str, tool_args: dict) -> bool:
+        # Autonomous workflow runs never wait for UI confirmation. Their strict
+        # allowlist blocks confirmation-gated tools in ToolRegistry instead.
+        return False if self.autonomous else requires_confirmation(tool_name, tool_args)
 
     async def run(self, user_message: str) -> AsyncGenerator[str, None]:
         deadline = asyncio.get_event_loop().time() + AGENT_MAX_RUNTIME_S
@@ -741,8 +811,15 @@ class AgentLoop:
         crud_msg.add(self.db, conversation_id=self.conversation_id, role="user", content=user_message, iteration=0)
         crud_conv.update_title(self.db, self.conversation_id, user_message[:60])
         self.context.clear_active_skill_tool_policy()
+        if self.initial_allowed_tools is not None:
+            self.context.activate_skill_tool_policy(
+                sorted(self.initial_allowed_tools), enforce=True
+            )
         self.context.current_request = user_message
-        focused_legal_qa = is_focused_legal_qa(user_message)
+        # Workflow Agent nodes have an explicit Skill/tool policy and may need
+        # artifact tools even for legal questions, so the chat-only legal QA
+        # narrowing must not override their configured capabilities.
+        focused_legal_qa = is_focused_legal_qa(user_message) and not self.autonomous
 
         if self.kind == "workflow_builder":
             async for event in self._run_workflow_builder(user_message):
@@ -766,7 +843,7 @@ class AgentLoop:
             max_retries=0,  # retries are handled by _chat_with_retry with backoff
         )
         model = self.llm_config.get("model", "gpt-4o-mini")
-        system_prompt = build_system_prompt(self.context, user_message)
+        system_prompt = self._build_system_prompt(user_message)
         history = await self.context.load_history()
 
         # System prompt only once in messages[0] — subsequent iterations append to messages directly
@@ -791,6 +868,9 @@ class AgentLoop:
         nudged_required_search = False
         nudged_required_file = False
         stale_file_claim_nudges = 0
+        requires_file = _node_requires_file(
+            getattr(self, "output_format", "text"), user_message, bool(self.autonomous)
+        )
 
         if _is_xlsx_conversion_request(user_message):
             source_path = self._latest_convertible_output_path()
@@ -913,7 +993,7 @@ class AgentLoop:
                 needs_confirmation = any(
                     tc.id not in policy_blocked_call_ids
                     and tc.id not in request_policy_blocked_call_ids
-                    and requires_confirmation(name, args)
+                    and self._tool_requires_confirmation(name, args)
                     for tc, name, args in parsed
                 )
 
@@ -931,7 +1011,7 @@ class AgentLoop:
                             result = await _focused_legal_policy_result(tool_name)
                         elif tc.id in policy_blocked_call_ids:
                             result = await _blocked_skill_policy_result(tool_name)
-                        elif requires_confirmation(tool_name, tool_args):
+                        elif self._tool_requires_confirmation(tool_name, tool_args):
                             pending = crud_pending.create(
                                 self.db, conversation_id=self.conversation_id, user_id=self.user_id,
                                 tool_name=tool_name, tool_arguments=tool_args,
@@ -1149,11 +1229,19 @@ class AgentLoop:
                     messages.append({"role": "system", "content": _required_tool_instruction("web_search")})
                     nudged_required_search = True
                     continue
-                if _requires_file_output(user_message) and not current_turn_file_success and not nudged_required_file:
-                    messages.append({"role": "system", "content": _required_tool_instruction("file_output")})
+                must_produce_file = requires_file
+                if must_produce_file and not current_turn_file_success and not nudged_required_file:
+                    target_fmt = self.output_format.upper() if self.autonomous and self.output_format else "file"
+                    target_tool = _format_tool_name(self.output_format) if self.autonomous and self.output_format else "appropriate file tool"
+                    target_file = self.output_filename or f"output.{self.output_format}" if self.autonomous and self.output_format else "outputs/"
+                    messages.append({"role": "system", "content": (
+                        f"You have not yet generated the required {target_fmt} file. "
+                        f"Create and save '{target_file}' in outputs/ now — either with `{target_tool}` "
+                        f"or with `execute_python` + `write_file`. Either route is fine, but the file must be produced."
+                    )})
                     nudged_required_file = True
                     continue
-                if _requires_file_output(user_message) and not current_turn_file_success and _claims_file_success(final_text):
+                if requires_file and not current_turn_file_success and _claims_file_success(final_text):
                     final_text = "ยังไม่ได้สร้างหรือแก้ไขไฟล์ในรอบคำสั่งนี้ครับ เพราะยังไม่มีผลลัพธ์จากเครื่องมือสร้างไฟล์ที่ยืนยันว่า ok=true และ verified=true"
                 if (
                     _claims_file_success(final_text)
@@ -1175,7 +1263,7 @@ class AgentLoop:
                     stale_file_claim_nudges += 1
                     continue
                 if (
-                    _requires_file_output(user_message)
+                    requires_file
                     and current_turn_file_success
                     and latest_file_success_result
                     and _claims_failure(final_text)
@@ -1207,7 +1295,6 @@ class AgentLoop:
                     reflection = await self._reflect(
                         client, model, user_message, plan_steps, final_text, current_turn_tools
                     )
-                    reflection_result = reflection
                     if not reflection["complete"] and reflection["missing"]:
                         yield sse_event(SSEEventType.REFLECTION, {
                             "complete": False, "missing": reflection["missing"],
@@ -1222,7 +1309,13 @@ class AgentLoop:
                                 "Do not claim completion until they are genuinely done:\n" + gaps
                             ),
                         })
+                        # Do NOT let a stale "incomplete" reflection verdict penalise the
+                        # next (fresh) final answer. The model has already been told the
+                        # gaps and will attempt to address them; the follow-up answer is
+                        # graded on its own merits (tool failures + required file output).
+                        reflection_result = None
                         continue
+                    reflection_result = reflection
                     yield sse_event(SSEEventType.REFLECTION, {"complete": True})
                     self._persist_reflection(plan_msg, plan_steps, True, [])
                     if reflection["revised_answer"]:
@@ -1236,7 +1329,7 @@ class AgentLoop:
 
                 success, failed_steps = _aggregate_success(
                     None, reflection_result, critical_tool_failures,
-                    current_turn_file_success, _requires_file_output(user_message),
+                    current_turn_file_success, requires_file,
                 )
                 yield sse_event(SSEEventType.DONE, {
                     "iterations": iteration,
@@ -1278,7 +1371,7 @@ class AgentLoop:
             yield sse_event(SSEEventType.DELTA, {"text": chunk})
         success, failed_steps = _aggregate_success(
             "max_iterations", reflection_result, critical_tool_failures,
-            current_turn_file_success, _requires_file_output(user_message),
+            current_turn_file_success, requires_file,
         )
         yield sse_event(SSEEventType.DONE, {
             "iterations": self.max_iterations,
@@ -1738,7 +1831,7 @@ class AgentLoop:
         calling. Falls back to parsing JSON actions from message content if the
         endpoint ignores the tools parameter."""
         model = self.llm_config.get("model", "gpt-4o-mini")
-        system_prompt = build_system_prompt(self.context, user_message)
+        system_prompt = self._build_system_prompt(user_message)
         tools_schema = tool_registry.get_openai_schemas(categories=["workflow", "web"])
         client = AsyncOpenAI(
             api_key=self.llm_config.get("apiKey"),
@@ -1820,7 +1913,7 @@ class AgentLoop:
         """Workflow builder for completion_messages providers (no native function
         calling): JSON tool-calling contract parsed from free-text replies."""
         model_name = self.llm_config.get("model", "default_ai_settings")
-        system_prompt = build_system_prompt(self.context, user_message)
+        system_prompt = self._build_system_prompt(user_message)
         tools_schema = tool_registry.get_openai_schemas(categories=["workflow", "web"])
 
         history = await self.context.load_history()
@@ -1896,7 +1989,7 @@ objects in the same reply.
                 crud_msg.add(self.db, conversation_id=self.conversation_id, role="assistant",
                              content=final_text, iteration=iteration, model_used=model_name)
                 yield sse_event(SSEEventType.DELTA, {"text": final_text})
-                yield sse_event(SSEEventType.DONE, {"iterations": iteration})
+                yield sse_event(SSEEventType.DONE, {"iterations": iteration, "success": True})
                 return
 
             # Execute each requested tool in order within this turn.
@@ -1943,7 +2036,7 @@ objects in the same reply.
 
     async def _run_completion_provider(self, user_message: str) -> AsyncGenerator[str, None]:
         model_name = self.llm_config.get("model", "default_ai_settings")
-        system_prompt = build_system_prompt(self.context, user_message)
+        system_prompt = self._build_system_prompt(user_message)
         tool_results: list[dict] = []
 
         # Do not preload document data here. A strict Skill may only allow a
@@ -2004,7 +2097,7 @@ __TOOL_CATALOG__
                              content=final_text, iteration=iteration, model_used=model_name)
                 for chunk in (final_text[i:i+50] for i in range(0, len(final_text), 50)):
                     yield sse_event(SSEEventType.DELTA, {"text": chunk})
-                yield sse_event(SSEEventType.DONE, {"iterations": iteration})
+                yield sse_event(SSEEventType.DONE, {"iterations": iteration, "success": True})
                 return
 
             if not action:
@@ -2016,7 +2109,7 @@ __TOOL_CATALOG__
                              content=final_text, iteration=iteration, model_used=model_name)
                 for chunk in (final_text[i:i+50] for i in range(0, len(final_text), 50)):
                     yield sse_event(SSEEventType.DELTA, {"text": chunk})
-                yield sse_event(SSEEventType.DONE, {"iterations": iteration})
+                yield sse_event(SSEEventType.DONE, {"iterations": iteration, "success": True})
                 return
 
             if action.get("type") == "final":
@@ -2030,7 +2123,7 @@ __TOOL_CATALOG__
                              content=final_text, iteration=iteration, model_used=model_name)
                 for chunk in (final_text[i:i+50] for i in range(0, len(final_text), 50)):
                     yield sse_event(SSEEventType.DELTA, {"text": chunk})
-                yield sse_event(SSEEventType.DONE, {"iterations": iteration})
+                yield sse_event(SSEEventType.DONE, {"iterations": iteration, "success": True})
                 return
 
             if action.get("type") != "tool_call":
@@ -2043,7 +2136,7 @@ __TOOL_CATALOG__
                 crud_msg.add(self.db, conversation_id=self.conversation_id, role="assistant",
                              content=final_text, iteration=iteration, model_used=model_name)
                 yield sse_event(SSEEventType.DELTA, {"text": final_text})
-                yield sse_event(SSEEventType.DONE, {"iterations": iteration})
+                yield sse_event(SSEEventType.DONE, {"iterations": iteration, "success": True})
                 return
 
             tool_name = str(action.get("tool") or "")
@@ -2058,7 +2151,7 @@ __TOOL_CATALOG__
                          content=None, tool_calls=[tool_call], iteration=iteration, model_used=model_name)
             yield sse_event(SSEEventType.TOOL_CALL, {"id": call_id, "name": tool_name, "arguments": tool_args})
 
-            if requires_confirmation(tool_name, tool_args):
+            if self._tool_requires_confirmation(tool_name, tool_args):
                 pending = crud_pending.create(
                     self.db, conversation_id=self.conversation_id, user_id=self.user_id,
                     tool_name=tool_name, tool_arguments=tool_args,
@@ -2115,7 +2208,11 @@ __TOOL_CATALOG__
         crud_msg.add(self.db, conversation_id=self.conversation_id, role="assistant",
                      content=final_text, iteration=self.max_iterations, model_used=model_name)
         yield sse_event(SSEEventType.DELTA, {"text": final_text})
-        yield sse_event(SSEEventType.DONE, {"iterations": self.max_iterations, "stopped": "max_iterations"})
+        yield sse_event(SSEEventType.DONE, {
+            "iterations": self.max_iterations,
+            "stopped": "max_iterations",
+            "success": False,
+        })
 
     async def _wait_for_confirmation(self, pending_id: UUID, timeout_s: int = 300) -> bool:
         for _ in range(timeout_s):

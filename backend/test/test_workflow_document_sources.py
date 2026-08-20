@@ -24,14 +24,28 @@ def test_onedrive_import_offers_the_same_schema_override_as_google_drive():
     for node_name in ("gdrive_import", "onedrive_import"):
         field_names = {field["name"] for field in _node_type(node_name)["config_fields"]}
         assert "schema_id" in field_names
+        assert "auto_review" in field_names
+        assert "wait_for_completion" in field_names
+        auto_review_field = next(f for f in _node_type(node_name)["config_fields"] if f["name"] == "auto_review")
+        assert auto_review_field["type"] == "boolean"
+        assert auto_review_field["default"] is False
+        wait_field = next(f for f in _node_type(node_name)["config_fields"] if f["name"] == "wait_for_completion")
+        assert wait_field["type"] == "boolean"
+        assert wait_field["default"] is True
+        output_names = {f["name"] for f in _node_type(node_name)["output_fields"]}
+        assert "records" in output_names
+        assert "documents" in output_names
 
 
 def test_ingestion_inherits_job_schema_unless_workflow_selects_an_override():
     job = SimpleNamespace(schema_id="job-schema")
 
     assert resolve_ingestion_schema_id(job, None) == "job-schema"
+    assert resolve_ingestion_schema_id(job, "") == "job-schema"
+    assert resolve_ingestion_schema_id(job, "auto") == "job-schema"
     assert resolve_ingestion_schema_id(job, "node-schema") == "node-schema"
     assert resolve_ingestion_schema_id(SimpleNamespace(schema_id=None), None) is None
+    assert resolve_ingestion_schema_id(SimpleNamespace(schema_id=None), "auto") is None
 
 
 def test_workflow_document_extraction_exposes_compact_provenance_only():

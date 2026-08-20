@@ -59,8 +59,10 @@ def validate_import_file(filename: str, size_bytes: Optional[int]) -> None:
 
 
 def resolve_ingestion_schema_id(job: Job, schema_id: Optional[str]) -> Optional[str]:
-    """Prefer an explicit import override, then inherit the destination Job schema."""
-    return schema_id or (str(job.schema_id) if job.schema_id else None)
+    """Prefer an explicit import override (if not empty/auto), then inherit the destination Job schema."""
+    if not schema_id or schema_id == "auto":
+        return str(job.schema_id) if job.schema_id else None
+    return str(schema_id)
 
 
 def ingest_file_into_job(
@@ -71,6 +73,7 @@ def ingest_file_into_job(
     mime_type: Optional[str] = None,
     schema_id: Optional[str] = None,
     source_file_id: Optional[str] = None,
+    auto_review: bool = False,
 ) -> Dict[str, Any]:
     """Store a file in a Job and enqueue OCR processing. Returns ids/task_id.
 
@@ -127,6 +130,7 @@ def ingest_file_into_job(
         task = process_document_task.delay(
             str(document.id),
             effective_schema_id,
+            auto_review=auto_review,
         )
     except Exception:
         # Broker unavailable — don't leave the document stuck in "queued".

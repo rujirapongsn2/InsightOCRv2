@@ -1132,3 +1132,16 @@ Date: 2026-06-30
    - Select an Invoice or Receipt Schema and repeat; confirm only AI Extract is shown while Structured Data is deferred.
    - Temporarily make Softnix OCR unavailable with OCR fallback enabled and use an image TesseractOCR cannot read; confirm the document completes with the `OCR fallback` chip.
    - Try an oversized or unsupported image; confirm processing fails safely with a clear error and does not remain processing.
+
+19. Workflow Autonomous Agent mode
+   - Open a Workflow and add or select the `LLM / Agent` node.
+   - Confirm existing nodes default to `LLM` and retain the current provider, system prompt, prompt, and JSON controls.
+   - Switch to `Agent`; select a Job or connect a Jobs/Document Source node, select at least one Skill, and choose an output format.
+   - Confirm `Save` rejects an Agent node with no Skill, fewer than 3 or more than 20 iterations, or a timeout outside 60-900 seconds.
+   - Run a text/JSON task and confirm the node returns terminal `status`, `text`, `data`, `iterations`, and `warnings` without requesting confirmation.
+   - Run an HTML/DOCX/PDF/XLSX task and confirm `artifacts` contains a verified `outputs/` file reference.
+   - Use a Skill that requests an approve/delete/external-write tool and confirm the tool is blocked rather than waiting for user confirmation.
+   - Confirm downstream Transform/Condition nodes can read `{{agent_node.status}}`, `{{agent_node.text}}`, and `{{agent_node.artifacts}}`.
+   - Automated verification:
+     - Backend workflow Agent, validation, confirmation, and Skill policy tests.
+     - Frontend `npm run build` including TypeScript validation.

@@ -21,9 +21,12 @@ import logging
 import re
 import os
 import socket
+from io import BytesIO
 from datetime import datetime, timezone
+from pathlib import PurePosixPath
 from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import urlparse
+from mimetypes import guess_type
 
 import requests as http_requests
 from requests.adapters import HTTPAdapter
@@ -35,6 +38,7 @@ from app.models.document import Document
 from app.models.job import Job
 from app.models.integration import Integration, IntegrationType, IntegrationStatus
 from app.models.ai_settings import AISettings
+from app.services.storage import get_storage_service
 from app.utils.redact import redact_secrets
 from app.api.v1.endpoints.integrations import _integration_api_key, _llm_base_url_for_integration
 
@@ -45,6 +49,7 @@ logger = logging.getLogger(__name__)
 # same shared-volume location the engine wrote to before; with MinIO/S3 the
 # files land in the bucket so any replica can serve them.
 WORKFLOW_OUTPUT_DIR = os.environ.get("WORKFLOW_OUTPUT_DIR", "workflow_outputs")
+MAX_WORKFLOW_ARTIFACT_BYTES = 50 * 1024 * 1024
 
 # A workflow can use an external API response in downstream nodes, but it must
 # not be able to exhaust a worker by returning an unbounded response body.
@@ -139,22 +144,46 @@ NODE_TYPES: List[Dict[str, Any]] = [
         "type": "llm",
         "category": "ai",
         "label": "LLM / Agent",
-        "description": "ส่งข้อมูลให้ LLM วิเคราะห์ สรุป แปลง หรือตรวจสอบตาม prompt",
+        "description": "ใช้ LLM แบบครั้งเดียว หรือ Autonomous Agent ที่ใช้ Skills และเครื่องมือหลายขั้นตอน",
         "config_fields": [
+            {"name": "mode", "label": "โหมด", "type": "segmented", "options": ["llm", "agent"],
+             "option_labels": {"llm": "LLM", "agent": "Agent"}, "default": "llm"},
             {"name": "ai_provider_id", "label": "AI Agent Provider", "type": "ai_provider_select", "required": False,
              "hint": "เลือก provider จาก Setting AI; เว้นว่าง = ใช้ Agent Provider ที่ตั้งไว้กลางระบบ"},
             {"name": "system_prompt", "label": "System prompt", "type": "textarea", "required": False,
              "placeholder": "คุณเป็นผู้ช่วยสรุปข้อมูลเอกสาร ตอบเป็นภาษาไทย กระชับ",
-             "hint": "กำหนดบทบาท/สไตล์การตอบของ AI"},
+             "hint": "กำหนดบทบาท/สไตล์การตอบของ AI", "visible_when": {"field": "mode", "equals": "llm"}},
             {"name": "prompt", "label": "Prompt", "type": "textarea", "required": True,
              "placeholder": "สรุปรายการต่อไปนี้เป็น bullet:\n\n{{job_source_xxx.records}}",
              "hint": "ใช้ปุ่ม “+ แทรกข้อมูล” ด้านบนช่องเพื่ออ้างผลจากโหนดก่อนหน้า"},
             {"name": "json_output", "label": "แปลงคำตอบเป็น JSON", "type": "boolean", "default": False,
-             "hint": "เปิดเมื่อสั่งให้ AI ตอบเป็น JSON แล้วต้องการใช้ฟิลด์ data ต่อ"},
+             "hint": "เปิดเมื่อสั่งให้ AI ตอบเป็น JSON แล้วต้องการใช้ฟิลด์ data ต่อ",
+             "visible_when": {"field": "mode", "equals": "llm"}},
+            {"name": "job_id", "label": "Job context", "type": "job_select", "required": False,
+             "hint": "เว้นว่างเพื่อใช้ Job จากโหนด Jobs หรือ Document Source ก่อนหน้า",
+             "visible_when": {"field": "mode", "equals": "agent"}},
+            {"name": "skill_ids", "label": "Skills ที่อนุญาต", "type": "skill_multi_select", "required": False,
+             "hint": "Agent ใช้เฉพาะคำสั่งและเครื่องมือจาก Skills ที่เลือก",
+             "visible_when": {"field": "mode", "equals": "agent"}},
+            {"name": "output_format", "label": "ผลลัพธ์", "type": "select",
+             "options": ["text", "json", "html", "docx", "pdf", "xlsx"], "default": "text",
+             "option_labels": {"text": "Text", "json": "JSON", "html": "HTML Report", "docx": "DOCX", "pdf": "PDF", "xlsx": "XLSX"},
+             "visible_when": {"field": "mode", "equals": "agent"}},
+            {"name": "output_filename", "label": "ชื่อไฟล์ผลลัพธ์", "type": "text", "required": False,
+             "placeholder": "outputs/report.html", "hint": "ใช้เมื่อเลือกผลลัพธ์เป็นไฟล์ แล้วต่อ Publish Artifact เพื่อเก็บผลลัพธ์ของ run",
+             "visible_when": {"field": "mode", "equals": "agent"}},
+            {"name": "max_iterations", "label": "จำนวนรอบสูงสุด", "type": "number", "default": 7,
+             "hint": "กำหนดได้ 3-20 รอบ", "visible_when": {"field": "mode", "equals": "agent"}, "advanced": True},
+            {"name": "timeout_seconds", "label": "Timeout (วินาที)", "type": "number", "default": 300,
+             "hint": "กำหนดได้ 60-900 วินาที", "visible_when": {"field": "mode", "equals": "agent"}, "advanced": True},
         ],
         "output_fields": [
+            {"name": "status", "label": "สถานะ Agent"},
             {"name": "text", "label": "ข้อความตอบกลับ"},
             {"name": "data", "label": "JSON ที่ parse แล้ว (ถ้าเปิด)"},
+            {"name": "artifacts", "label": "ไฟล์ที่ Agent สร้าง"},
+            {"name": "job_id", "label": "Job ที่สร้างไฟล์"},
+            {"name": "warnings", "label": "คำเตือน"},
         ],
     },
     {
@@ -270,6 +299,26 @@ NODE_TYPES: List[Dict[str, Any]] = [
         ],
     },
     {
+        "type": "publish_artifact",
+        "category": "action",
+        "label": "Publish Artifact",
+        "description": "คัดลอกไฟล์ที่ Agent สร้างและตรวจสอบแล้วมาเก็บเป็นผลลัพธ์ถาวรของ Workflow run",
+        "config_fields": [
+            {"name": "source_path", "label": "ไฟล์จาก Agent", "type": "text", "required": True,
+             "placeholder": "{{llm_xxx.artifacts.0.path}}",
+             "hint": "เลือก path ของ artifact จากโหนด Agent ก่อนหน้า"},
+            {"name": "job_id", "label": "Job context", "type": "job_select", "required": False,
+             "hint": "เว้นว่างเพื่อใช้ Job เดียวจากโหนดก่อนหน้า"},
+            {"name": "filename", "label": "ชื่อไฟล์ที่เผยแพร่", "type": "text", "required": False,
+             "placeholder": "report-contract.docx",
+             "hint": "เว้นว่างเพื่อใช้ชื่อเดิมของไฟล์"},
+        ],
+        "output_fields": [
+            {"name": "artifact", "label": "ไฟล์ที่เผยแพร่"},
+            {"name": "artifacts", "label": "รายการไฟล์ที่เผยแพร่"},
+        ],
+    },
+    {
         "type": "webhook_response",
         "category": "action",
         "label": "Webhook Response",
@@ -334,7 +383,11 @@ NODE_TYPES: List[Dict[str, Any]] = [
              "hint": "ต้องแชร์โฟลเดอร์ให้อีเมล service account (สิทธิ์อ่าน)"},
             {"name": "job_id", "label": "นำเข้าไปยัง Job", "type": "job_select", "required": True},
             {"name": "schema_id", "label": "Schema สำหรับประมวลผล", "type": "schema_select", "required": False,
-             "hint": "เว้นว่าง = ใช้ Schema ของ Job; เลือกเพื่อกำหนด Schema ให้เอกสารที่นำเข้า"},
+             "hint": "Auto = ใช้ Schema ของ Job หรือสกัดอัตโนมัติ; หรือเลือก Schema เฉพาะเพื่อกำหนดให้เอกสารที่นำเข้า"},
+            {"name": "wait_for_completion", "label": "รอประมวลผลเอกสารเสร็จทั้งหมด", "type": "boolean", "default": True,
+             "hint": "เปิดใช้งาน (ค่าเริ่มต้น): โหนดจะรอให้ OCR & Extraction ทุกเอกสารเสร็จสมบูรณ์ก่อนส่ง output ต่อไปยังโหนดถัดไป; ปิด: นำเข้าไฟล์เข้าคิวแล้วส่ง output ทันที"},
+            {"name": "auto_review", "label": "Automatic Review", "type": "boolean", "default": False,
+             "hint": "เมื่อเปิดใช้งาน: หลังสกัดข้อมูลสำเร็จ ระบบจะตั้งค่าเป็น Review อัตโนมัติและเปลี่ยนสถานะเป็น reviewed"},
             {"name": "name_filter", "label": "กรองชื่อไฟล์ (optional)", "type": "text", "required": False,
              "placeholder": ".pdf",
              "hint": "เว้นว่าง = ทุกไฟล์; ใส่นามสกุล/คำเช่น .pdf เพื่อกรอง"},
@@ -343,6 +396,8 @@ NODE_TYPES: List[Dict[str, Any]] = [
         "output_fields": [
             {"name": "count", "label": "จำนวนไฟล์ที่นำเข้า"},
             {"name": "imported", "label": "รายการที่นำเข้า"},
+            {"name": "records", "label": "ข้อมูลผลลัพธ์ (records)"},
+            {"name": "documents", "label": "เอกสารพร้อมผลลัพธ์"},
             {"name": "job_id", "label": "Job ปลายทาง"},
         ],
     },
@@ -384,7 +439,11 @@ NODE_TYPES: List[Dict[str, Any]] = [
              "placeholder": "root"},
             {"name": "job_id", "label": "นำเข้าไปยัง Job", "type": "job_select", "required": True},
             {"name": "schema_id", "label": "Schema สำหรับประมวลผล", "type": "schema_select", "required": False,
-             "hint": "เว้นว่าง = ใช้ Schema ของ Job; เลือกเพื่อกำหนด Schema ให้เอกสารที่นำเข้า"},
+             "hint": "Auto = ใช้ Schema ของ Job หรือสกัดอัตโนมัติ; หรือเลือก Schema เฉพาะเพื่อกำหนดให้เอกสารที่นำเข้า"},
+            {"name": "wait_for_completion", "label": "รอประมวลผลเอกสารเสร็จทั้งหมด", "type": "boolean", "default": True,
+             "hint": "เปิดใช้งาน (ค่าเริ่มต้น): โหนดจะรอให้ OCR & Extraction ทุกเอกสารเสร็จสมบูรณ์ก่อนส่ง output ต่อไปยังโหนดถัดไป; ปิด: นำเข้าไฟล์เข้าคิวแล้วส่ง output ทันที"},
+            {"name": "auto_review", "label": "Automatic Review", "type": "boolean", "default": False,
+             "hint": "เมื่อเปิดใช้งาน: หลังสกัดข้อมูลสำเร็จ ระบบจะตั้งค่าเป็น Review อัตโนมัติและเปลี่ยนสถานะเป็น reviewed"},
             {"name": "name_filter", "label": "กรองชื่อไฟล์ (optional)", "type": "text", "required": False,
              "placeholder": ".pdf",
              "hint": "เว้นว่าง = ทุกไฟล์; ใส่นามสกุล/คำเช่น .pdf เพื่อกรอง"},
@@ -393,6 +452,8 @@ NODE_TYPES: List[Dict[str, Any]] = [
         "output_fields": [
             {"name": "count", "label": "จำนวนไฟล์ที่นำเข้า"},
             {"name": "imported", "label": "รายการที่นำเข้า"},
+            {"name": "records", "label": "ข้อมูลผลลัพธ์ (records)"},
+            {"name": "documents", "label": "เอกสารพร้อมผลลัพธ์"},
             {"name": "job_id", "label": "Job ปลายทาง"},
         ],
     },
@@ -831,6 +892,58 @@ def _exec_llm(db: Session, config: dict, context: dict, log: Callable[[str], Non
         config.get("ai_provider_id"),
         owner_user_id=context.get("_owner_user_id"),
     )
+    if (config.get("mode") or "llm") == "agent":
+        from uuid import UUID
+
+        from app.services.workflow_agent import (
+            WorkflowAgentConfigurationError,
+            run_workflow_agent,
+        )
+        from app.services.workflow_agent_contracts import FILE_OUTPUT_FORMATS
+
+        owner_user_id = context.get("_owner_user_id")
+        if not owner_user_id:
+            raise NodeExecutionError("Agent node requires a Workflow owner")
+        job_id = config.get("job_id") or config.get("_inferred_job_id")
+        output_format = str(config.get("output_format") or "text").lower()
+        if output_format in FILE_OUTPUT_FORMATS and not job_id:
+            raise NodeExecutionError(
+                "Agent file output requires Job context; select a Job or connect a single upstream Job node"
+            )
+        skill_ids = config.get("skill_ids") or []
+        if not isinstance(skill_ids, list):
+            raise NodeExecutionError("Agent node skill_ids must be a list")
+        raw_fingerprints = config.get("skill_fingerprints") or {}
+        if not isinstance(raw_fingerprints, dict):
+            raise NodeExecutionError("Agent node skill_fingerprints must be an object")
+        try:
+            result = asyncio.run(run_workflow_agent(
+                db,
+                user_id=UUID(str(owner_user_id)),
+                job_id=UUID(str(job_id)) if job_id else None,
+                provider=provider,
+                prompt=_stringify(prompt),
+                skill_ids=[str(item) for item in skill_ids],
+                skill_fingerprints={
+                    str(key): str(value)
+                    for key, value in raw_fingerprints.items()
+                },
+                output_format=output_format,
+                output_filename=(str(config.get("output_filename") or "").strip() or None),
+                max_iterations=int(config.get("max_iterations") or 7),
+                timeout_seconds=int(config.get("timeout_seconds") or 300),
+            ))
+        except (ValueError, WorkflowAgentConfigurationError) as exc:
+            raise NodeExecutionError(f"Agent node configuration error: {exc}") from exc
+        log(
+            f"Agent finished with status={result.get('status')} "
+            f"iterations={result.get('iterations')} artifacts={len(result.get('artifacts') or [])}"
+        )
+        if result.get("status") != "succeeded":
+            detail = result.get("error") or "; ".join(result.get("warnings") or [])
+            raise NodeExecutionError(detail or result.get("text") or "Agent did not complete successfully")
+        return result
+
     text = call_llm_provider(provider, _stringify(prompt), config.get("system_prompt"))
     log(f"LLM responded via {provider.get('source')} ({len(text)} chars)")
 
@@ -1310,9 +1423,6 @@ def _exec_write_output(db: Session, config: dict, context: dict, log: Callable[[
 
     # Store via the storage service (shared volume / MinIO / S3) so the API
     # container can serve the file no matter which worker wrote it.
-    from io import BytesIO
-    from app.services.storage import get_storage_service
-
     storage_key = f"{WORKFLOW_OUTPUT_DIR}/{run_id}/{filename}"
     get_storage_service().upload_file(
         BytesIO(data),
@@ -1322,6 +1432,83 @@ def _exec_write_output(db: Session, config: dict, context: dict, log: Callable[[
     log(f"Wrote {len(data)} bytes to {storage_key}")
     return {"file_path": storage_key, "filename": filename, "size": len(data),
             "preview": text_preview, "run_id": str(run_id)}
+
+
+def _job_output_storage_key(job_id: str, path: str) -> tuple[str, str]:
+    """Resolve an Agent artifact into its Job-scoped storage key.
+
+    Agent tools return a job-relative ``outputs/...`` path. Accept the fully
+    scoped form as well, but never let a workflow read another Job or escape the
+    outputs directory.
+    """
+    clean_path = str(path or "").strip().replace("\\", "/").lstrip("/")
+    current_prefix = f"jobs/{job_id}/"
+    if clean_path.startswith(current_prefix):
+        clean_path = clean_path[len(current_prefix):]
+    elif clean_path.startswith("jobs/"):
+        raise NodeExecutionError("Publish Artifact: cross-job paths are not allowed")
+
+    parts = PurePosixPath(clean_path).parts
+    if not parts or parts[0] != "outputs" or ".." in parts:
+        raise NodeExecutionError("Publish Artifact: source_path must be a file under outputs/")
+    if clean_path.endswith("/") or len(parts) < 2:
+        raise NodeExecutionError("Publish Artifact: source_path must reference a file")
+    return f"jobs/{job_id}/{clean_path}", clean_path
+
+
+def _exec_publish_artifact(db: Session, config: dict, context: dict, log: Callable[[str], None]) -> Any:
+    """Publish a verified Job artifact into the immutable Workflow-run scope."""
+    source_path = config.get("source_path")
+    if not isinstance(source_path, str) or not source_path.strip():
+        raise NodeExecutionError("Publish Artifact: source_path is required")
+
+    job_id = config.get("job_id") or config.get("_inferred_job_id")
+    if not job_id:
+        raise NodeExecutionError("Publish Artifact: select Job context or connect a single upstream Job")
+
+    source_key, display_path = _job_output_storage_key(str(job_id), source_path)
+    source_name = os.path.basename(display_path)
+    filename = os.path.basename(str(config.get("filename") or source_name).strip())
+    if not filename or filename in {".", ".."}:
+        raise NodeExecutionError("Publish Artifact: filename is invalid")
+
+    run_id = str(context.get("_run_id") or "")
+    node_id = str(context.get("_node_id") or "artifact")
+    if not run_id:
+        raise NodeExecutionError("Publish Artifact: workflow run context is missing")
+
+    storage_key = f"{WORKFLOW_OUTPUT_DIR}/{run_id}/{node_id}/{filename}"
+    storage = get_storage_service()
+    if not storage.exists(source_key):
+        raise NodeExecutionError(f"Publish Artifact: source file not found: {display_path}")
+
+    with storage.get_local_path(source_key) as local_path:
+        source_size = os.path.getsize(local_path)
+        if source_size > MAX_WORKFLOW_ARTIFACT_BYTES:
+            raise NodeExecutionError(
+                "Publish Artifact: source file exceeds the 50 MB workflow artifact limit"
+            )
+        with open(local_path, "rb") as source_file:
+            if source_size == 0:
+                raise NodeExecutionError(f"Publish Artifact: source file is empty: {display_path}")
+            mime_type = guess_type(filename)[0] or "application/octet-stream"
+            storage.upload_file(source_file, storage_key, content_type=mime_type)
+    if not storage.exists(storage_key):
+        raise NodeExecutionError("Publish Artifact: published file could not be verified")
+
+    artifact = {
+        "filename": filename,
+        "path": display_path,
+        "storage_key": storage_key,
+        "source_scope": "job",
+        "type": os.path.splitext(filename)[1].lstrip(".").lower() or "file",
+        "mime_type": mime_type,
+        "size": source_size,
+        "verified": True,
+        "published": True,
+    }
+    log(f"Published {display_path} as {storage_key} ({source_size} bytes)")
+    return {"artifact": artifact, "artifacts": [artifact]}
 
 
 def _exec_webhook_response(db: Session, config: dict, context: dict, log: Callable[[str], None]) -> Any:
@@ -1458,6 +1645,7 @@ def _exec_cloud_import(db: Session, config: dict, context: dict, log, provider: 
             validate_import_file(fname, meta_size)
 
             data = client.download(fid)
+            auto_review = bool(config.get("auto_review", False))
             res = ingest_file_into_job(
                 db,
                 str(job_id),
@@ -1466,6 +1654,7 @@ def _exec_cloud_import(db: Session, config: dict, context: dict, log, provider: 
                 f.get("mimeType"),
                 schema_id=str(schema_id) if schema_id else None,
                 source_file_id=fid,
+                auto_review=auto_review,
             )
             imported.append({"document_id": res["document_id"], "filename": fname, "drive_file_id": fid})
             log(f"นำเข้า '{fname}' → document {res['document_id']}")
@@ -1480,10 +1669,82 @@ def _exec_cloud_import(db: Session, config: dict, context: dict, log, provider: 
             db.rollback()
             failed.append({"filename": fname, "drive_file_id": fid, "error": str(exc)[:500]})
             log(f"ข้าม '{fname}': {exc}")
+
+    wait_for_completion = config.get("wait_for_completion", True)
+    if isinstance(wait_for_completion, str):
+        wait_for_completion = wait_for_completion.lower() not in ("false", "0", "no", "off")
+    else:
+        wait_for_completion = bool(wait_for_completion)
+
+    documents_output: List[Dict[str, Any]] = []
+    records_output: List[Any] = []
+
+    if imported and wait_for_completion:
+        import time
+        doc_ids = [item["document_id"] for item in imported]
+        log(f"กำลังรอประมวลผล OCR & Extraction ให้เสร็จสิ้นสำหรับ {len(doc_ids)} เอกสาร...")
+        start_wait = time.monotonic()
+        timeout_wait = 600  # 10 minutes max wait for batch
+        poll_interval = 2.0
+
+        while time.monotonic() - start_wait < timeout_wait:
+            db.expire_all()
+            in_flight = (
+                db.query(Document.id, Document.status)
+                .filter(Document.id.in_(doc_ids), Document.status.in_(["queued", "processing"]))
+                .all()
+            )
+            if not in_flight:
+                break
+            time.sleep(poll_interval)
+        else:
+            # Loop exhausted the wait budget without a clean break: some documents
+            # are still queued/processing. Surface this explicitly so the operator
+            # knows the batch finished on a timeout, not on completion.
+            db.expire_all()
+            still_pending = (
+                db.query(Document.id, Document.status)
+                .filter(Document.id.in_(doc_ids), Document.status.in_(["queued", "processing"]))
+                .all()
+            )
+            if still_pending:
+                statuses = ", ".join(sorted({s for _, s in still_pending}))
+                log(
+                    f"⚠️ ครบเวลารอ {timeout_wait} วินาที — {len(still_pending)} เอกสารยังประมวลผล "
+                    f"ไม่เสร็จ (สถานะ: {statuses}); จะส่งต่อเฉพาะสถานะปัจจุบันเท่านั้น"
+                )
+
+        # Reload final document states
+        db.expire_all()
+        finished_docs = (
+            db.query(Document)
+            .filter(Document.id.in_(doc_ids))
+            .all()
+        )
+        doc_by_id = {str(d.id): d for d in finished_docs}
+
+        for item in imported:
+            doc = doc_by_id.get(item["document_id"])
+            if doc:
+                data_val = doc.reviewed_data if doc.reviewed_data is not None else doc.extracted_data
+                records_output.append(data_val)
+                documents_output.append({
+                    "id": str(doc.id),
+                    "filename": doc.filename,
+                    "status": doc.status,
+                    "data": data_val,
+                    "ocr_text": doc.ocr_text,
+                    "extraction": _workflow_document_extraction(doc),
+                    "drive_file_id": item.get("drive_file_id"),
+                })
+        log(f"ประมวลผลเสร็จสิ้น {len(documents_output)} เอกสาร")
+
     return {
         "job_id": str(job_id),
         "count": len(imported),
         "imported": imported,
+        "records": records_output,
+        "documents": documents_output,
         "skipped_count": skipped_existing + len(skipped),
         "skipped": skipped,
         "failed_count": len(failed),
@@ -1621,6 +1882,7 @@ EXECUTORS: Dict[str, Callable] = {
     "http_request": _exec_http_request,
     "api": _exec_api,
     "write_output": _exec_write_output,
+    "publish_artifact": _exec_publish_artifact,
     "webhook_response": _exec_webhook_response,
     "gdrive_upload": _exec_gdrive_upload,
     "gdrive_import": _exec_gdrive_import,
@@ -1671,6 +1933,100 @@ def _workflow_owner_id(db: Session, workflow_id) -> Optional[str]:
     except Exception:
         return None
     return str(owner) if owner else None
+
+
+def _upstream_job_ids(
+    node_id: str,
+    edges: List[dict],
+    context: Dict[str, Any],
+    node_status: Optional[Dict[str, str]] = None,
+) -> set[str]:
+    """Find Job ids only in the selected node's upstream graph.
+
+    Agent nodes must not scan the entire execution context: a workflow can have
+    multiple independent Job sources, and choosing an arbitrary one can produce
+    a valid but incorrect report. A set also lets the caller reject ambiguous
+    graphs instead of silently choosing one source.
+    """
+    parents: Dict[str, List[str]] = {}
+    for edge in edges:
+        source = edge.get("source")
+        target = edge.get("target")
+        if source and target:
+            parents.setdefault(target, []).append(source)
+
+    queue = list(parents.get(node_id) or [])
+    visited: set[str] = set()
+    job_ids: set[str] = set()
+    while queue:
+        source = queue.pop(0)
+        if source in visited:
+            continue
+        visited.add(source)
+        if node_status is not None and node_status.get(source) != "succeeded":
+            continue
+        output = context.get(source)
+        if isinstance(output, dict) and output.get("job_id"):
+            job_ids.add(str(output["job_id"]))
+        queue.extend(parents.get(source) or [])
+    return job_ids
+
+
+def _add_inferred_agent_job_id(
+    node: dict,
+    resolved_config: dict,
+    edges: List[dict],
+    context: Dict[str, Any],
+    node_status: Optional[Dict[str, str]] = None,
+) -> dict:
+    if node.get("type") != "llm":
+        return resolved_config
+    if (resolved_config.get("mode") or "llm") != "agent" or resolved_config.get("job_id"):
+        return resolved_config
+    job_ids = _upstream_job_ids(node["id"], edges, context, node_status)
+    if len(job_ids) > 1:
+        raise NodeExecutionError(
+            "Agent node has multiple upstream Job contexts; select Job context explicitly"
+        )
+    if not job_ids:
+        return resolved_config
+    return {**resolved_config, "_inferred_job_id": next(iter(job_ids))}
+
+
+def _add_inferred_publish_artifact_job_id(
+    node: dict,
+    resolved_config: dict,
+    edges: List[dict],
+    context: Dict[str, Any],
+    node_status: Optional[Dict[str, str]] = None,
+) -> dict:
+    if node.get("type") != "publish_artifact" or resolved_config.get("job_id"):
+        return resolved_config
+    job_ids = _upstream_job_ids(node["id"], edges, context, node_status)
+    if len(job_ids) > 1:
+        raise NodeExecutionError(
+            "Publish Artifact has multiple upstream Job contexts; select Job context explicitly"
+        )
+    if not job_ids:
+        return resolved_config
+    return {**resolved_config, "_inferred_job_id": next(iter(job_ids))}
+
+
+def _resolve_node_config(
+    node: dict,
+    raw_config: dict,
+    edges: List[dict],
+    context: Dict[str, Any],
+    node_status: Optional[Dict[str, str]] = None,
+) -> dict:
+    """Resolve templates and infer a single upstream Job in every execution path."""
+    resolved_config = resolve_template(raw_config, context)
+    resolved_config = _add_inferred_agent_job_id(
+        node, resolved_config, edges, context, node_status
+    )
+    return _add_inferred_publish_artifact_job_id(
+        node, resolved_config, edges, context, node_status
+    )
 
 
 def execute_workflow_run(db: Session, run: WorkflowRun) -> None:
@@ -1771,12 +2127,14 @@ def execute_workflow_run(db: Session, run: WorkflowRun) -> None:
         db.commit()
 
         try:
-            resolved_config = resolve_template(raw_config, context)
+            resolved_config = _resolve_node_config(
+                node, raw_config, edges, context, node_status
+            )
             nr.input = _safe_json(redact_secrets(resolved_config))
             executor = EXECUTORS.get(node_type)
             if not executor:
                 raise NodeExecutionError(f"Unknown node type: {node_type}")
-            output = executor(db, resolved_config, context, log)
+            output = executor(db, resolved_config, {**context, "_node_id": node_id}, log)
             context[node_id] = output
             nr.output = _safe_json(redact_secrets(output))
             nr.status = "succeeded"
@@ -1896,12 +2254,14 @@ def execute_single_node(db: Session, run: WorkflowRun, node_id: str) -> None:
 
     error: Optional[str] = None
     try:
-        resolved_config = resolve_template(raw_config, context)
+        resolved_config = _resolve_node_config(
+            node, raw_config, definition.get("edges") or [], context
+        )
         nr.input = _safe_json(redact_secrets(resolved_config))
         executor = EXECUTORS.get(node_type)
         if not executor:
             raise NodeExecutionError(f"Unknown node type: {node_type}")
-        output = executor(db, resolved_config, context, log)
+        output = executor(db, resolved_config, {**context, "_node_id": node_id}, log)
         nr.output = _safe_json(redact_secrets(output))
         nr.status = "succeeded"
     except Exception as exc:  # noqa: BLE001
@@ -1927,5 +2287,22 @@ def _safe_json(value: Any) -> Any:
     except (TypeError, ValueError):
         return {"repr": repr(value)[:2000]}
     if len(text) > 200_000:
+        # Keep verified artifact metadata usable by run downloads even when an
+        # Agent's final narrative has to be truncated for database storage.
+        if isinstance(value, dict):
+            preserved = {
+                key: value[key]
+                for key in (
+                    "status", "job_id", "artifact", "artifacts", "filename",
+                    "path", "storage_key", "mime_type", "size", "verified",
+                    "published", "warnings", "error",
+                )
+                if key in value
+            }
+            return json.loads(json.dumps({
+                "truncated": True,
+                "preview": text[:10_000],
+                **preserved,
+            }, ensure_ascii=False, default=str))
         return {"truncated": True, "preview": text[:10_000]}
     return json.loads(text)

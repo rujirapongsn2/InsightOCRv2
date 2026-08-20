@@ -27,13 +27,14 @@ import {
     ArrowLeft, Save, Play, Loader2, CalendarClock, Trash2, X,
     Zap, FileText, Sparkles, GitBranch, Shuffle, Code2, Globe, FileOutput, Briefcase,
     CheckCircle2, XCircle, CircleDashed, CircleDot, SkipForward, Activity, ChevronDown, ChevronRight,
-    Download, Plus, FlaskConical, Cloud, CloudUpload, CloudDownload, Webhook, Copy, RotateCw, ShieldOff, Maximize2,
+    Download, Plus, FlaskConical, Cloud, CloudUpload, CloudDownload, Webhook, Copy, RotateCw, ShieldOff, Maximize2, Upload,
 } from "lucide-react"
 import {
     Workflow, WorkflowRun, NodeTypeDef, JobSummary,
     getWorkflow, updateWorkflow, runWorkflow, getRun, getWorkflowRuns, getNodeTypes, getJobs, getSchemas, testNode,
-    downloadRunOutput, rotateWorkflowWebhookSecret, disableWorkflowWebhookSecret,
+    downloadRunOutput, downloadRunArtifact, rotateWorkflowWebhookSecret, disableWorkflowWebhookSecret,
     suggestVariables, type VariableCandidate, type VariableSuggestion, type SchemaSummary,
+    getWorkflowAgentSkills, type WorkflowAgentSkill,
 } from "@/lib/workflows-api"
 import { Integration, getActiveIntegrations } from "@/lib/integrations-api"
 import { listAIProviders, type AIProviderSetting } from "@/lib/ai-settings-api"
@@ -65,6 +66,7 @@ const TYPE_ICON: Record<string, any> = {
     http_request: Globe,
     api: Globe,
     write_output: FileOutput,
+    publish_artifact: Upload,
     webhook_response: Webhook,
     gdrive_upload: CloudUpload,
     gdrive_import: CloudDownload,
@@ -73,7 +75,7 @@ const TYPE_ICON: Record<string, any> = {
 }
 
 const STATUS_BORDER: Record<string, string> = {
-    running: "#2786C2",
+    running: "#84CC16",
     succeeded: "#10B981",
     failed: "#EF4444",
     skipped: "#CBD5E1",
@@ -94,11 +96,15 @@ function WfNode({ data, selected }: NodeProps) {
     const isTrigger = d.category === "trigger"
     const isCondition = d.nodeType === "condition"
     const borderColor = d.runStatus ? STATUS_BORDER[d.runStatus] : selected ? "#2786C2" : "#E2E8F0"
+    const isRunning = d.runStatus === "running"
 
     return (
         <div
-            className={`rounded-xl bg-white shadow-sm px-3 py-2.5 min-w-[180px] max-w-[220px] ${d.runStatus === "running" ? "animate-pulse" : ""}`}
-            style={{ border: `2px solid ${borderColor}` }}
+            className="rounded-xl bg-white shadow-sm px-3 py-2.5 min-w-[180px] max-w-[220px]"
+            style={{
+                border: isRunning ? "3px solid #84CC16" : `2px solid ${borderColor}`,
+                animation: isRunning ? "wf-node-run-flash 0.9s ease-in-out infinite" : undefined,
+            }}
         >
             {!isTrigger && <Handle type="target" position={Position.Left} className="!w-2.5 !h-2.5 !bg-[#94A3B8]" />}
             <div className="flex items-center gap-2">
@@ -253,6 +259,16 @@ const NODE_HELP_CONTENT: Record<string, NodeHelpContent> = {
         ],
         example: "ตัวอย่าง: เขียนสรุปเป็น report.md จากผลของ node LLM",
     },
+    publish_artifact: {
+        purpose: "ใช้เผยแพร่ไฟล์ที่ Agent สร้างให้เป็นผลลัพธ์ของ Workflow run เพื่อดาวน์โหลดและตรวจสอบย้อนหลังได้",
+        steps: [
+            "เชื่อมจาก Agent แล้วเลือก {{agent.artifacts.0.path}} เป็นไฟล์จาก Agent",
+            "เว้น Job context เพื่อใช้ Job เดียวจากโหนดก่อนหน้า หรือเลือก Job เมื่อ workflow มีหลายแหล่งข้อมูล",
+            "ตั้งชื่อใหม่เฉพาะเมื่ออยากให้ชื่อไฟล์ที่ดาวน์โหลดต่างจากไฟล์ต้นทาง",
+        ],
+        example: "ตัวอย่าง: Agent สร้าง outputs/report-contract.docx → Publish Artifact → ดาวน์โหลดจาก Activity",
+        caution: "หากเผยแพร่ไม่สำเร็จ Workflow จะล้มเหลว เพื่อไม่ให้รายงานที่ขาดหายถูกมองว่าสมบูรณ์",
+    },
     webhook_response: {
         purpose: "ใช้กำหนดข้อมูลที่ระบบภายนอกจะอ่านได้เมื่อเรียก Workflow ผ่าน Webhook",
         steps: [
@@ -305,6 +321,8 @@ const FIELD_HELP: Record<string, string> = {
     "document_source.job_id": "เลือก Job ที่เป็นแหล่งเอกสารสำหรับส่งต่อไปยัง node ถัดไป",
     "gdrive_import.job_id": "เลือก Job ปลายทางสำหรับเก็บไฟล์ที่นำเข้าจาก Google Drive",
     "onedrive_import.job_id": "เลือก Job ปลายทางสำหรับเก็บไฟล์ที่นำเข้าจาก OneDrive",
+    auto_review: "เมื่อเปิดใช้งาน: หลัง OCR และสกัดข้อมูลเสร็จ เอกสารจะถูก Review ยืนยันข้อมูลอัตโนมัติ (สถานะเป็น reviewed)",
+    wait_for_completion: "เปิดใช้งาน (ค่าเริ่มต้น): โหนดจะรอให้ OCR & Extraction ทุกเอกสารเสร็จสมบูรณ์ก่อนส่งผลลัพธ์ไปยังโหนดถัดไป; หากปิด: นำเข้าไฟล์แล้วส่งต่อทันที",
     data_source: "reviewed เหมาะกับข้อมูลที่ตรวจแล้ว, extracted คือผลสกัดล่าสุด, ocr_text คือข้อความเอกสารดิบ",
     status: "เลือก reviewed หรือ extraction_completed เพื่อกรองเพิ่ม; เว้นว่างเมื่อไม่ต้องการจำกัดสถานะ",
     only_completed: "เปิดไว้เพื่อไม่ให้ส่งเอกสารที่ยังประมวลผลไม่เสร็จเข้า workflow",
@@ -338,7 +356,7 @@ const FIELD_HELP: Record<string, string> = {
     condition_right: "ค่าที่ใช้เทียบกับเงื่อนไข response",
     integration_id: "เลือกบัญชีที่สร้างไว้ในเมนู Integration; ต้องเป็นชนิดเดียวกับ node ที่ใช้",
     folder_id: "ระบุโฟลเดอร์ต้นทางหรือปลายทางตามระบบ storage ที่เลือก และตรวจสิทธิ์ของบัญชี",
-    schema_id: "เว้นว่างเพื่อใช้ Schema ของ Job หรือเลือก Schema เพื่อกำหนดให้ไฟล์ที่นำเข้า",
+    schema_id: "เลือก Auto เพื่อใช้ตาม Job/สกัดอัตโนมัติ หรือเลือก Schema เฉพาะสำหรับเอกสารที่นำเข้า",
     name_filter: "ใส่คำหรือนามสกุลไฟล์ เช่น .pdf; เว้นว่างเมื่อต้องการรับทุกไฟล์",
     mime_type: "ระบุ MIME type ให้ตรงกับไฟล์ เช่น application/json หรือ text/csv",
 }
@@ -545,10 +563,16 @@ function JsonTree({ data, depth = 0 }: { data: any; depth?: number }) {
 function NodeRunRow({ nr, runId }: { nr: WorkflowRun["node_runs"][0]; runId: string }) {
     const [open, setOpen] = useState(false)
     const [downloading, setDownloading] = useState(false)
+    const [downloadingArtifactIndex, setDownloadingArtifactIndex] = useState<number | null>(null)
     const [downloadError, setDownloadError] = useState<string | null>(null)
     const [expandOutput, setExpandOutput] = useState(false)
     const Icon = RUN_STATUS_ICON[nr.status] || CircleDashed
     const outputFile = nr.node_type === "write_output" && nr.output?.filename ? nr.output.filename : null
+    const artifacts = Array.isArray(nr.output?.artifacts)
+        ? nr.output.artifacts.filter((artifact: unknown) => artifact && typeof artifact === "object")
+        : nr.output?.artifact && typeof nr.output.artifact === "object"
+            ? [nr.output.artifact]
+            : []
 
     const handleDownload = async () => {
         if (!outputFile) return
@@ -562,6 +586,24 @@ function NodeRunRow({ nr, runId }: { nr: WorkflowRun["node_runs"][0]; runId: str
             setDownloadError(e.message || "ดาวน์โหลดไม่สำเร็จ")
         } finally {
             setDownloading(false)
+        }
+    }
+
+    const handleArtifactDownload = async (artifactIndex: number, artifact: any) => {
+        const filename = String(artifact?.filename || artifact?.path || "download")
+            .replace(/\\/g, "/")
+            .split("/")
+            .pop() || "download"
+        const token = typeof window !== "undefined" ? localStorage.getItem("token") : null
+        if (!token) { setDownloadError("กรุณาเข้าสู่ระบบใหม่"); return }
+        try {
+            setDownloadingArtifactIndex(artifactIndex)
+            setDownloadError(null)
+            await downloadRunArtifact(token, runId, nr.id, artifactIndex, filename)
+        } catch (e: any) {
+            setDownloadError(e.message || "ดาวน์โหลดไม่สำเร็จ")
+        } finally {
+            setDownloadingArtifactIndex(null)
         }
     }
 
@@ -625,6 +667,33 @@ function NodeRunRow({ nr, runId }: { nr: WorkflowRun["node_runs"][0]; runId: str
                                     ดาวน์โหลด {outputFile}
                                 </button>
                                 {downloadError && <p className="text-[10px] text-red-600 mt-1">{downloadError}</p>}
+                            </div>
+                        )}
+                        {artifacts.length > 0 && (
+                            <div className="space-y-1.5">
+                                <span className="text-[9px] uppercase tracking-wide text-[#94A3B8] font-semibold">Files</span>
+                                {artifacts.map((artifact: any, artifactIndex: number) => {
+                                    const filename = String(artifact?.filename || artifact?.path || "download")
+                                        .replace(/\\/g, "/")
+                                        .split("/")
+                                        .pop() || "download"
+                                    const isDownloading = downloadingArtifactIndex === artifactIndex
+                                    return (
+                                        <button
+                                            key={`${artifactIndex}-${filename}`}
+                                            type="button"
+                                            onClick={() => handleArtifactDownload(artifactIndex, artifact)}
+                                            disabled={isDownloading}
+                                            title={`ดาวน์โหลด ${filename}`}
+                                            className="flex w-full items-center gap-2 rounded-md border border-[#E2E8F0] bg-white px-2 py-1.5 text-left text-xs text-[#2786C2] hover:bg-[#F8F9FA] disabled:opacity-50"
+                                        >
+                                            {isDownloading ? <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0" /> : <Download className="h-3.5 w-3.5 shrink-0" />}
+                                            <span className="min-w-0 flex-1 truncate">{filename}</span>
+                                            {artifact?.type && <span className="shrink-0 text-[9px] uppercase text-[#94A3B8]">{artifact.type}</span>}
+                                        </button>
+                                    )
+                                })}
+                                {downloadError && <p className="text-[10px] text-red-600">{downloadError}</p>}
                             </div>
                         )}
                     </div>
@@ -997,11 +1066,73 @@ function InsertVariableButton({ upstream, onInsert }: { upstream: UpstreamNode[]
 
 // ── Config panel field renderer ──────────────────────────────────────
 function ConfigField({
-    field, value, onChange, jobs, schemas, upstream, integrations, aiProviders,
-}: { field: NodeTypeDef["config_fields"][0]; value: any; onChange: (v: any) => void; jobs: JobSummary[]; schemas: SchemaSummary[]; upstream: UpstreamNode[]; integrations: Integration[]; aiProviders: AIProviderSetting[] }) {
+    field, value, onChange, jobs, schemas, upstream, integrations, aiProviders, agentSkills,
+    agentSkillsLoading, agentSkillsError, onRetryAgentSkills,
+}: { field: NodeTypeDef["config_fields"][0]; value: any; onChange: (v: any) => void; jobs: JobSummary[]; schemas: SchemaSummary[]; upstream: UpstreamNode[]; integrations: Integration[]; aiProviders: AIProviderSetting[]; agentSkills: WorkflowAgentSkill[]; agentSkillsLoading: boolean; agentSkillsError: string | null; onRetryAgentSkills: () => void }) {
     const base = "w-full border border-[#E2E8F0] rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-[#2786C2]/30"
     const inputRef = useRef<HTMLInputElement | HTMLTextAreaElement | null>(null)
     const supportsTemplate = ["text", "textarea", "code"].includes(field.type)
+
+    if (field.type === "segmented") {
+        return (
+            <div className="grid grid-cols-2 gap-1 rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] p-1" role="radiogroup" aria-label={field.label}>
+                {(field.options || []).map((option) => {
+                    const active = (value ?? field.default) === option
+                    return (
+                        <button
+                            key={option}
+                            type="button"
+                            role="radio"
+                            aria-checked={active}
+                            onClick={() => onChange(option)}
+                            className={`rounded-md px-3 py-1.5 text-xs font-semibold transition-colors ${active ? "bg-white text-[#2786C2] shadow-sm" : "text-[#64748B] hover:text-[#0D1B2A]"}`}
+                        >
+                            {field.option_labels?.[option] || option}
+                        </button>
+                    )
+                })}
+            </div>
+        )
+    }
+
+    if (field.type === "skill_multi_select") {
+        const selected = new Set(Array.isArray(value) ? value : [])
+        if (agentSkillsLoading) {
+            return <p className="rounded-lg border border-[#E2E8F0] px-3 py-2 text-[10px] text-[#64748B]">กำลังโหลด Skills...</p>
+        }
+        if (agentSkillsError) {
+            return (
+                <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[10px] text-red-600">
+                    <p>โหลด Skills ไม่สำเร็จ</p>
+                    <button type="button" onClick={onRetryAgentSkills} className="mt-1 font-semibold underline">ลองใหม่</button>
+                </div>
+            )
+        }
+        return (
+            <div className="max-h-56 space-y-1 overflow-y-auto rounded-lg border border-[#E2E8F0] bg-white p-1.5">
+                {agentSkills.map((skill) => (
+                    <label key={skill.id} className="flex cursor-pointer items-start gap-2 rounded-md px-2 py-2 hover:bg-[#F8FAFC]">
+                        <input
+                            type="checkbox"
+                            className="mt-0.5"
+                            checked={selected.has(skill.id)}
+                            onChange={(event) => {
+                                const next = new Set(selected)
+                                if (event.target.checked) next.add(skill.id)
+                                else next.delete(skill.id)
+                                onChange(Array.from(next))
+                            }}
+                        />
+                        <span className="min-w-0">
+                            <span className="block text-xs font-semibold text-[#0D1B2A]">{skill.name}</span>
+                            <span className="mt-0.5 block text-[10px] leading-snug text-[#64748B] line-clamp-2">{skill.description}</span>
+                        </span>
+                    </label>
+                ))}
+                {agentSkills.length === 0 && <p className="px-2 py-3 text-[10px] text-amber-600">ยังไม่มี Skill ที่ใช้งานได้</p>}
+            </div>
+        )
+    }
 
     /** แทรก token ที่ตำแหน่ง caret ของช่องนี้ */
     const insertToken = (token: string) => {
@@ -1085,16 +1216,21 @@ function ConfigField({
         )
     }
     if (field.type === "schema_select") {
-        const known = schemas.some((s) => s.id === value)
+        const normalizedValue = (!value || value === "auto") ? "" : value
+        const known = !normalizedValue || schemas.some((s) => s.id === normalizedValue)
         return (
-            <select className={base} value={value ?? ""} onChange={(e) => onChange(e.target.value)}>
-                <option value="">ใช้ Schema ของ Job</option>
+            <select
+                className={base}
+                value={normalizedValue}
+                onChange={(e) => onChange(e.target.value ? e.target.value : null)}
+            >
+                <option value="">Auto (default)</option>
                 {schemas.map((s) => (
                     <option key={s.id} value={s.id}>
                         {s.name}{s.document_type ? ` · ${s.document_type}` : ""}
                     </option>
                 ))}
-                {value && !known && <option value={value}>{`${value} (ไม่พบในรายการ)`}</option>}
+                {normalizedValue && !known && <option value={normalizedValue}>{`${normalizedValue} (ไม่พบในรายการ)`}</option>}
             </select>
         )
     }
@@ -1109,7 +1245,7 @@ function ConfigField({
     if (field.type === "select") {
         return (
             <select className={base} value={value ?? field.default ?? ""} onChange={(e) => onChange(e.target.value)}>
-                {(field.options || []).map((o) => <option key={o} value={o}>{o || "(any)"}</option>)}
+                {(field.options || []).map((o) => <option key={o} value={o}>{field.option_labels?.[o] || o || "(any)"}</option>)}
             </select>
         )
     }
@@ -1353,6 +1489,9 @@ function Builder() {
     const [schemas, setSchemas] = useState<SchemaSummary[]>([])
     const [integrations, setIntegrations] = useState<Integration[]>([])
     const [aiProviders, setAiProviders] = useState<AIProviderSetting[]>([])
+    const [agentSkills, setAgentSkills] = useState<WorkflowAgentSkill[]>([])
+    const [agentSkillsLoading, setAgentSkillsLoading] = useState(false)
+    const [agentSkillsError, setAgentSkillsError] = useState<string | null>(null)
     const [nodes, setNodes, onNodesChange] = useNodesState<Node>([])
     const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([])
     const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -1375,6 +1514,20 @@ function Builder() {
     const [nodeOutputs, setNodeOutputs] = useState<Record<string, any>>({})
     const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
+    const loadAgentSkills = useCallback(async () => {
+        if (!token) return
+        setAgentSkillsLoading(true)
+        setAgentSkillsError(null)
+        try {
+            setAgentSkills(await getWorkflowAgentSkills(token))
+        } catch (error: any) {
+            setAgentSkills([])
+            setAgentSkillsError(error?.message || "Unable to load Skills")
+        } finally {
+            setAgentSkillsLoading(false)
+        }
+    }, [token])
+
     // ── Load workflow + node catalog ──
     useEffect(() => {
         if (!token) return
@@ -1392,10 +1545,11 @@ function Builder() {
         getSchemas(token).then(setSchemas).catch(() => { /* select shows the fallback option */ })
         getActiveIntegrations(token).then(setIntegrations).catch(() => { /* select shows empty hint */ })
         listAIProviders(token).then(setAiProviders).catch(() => { /* select shows empty hint */ })
+        loadAgentSkills()
         loadLatestOutputs()
         return () => { if (pollRef.current) clearInterval(pollRef.current) }
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [token, workflowId])
+    }, [token, workflowId, loadAgentSkills])
 
     // ── Run polling ──
     const applyRunToCanvas = useCallback((run: WorkflowRun | null) => {
@@ -1552,6 +1706,16 @@ function Builder() {
     const selectedNode = nodes.find((n) => n.id === selectedId) || null
     const selectedDef = selectedNode ? nodeDefs.find((d) => d.type === (selectedNode.data as WfNodeData).nodeType) : null
     const selectedNodeType = selectedNode ? (selectedNode.data as WfNodeData).nodeType : null
+    const selectedConfig = selectedNode ? (selectedNode.data as WfNodeData).config || {} : {}
+    const visibleConfigFields = selectedDef?.config_fields.filter((field) => {
+        if (!field.visible_when) return true
+        const actual = selectedConfig[field.visible_when.field] ?? (
+            field.visible_when.field === "mode" ? "llm" : undefined
+        )
+        return actual === field.visible_when.equals
+    }) || []
+    const primaryConfigFields = visibleConfigFields.filter((field) => !field.advanced)
+    const advancedConfigFields = visibleConfigFields.filter((field) => field.advanced)
     const selectedHelp = selectedNodeType
         ? NODE_HELP_CONTENT[selectedNodeType] || {
             purpose: selectedDef?.description || "ตั้งค่าข้อมูลของ node นี้แล้วส่งต่อให้ node ถัดไป",
@@ -1957,11 +2121,11 @@ function Builder() {
 
                         {selectedNodeType !== "trigger_schedule" && (
                         <div className="space-y-3">
-                            {selectedDef.config_fields.map((f) => (
+                            {primaryConfigFields.map((f) => (
                                 <div key={f.name}>
                                     {f.type !== "boolean" && (
                                         <label className="block text-[10px] uppercase tracking-wide text-[#94A3B8] font-semibold mb-1">
-                                            {f.label}{f.required ? " *" : ""}
+                                            {f.label}{f.required || (f.name === "skill_ids" && selectedConfig.mode === "agent") ? " *" : ""}
                                         </label>
                                     )}
                                     <ConfigField
@@ -1973,10 +2137,41 @@ function Builder() {
                                         upstream={upstreamVars}
                                         integrations={integrations}
                                         aiProviders={aiProviders}
+                                        agentSkills={agentSkills}
+                                        agentSkillsLoading={agentSkillsLoading}
+                                        agentSkillsError={agentSkillsError}
+                                        onRetryAgentSkills={loadAgentSkills}
                                     />
                                     {f.hint && <p className="text-[10px] text-[#94A3B8] mt-1 leading-snug">{f.hint}</p>}
                                 </div>
                             ))}
+                            {advancedConfigFields.length > 0 && (
+                                <details className="rounded-lg border border-[#E2E8F0] bg-[#F8FAFC]">
+                                    <summary className="cursor-pointer px-3 py-2 text-xs font-semibold text-[#475569]">Advanced</summary>
+                                    <div className="space-y-3 border-t border-[#E2E8F0] p-3">
+                                        {advancedConfigFields.map((f) => (
+                                            <div key={f.name}>
+                                                <label className="mb-1 block text-[10px] font-semibold uppercase text-[#94A3B8]">{f.label}</label>
+                                                <ConfigField
+                                                    field={f}
+                                                    value={selectedConfig[f.name]}
+                                                    onChange={(v) => updateSelectedConfig(f.name, v)}
+                                                    jobs={jobs}
+                                                    schemas={schemas}
+                                                    upstream={upstreamVars}
+                                                    integrations={integrations}
+                                                    aiProviders={aiProviders}
+                                                    agentSkills={agentSkills}
+                                                    agentSkillsLoading={agentSkillsLoading}
+                                                    agentSkillsError={agentSkillsError}
+                                                    onRetryAgentSkills={loadAgentSkills}
+                                                />
+                                                {f.hint && <p className="mt-1 text-[10px] leading-snug text-[#94A3B8]">{f.hint}</p>}
+                                            </div>
+                                        ))}
+                                    </div>
+                                </details>
+                            )}
                         </div>
                         )}
 
@@ -2000,11 +2195,11 @@ function Builder() {
                                             <p className="mt-0.5">{selectedHelp.purpose}</p>
                                         </section>
 
-                                        {selectedDef.config_fields.length > 0 && selectedNodeType && (
+                                        {visibleConfigFields.length > 0 && selectedNodeType && (
                                             <section>
                                                 <p className="font-semibold text-[#0D1B2A]">ตั้งค่าฟอร์ม</p>
                                                 <ol className="mt-1 space-y-1 list-decimal list-outside pl-4">
-                                                    {selectedDef.config_fields.map((field) => (
+                                                    {visibleConfigFields.map((field) => (
                                                         <li key={field.name}>
                                                             <span className="font-medium text-[#0D1B2A]">{field.label}{field.required ? " *" : ""}</span>
                                                             {": "}{getFieldHelp(selectedNodeType, field)}

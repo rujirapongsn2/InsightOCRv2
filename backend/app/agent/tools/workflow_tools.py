@@ -277,6 +277,7 @@ async def _save_workflow_handler(args: dict, context) -> dict:
         definition,
         owner,
         allow_unresolved_references=False,
+        refresh_skill_fingerprints=True,
     )
     errors = [i for i in issues if i["level"] == "error"]
     if errors:

@@ -18,6 +18,9 @@ class _FakeQuery:
     def first(self):
         return None  # every referenced id "not found" → warning-level
 
+    def all(self):
+        return []
+
 
 class _FakeSession:
     def query(self, *a, **k):
@@ -70,6 +73,45 @@ def test_missing_required_config_errors():
                   "edges": [{"id": "e", "source": "t1", "target": "l1"}]}
     issues = validate_workflow_definition(_FakeSession(), definition, _User())
     assert any(i["node_id"] == "l1" and i["field"] == "prompt" and i["level"] == "error" for i in issues)
+
+
+def test_agent_mode_requires_skill_and_bounded_runtime():
+    definition = {
+        "nodes": [
+            _node("t1", "trigger_manual"),
+            _node("a1", "llm", {
+                "mode": "agent",
+                "prompt": "Create a report",
+                "skill_ids": [],
+                "max_iterations": 30,
+                "timeout_seconds": 30,
+            }),
+        ],
+        "edges": [{"id": "e", "source": "t1", "target": "a1"}],
+    }
+    issues = validate_workflow_definition(_FakeSession(), definition, _User())
+
+    fields = {issue["field"] for issue in issues if issue["level"] == "error"}
+    assert {"skill_ids", "max_iterations", "timeout_seconds"} <= fields
+
+
+def test_file_agent_requires_job_context_or_an_upstream_job_node():
+    definition = {
+        "nodes": [
+            _node("t1", "trigger_manual"),
+            _node("a1", "llm", {
+                "mode": "agent",
+                "prompt": "Create a report",
+                "skill_ids": [],
+                "output_format": "docx",
+            }),
+        ],
+        "edges": [{"id": "e", "source": "t1", "target": "a1"}],
+    }
+
+    issues = validate_workflow_definition(_FakeSession(), definition, _User())
+
+    assert any(issue["node_id"] == "a1" and issue["field"] == "job_id" for issue in issues)
 
 
 def test_api_node_requires_a_saved_custom_api_connection():

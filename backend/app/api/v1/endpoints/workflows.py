@@ -1,17 +1,21 @@
 import os
+from mimetypes import guess_type
+from pathlib import PurePosixPath
 from datetime import datetime, timezone
 from typing import Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import Response
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session, selectinload
 
 from app.api import deps
+from app.api.permissions import can_access_job
 from app.core import security
 from app.core.config import settings
 from app.models.user import User
-from app.models.workflow import Workflow, WorkflowRun
+from app.models.job import Job
+from app.models.workflow import Workflow, WorkflowRun, WorkflowNodeRun
 from app.schemas.workflow import (
     WorkflowCreate,
     WorkflowUpdate,
@@ -31,6 +35,7 @@ from app.services.workflow_validation import validate_workflow_definition
 from app.services.storage import get_storage_service
 from app.services.workflow_engine import (
     NODE_TYPES,
+    MAX_WORKFLOW_ARTIFACT_BYTES,
     WORKFLOW_OUTPUT_DIR,
     NodeExecutionError,
     suggest_variables,
@@ -60,7 +65,13 @@ def _validate_cron(expr: Optional[str]) -> None:
         raise HTTPException(status_code=422, detail=f"Invalid cron expression: {expr}")
 
 
-def _ensure_runnable_definition(db: Session, definition: dict, user: User) -> None:
+def _ensure_runnable_definition(
+    db: Session,
+    definition: dict,
+    user: User,
+    *,
+    refresh_skill_fingerprints: bool = False,
+) -> None:
     # The builder creates an empty draft before the first node is placed.
     # Keep that editing flow available; run/activate still validates the graph.
     if not (definition or {}).get("nodes"):
@@ -70,6 +81,7 @@ def _ensure_runnable_definition(db: Session, definition: dict, user: User) -> No
         definition,
         user,
         allow_unresolved_references=False,
+        refresh_skill_fingerprints=refresh_skill_fingerprints,
     )
     errors = [issue for issue in issues if issue["level"] == "error"]
     if errors:
@@ -85,6 +97,97 @@ def _ensure_runnable_definition(db: Session, definition: dict, user: User) -> No
 def _webhook_url(request: Request, workflow_id: UUID, secret: str) -> str:
     base_url = str(request.base_url).rstrip("/")
     return f"{base_url}{settings.API_V1_STR}/external/workflows/{workflow_id}/webhook/{secret}"
+
+
+def _download_storage_file(
+    storage_key: str,
+    filename: str,
+    mime_type: Optional[str] = None,
+) -> StreamingResponse:
+    """Stream one already-authorized storage object as a browser download."""
+    storage = get_storage_service()
+    if not storage.exists(storage_key):
+        raise HTTPException(status_code=404, detail="Output file not found")
+    with storage.get_local_path(storage_key) as local_path:
+        size = os.path.getsize(local_path)
+    if size > MAX_WORKFLOW_ARTIFACT_BYTES:
+        raise HTTPException(status_code=413, detail="Output file exceeds the 50 MB download limit")
+
+    # HTTP headers are latin-1 only, so a non-ASCII (e.g. Thai) filename must use
+    # RFC 5987 `filename*=UTF-8''…`, with an ASCII fallback for old clients.
+    from urllib.parse import quote
+    safe_name = os.path.basename(filename)
+    ascii_fallback = safe_name.encode("ascii", "ignore").decode() or "download"
+    if ascii_fallback.startswith("."):
+        ascii_fallback = "download" + ascii_fallback
+    disposition = (
+        f"attachment; filename=\"{ascii_fallback}\"; "
+        f"filename*=UTF-8''{quote(safe_name)}"
+    )
+    def file_chunks():
+        # Reopen the storage context inside the iterator so temporary paths
+        # returned by remote storage stay alive through the response stream.
+        with storage.get_local_path(storage_key) as local_path:
+            with open(local_path, "rb") as output_file:
+                while chunk := output_file.read(1024 * 1024):
+                    yield chunk
+
+    return StreamingResponse(
+        file_chunks(),
+        media_type=mime_type or guess_type(safe_name)[0] or "application/octet-stream",
+        headers={"Content-Disposition": disposition, "Content-Length": str(size)},
+    )
+
+
+def _job_artifact_key(job_id: UUID, path: str) -> str:
+    """Resolve a path recorded by a verified Agent artifact without traversal."""
+    clean_path = str(path or "").strip().replace("\\", "/").lstrip("/")
+    current_prefix = f"jobs/{job_id}/"
+    if clean_path.startswith(current_prefix):
+        clean_path = clean_path[len(current_prefix):]
+    elif clean_path.startswith("jobs/"):
+        raise HTTPException(status_code=400, detail="Artifact path references another Job")
+
+    parts = PurePosixPath(clean_path).parts
+    if not parts or parts[0] != "outputs" or len(parts) < 2 or ".." in parts:
+        raise HTTPException(status_code=400, detail="Artifact path is invalid")
+    return f"jobs/{job_id}/{clean_path}"
+
+
+def _upstream_job_id_from_definition(run: WorkflowRun, node_id: str) -> Optional[str]:
+    """Recover a single Job context from an older node-test run snapshot.
+
+    Earlier Agent runs did not persist the inferred Job id on the node output.
+    Their immutable workflow snapshot still records the upstream Jobs or
+    Document Source node, which is enough to recover an unambiguous context.
+    """
+    definition = run.definition_snapshot if isinstance(run.definition_snapshot, dict) else {}
+    nodes = definition.get("nodes") or []
+    edges = definition.get("edges") or []
+    parents: dict[str, list[str]] = {}
+    node_by_id = {str(node.get("id")): node for node in nodes if node.get("id")}
+    for edge in edges:
+        source = edge.get("source")
+        target = edge.get("target")
+        if source and target:
+            parents.setdefault(str(target), []).append(str(source))
+
+    job_ids: set[str] = set()
+    visited: set[str] = set()
+    queue = list(parents.get(node_id) or [])
+    while queue:
+        source_id = queue.pop(0)
+        if source_id in visited:
+            continue
+        visited.add(source_id)
+        node = node_by_id.get(source_id) or {}
+        config = (node.get("data") or {}).get("config") or {}
+        job_id = config.get("job_id")
+        if job_id:
+            job_ids.add(str(job_id))
+        queue.extend(parents.get(source_id) or [])
+
+    return next(iter(job_ids)) if len(job_ids) == 1 else None
 
 
 @router.get("/node-types")
@@ -161,7 +264,9 @@ def import_workflow(
     required config is absent is returned as a warning for the user to fix
     manually in the builder."""
     definition = payload.definition or {"nodes": [], "edges": []}
-    issues = validate_workflow_definition(db, definition, current_user)
+    issues = validate_workflow_definition(
+        db, definition, current_user, refresh_skill_fingerprints=True
+    )
     _validate_cron(payload.schedule_cron)
     wf = Workflow(
         name=payload.name,
@@ -186,7 +291,9 @@ def create_workflow(
 ):
     _validate_cron(payload.schedule_cron)
     definition = payload.definition.model_dump() if payload.definition else {"nodes": [], "edges": []}
-    _ensure_runnable_definition(db, definition, current_user)
+    _ensure_runnable_definition(
+        db, definition, current_user, refresh_skill_fingerprints=True
+    )
     wf = Workflow(
         name=payload.name,
         description=payload.description,
@@ -228,7 +335,12 @@ def update_workflow(
     if "definition" in data and data["definition"] is not None:
         data["definition"] = payload.definition.model_dump()
     if "definition" in data or data.get("is_active"):
-        _ensure_runnable_definition(db, data.get("definition") or wf.definition or {}, current_user)
+        _ensure_runnable_definition(
+            db,
+            data.get("definition") or wf.definition or {},
+            current_user,
+            refresh_skill_fingerprints=True,
+        )
     for key, value in data.items():
         setattr(wf, key, value)
 
@@ -422,23 +534,77 @@ def download_run_output(
 
     safe_name = os.path.basename(filename)
     storage_key = f"{WORKFLOW_OUTPUT_DIR}/{run_id}/{safe_name}"
-    storage = get_storage_service()
-    if not storage.exists(storage_key):
-        raise HTTPException(status_code=404, detail="Output file not found")
-    with storage.get_local_path(storage_key) as local_path:
-        data = open(local_path, "rb").read()
-    # HTTP headers are latin-1 only, so a non-ASCII (e.g. Thai) filename must use
-    # RFC 5987 `filename*=UTF-8''…`, with an ASCII fallback for old clients.
-    from urllib.parse import quote
-    ascii_fallback = safe_name.encode("ascii", "ignore").decode() or "download"
-    if ascii_fallback.startswith("."):  # Thai name reduced to just its extension
-        ascii_fallback = "download" + ascii_fallback
-    disposition = (
-        f"attachment; filename=\"{ascii_fallback}\"; "
-        f"filename*=UTF-8''{quote(safe_name)}"
+    return _download_storage_file(storage_key, safe_name)
+
+
+@router.get("/runs/{run_id}/artifacts/{node_run_id}/{artifact_index}")
+def download_run_artifact(
+    run_id: UUID,
+    node_run_id: UUID,
+    artifact_index: int,
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_active_user),
+):
+    """Download a verified artifact produced by any node in an authorized run.
+
+    Agent artifacts remain owned by their Job until a Publish Artifact node copies
+    them into the Workflow-run namespace. This route understands both scopes and
+    only resolves metadata persisted on the node run, never a client supplied
+    storage path.
+    """
+    if artifact_index < 0:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+    run = db.query(WorkflowRun).filter(WorkflowRun.id == run_id).first()
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    _get_workflow_or_404(db, run.workflow_id, current_user)
+
+    node_run = (
+        db.query(WorkflowNodeRun)
+        .filter(WorkflowNodeRun.id == node_run_id, WorkflowNodeRun.run_id == run.id)
+        .first()
     )
-    return Response(
-        content=data,
-        media_type="application/octet-stream",
-        headers={"Content-Disposition": disposition},
+    if not node_run:
+        raise HTTPException(status_code=404, detail="Node run not found")
+
+    output = node_run.output if isinstance(node_run.output, dict) else {}
+    artifacts = output.get("artifacts") or []
+    if not isinstance(artifacts, list) or artifact_index >= len(artifacts):
+        raise HTTPException(status_code=404, detail="Artifact not found")
+    artifact = artifacts[artifact_index]
+    if not isinstance(artifact, dict) or artifact.get("verified") is not True:
+        raise HTTPException(status_code=404, detail="Verified artifact not found")
+
+    filename = os.path.basename(str(artifact.get("filename") or artifact.get("path") or "download"))
+    if not filename:
+        raise HTTPException(status_code=400, detail="Artifact filename is invalid")
+    storage_key = artifact.get("storage_key")
+    if storage_key:
+        expected_prefix = f"{WORKFLOW_OUTPUT_DIR}/{run.id}/"
+        key_parts = PurePosixPath(str(storage_key)).parts
+        if (
+            not isinstance(storage_key, str)
+            or not storage_key.startswith(expected_prefix)
+            or ".." in key_parts
+        ):
+            raise HTTPException(status_code=400, detail="Artifact storage path is invalid")
+        return _download_storage_file(storage_key, filename, artifact.get("mime_type"))
+
+    node_input = node_run.input if isinstance(node_run.input, dict) else {}
+    job_id = (
+        artifact.get("job_id")
+        or output.get("job_id")
+        or node_input.get("job_id")
+        or node_input.get("_inferred_job_id")
+        or _upstream_job_id_from_definition(run, node_run.node_id)
     )
+    try:
+        job_uuid = UUID(str(job_id))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=404, detail="Artifact Job context is unavailable")
+    job = db.query(Job).filter(Job.id == job_uuid).first()
+    if not job or not can_access_job(current_user, job):
+        raise HTTPException(status_code=404, detail="Artifact source is unavailable")
+
+    storage_key = _job_artifact_key(job_uuid, str(artifact.get("path") or ""))
+    return _download_storage_file(storage_key, filename, artifact.get("mime_type"))
