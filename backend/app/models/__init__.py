@@ -1,4 +1,5 @@
 from .user import User
+from .group import Group
 from .job import Job
 from .document import Document
 from .schema import DocumentSchema

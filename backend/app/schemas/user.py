@@ -1,6 +1,9 @@
-from typing import Optional
+from typing import Optional, List
 from pydantic import BaseModel, EmailStr
 from uuid import UUID
+
+from app.schemas.group import GroupOut
+
 
 class UserBase(BaseModel):
     email: Optional[EmailStr] = None
@@ -8,29 +11,38 @@ class UserBase(BaseModel):
     is_superuser: bool = False
     full_name: Optional[str] = None
     role: Optional[str] = "user"
+    group_ids: Optional[List[UUID]] = None
+
 
 class UserCreate(UserBase):
     email: EmailStr
     password: str
 
+
 class UserUpdate(UserBase):
     password: Optional[str] = None
+
 
 class UserSelfUpdate(BaseModel):
     full_name: Optional[str] = None
     password: Optional[str] = None
 
+
 class UserInDBBase(UserBase):
     id: Optional[UUID] = None
+    groups: List[GroupOut] = []
 
     class Config:
         from_attributes = True
 
+
 class User(UserInDBBase):
     pass
 
+
 class UserInDB(UserInDBBase):
     hashed_password: str
+
 
 class Token(BaseModel):
     access_token: str
@@ -40,6 +52,7 @@ class Token(BaseModel):
 
 class RefreshTokenRequest(BaseModel):
     refresh_token: str
+
 
 class TokenPayload(BaseModel):
     sub: Optional[str] = None

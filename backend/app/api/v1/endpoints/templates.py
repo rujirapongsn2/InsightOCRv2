@@ -12,6 +12,7 @@ from app.schemas.template import (
     SchemaTemplateList
 )
 from app.models.user import User
+from app.api.permissions import can_manage_group_resource
 
 router = APIRouter()
 
@@ -169,14 +170,14 @@ def update_template(
 
     # Permission check
     if not is_admin:
-        # Managers can only edit templates they created (non-system)
+        # Managers can edit templates they created (non-system) or those of same-group users
         if normalized == "manager":
             if template.is_system_template:
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="Cannot edit system templates."
                 )
-            if template.created_by != current_user.id:
+            if template.created_by != current_user.id and not can_manage_group_resource(current_user, template.creator):
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="Can only edit templates you created."
@@ -227,14 +228,14 @@ def delete_template(
 
     # Permission check
     if not is_admin:
-        # Managers can only delete templates they created (non-system)
+        # Managers can delete templates they created (non-system) or those of same-group users
         if normalized == "manager":
             if template.is_system_template:
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="Cannot delete system templates."
                 )
-            if template.created_by != current_user.id:
+            if template.created_by != current_user.id and not can_manage_group_resource(current_user, template.creator):
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="Can only delete templates you created."

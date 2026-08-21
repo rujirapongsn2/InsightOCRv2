@@ -9,6 +9,7 @@ from app.api.v1.endpoints import (
     dashboard,
     documents,
     external,
+    groups,
     integrations,
     jobs,
     mcp,
@@ -32,6 +33,7 @@ api_router.include_router(settings.router, prefix="/settings", tags=["settings"]
 api_router.include_router(dashboard.router, prefix="/dashboard", tags=["dashboard"])
 api_router.include_router(activity_logs.router, prefix="/activity-logs", tags=["activity-logs"])
 api_router.include_router(integrations.router, prefix="/integrations", tags=["integrations"])
+api_router.include_router(groups.router, prefix="/groups", tags=["groups"])
 api_router.include_router(chat.router, prefix="/chat", tags=["chat"])
 api_router.include_router(agent.router, prefix="/agent", tags=["agent"])
 api_router.include_router(mcp.router, prefix="/mcp", tags=["mcp"])

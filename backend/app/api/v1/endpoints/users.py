@@ -2,11 +2,13 @@ from typing import Any, List
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response
 from fastapi.encoders import jsonable_encoder
 from pydantic.networks import EmailStr
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 from app.api import deps
 from app.core.config import settings
 from app.core import security
 from app.models.user import User
+from app.models.group import Group
+from app.api.permissions import is_admin_user, normalize_role
 from app.services.agent_skill_pack import SKILL_PACK_NAME, build_skill_pack_archive
 from app.schemas.user import User as UserSchema, UserCreate, UserUpdate, UserSelfUpdate
 from app.utils.activity_logger import log_activity, Actions
@@ -28,17 +30,59 @@ def _build_api_urls(request: Request) -> tuple[str, str, bool]:
     curl_insecure = host_only in {"127.0.0.1", "localhost"}
     return api_base_url, external_base_url, curl_insecure
 
+
+def _resolve_groups(db: Session, current_user: User, group_ids):
+    """Resolve group_ids to Group objects, enforcing manager's own-group limit.
+
+    Returns None when group_ids is None (no change requested).
+    """
+    if group_ids is None:
+        return None
+    groups = []
+    for gid in group_ids:
+        group = db.query(Group).filter(Group.id == gid).first()
+        if not group:
+            raise HTTPException(status_code=404, detail=f"Group {gid} not found")
+        groups.append(group)
+    if not is_admin_user(current_user):
+        own_group_ids = {g.id for g in (current_user.groups or [])}
+        for group in groups:
+            if group.id not in own_group_ids:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Manager can only assign users to their own group",
+                )
+    return groups
+
+
+def _enforce_role_limits(current_user: User, role: str | None, is_superuser: bool) -> None:
+    """Admins may assign any role; managers may only create/update regular users."""
+    if is_admin_user(current_user):
+        return
+    if normalize_role(role or "user") != "user" or is_superuser:
+        raise HTTPException(
+            status_code=403,
+            detail="Only admins can assign admin or manager roles",
+        )
+
 @router.get("/", response_model=List[UserSchema])
 def read_users(
     db: Session = Depends(deps.get_db),
     skip: int = 0,
     limit: int = 100,
-    current_user: User = Depends(deps.get_current_active_superuser),
+    current_user: User = Depends(deps.get_current_active_admin_or_manager),
 ) -> Any:
     """
-    Retrieve users.
+    Retrieve users. Admins see all users; managers see only users in their groups.
     """
-    users = db.query(User).offset(skip).limit(limit).all()
+    query = db.query(User).options(selectinload(User.groups))
+    if not is_admin_user(current_user):
+        own_group_ids = [g.id for g in (current_user.groups or [])]
+        if own_group_ids:
+            query = query.join(User.groups).filter(Group.id.in_(own_group_ids)).distinct()
+        else:
+            return []
+    users = query.offset(skip).limit(limit).all()
     return users
 
 @router.post("/", response_model=UserSchema)
@@ -46,7 +90,7 @@ def create_user(
     *,
     db: Session = Depends(deps.get_db),
     user_in: UserCreate,
-    current_user: User = Depends(deps.get_current_active_superuser),
+    current_user: User = Depends(deps.get_current_active_admin_or_manager),
 ) -> Any:
     """
     Create new user.
@@ -57,7 +101,10 @@ def create_user(
             status_code=400,
             detail="The user with this username already exists in the system.",
         )
-    
+
+    groups = _resolve_groups(db, current_user, user_in.group_ids)
+    _enforce_role_limits(current_user, user_in.role, bool(user_in.is_superuser))
+
     db_user = User(
         email=user_in.email,
         hashed_password=security.get_password_hash(user_in.password),
@@ -65,6 +112,8 @@ def create_user(
         role=user_in.role,
         is_superuser=user_in.is_superuser,
     )
+    if groups is not None:
+        db_user.groups = groups
     db.add(db_user)
     db.commit()
     db.refresh(db_user)
@@ -203,7 +252,7 @@ def update_user(
     db: Session = Depends(deps.get_db),
     user_id: str,
     user_in: UserUpdate,
-    current_user: User = Depends(deps.get_current_active_superuser),
+    current_user: User = Depends(deps.get_current_active_admin_or_manager),
 ) -> Any:
     """
     Update a user.
@@ -219,8 +268,25 @@ def update_user(
             detail="The user with this username does not exist in the system",
         )
 
+    if not is_admin_user(current_user) and normalize_role(user.role) != "user":
+        raise HTTPException(
+            status_code=403,
+            detail="Only admins can manage admin or manager accounts",
+        )
+
     update_data = user_in.dict(exclude_unset=True)
     password_changed = False
+
+    # Handle group assignment separately (User model uses `groups` relationship).
+    group_ids = update_data.pop("group_ids", None)
+    if group_ids is not None:
+        user.groups = _resolve_groups(db, current_user, group_ids)
+
+    _enforce_role_limits(
+        current_user,
+        update_data.get("role"),
+        bool(update_data.get("is_superuser", False)),
+    )
 
     if "password" in update_data and update_data["password"]:
         hashed_password = security.get_password_hash(update_data["password"])

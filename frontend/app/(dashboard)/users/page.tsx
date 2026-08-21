@@ -12,7 +12,55 @@ interface User {
     email: string
     full_name: string
     role: string
+    groups?: { id: string; name: string }[]
     is_active: boolean
+}
+
+interface GroupOption {
+    id: string
+    name: string
+}
+
+function GroupPicker({ groups, selectedIds, onToggle, isAdmin, newGroupName, setNewGroupName, onCreateGroup }: {
+    groups: GroupOption[]
+    selectedIds: string[]
+    onToggle: (id: string) => void
+    isAdmin: boolean
+    newGroupName: string
+    setNewGroupName: (v: string) => void
+    onCreateGroup: () => void
+}) {
+    return (
+        <div className="space-y-2">
+            {groups.length === 0 ? (
+                <p className="text-xs text-slate-400">ยังไม่มี group — สร้างด้วยสิทธิ์ admin</p>
+            ) : (
+                <div className="flex flex-wrap gap-x-4 gap-y-2">
+                    {groups.map((g) => (
+                        <label key={g.id} className="flex items-center gap-1.5 cursor-pointer select-none">
+                            <input
+                                type="checkbox"
+                                checked={selectedIds.includes(g.id)}
+                                onChange={() => onToggle(g.id)}
+                                className="h-4 w-4 accent-blue-600"
+                            />
+                            <span className="text-sm text-slate-700">{g.name}</span>
+                        </label>
+                    ))}
+                </div>
+            )}
+            {isAdmin && (
+                <div className="flex gap-2 mt-2">
+                    <Input
+                        value={newGroupName}
+                        onChange={(e) => setNewGroupName(e.target.value)}
+                        placeholder="เพิ่ม group ใหม่"
+                    />
+                    <Button type="button" variant="outline" size="sm" onClick={onCreateGroup}>Add</Button>
+                </div>
+            )}
+        </div>
+    )
 }
 
 export default function UsersPage() {
@@ -20,9 +68,12 @@ export default function UsersPage() {
     const [users, setUsers] = useState<User[]>([])
     const [loading, setLoading] = useState(true)
     const [showCreate, setShowCreate] = useState(false)
-    const [newUser, setNewUser] = useState({ email: "", password: "", full_name: "", role: "user" })
+    const [newUser, setNewUser] = useState({ email: "", password: "", full_name: "", role: "user", group_ids: [] as string[] })
     const [editingUser, setEditingUser] = useState<User | null>(null)
     const [editPassword, setEditPassword] = useState("")
+    const [groups, setGroups] = useState<GroupOption[]>([])
+    const [newGroupName, setNewGroupName] = useState("")
+    const [editingGroupIds, setEditingGroupIds] = useState<string[]>([])
 
     const normalizedRole = useMemo(() => {
         if (!currentUser?.role) return "user"
@@ -46,8 +97,47 @@ export default function UsersPage() {
         }
     }
 
+    const fetchGroups = async () => {
+        try {
+            const token = localStorage.getItem("token")
+            const res = await fetch(`${getApiBaseUrl()}/groups/`, {
+                headers: { Authorization: `Bearer ${token}` }
+            })
+            if (res.ok) {
+                setGroups(await res.json())
+            }
+        } catch (error) {
+            console.error("Failed to fetch groups", error)
+        }
+    }
+
+    const handleCreateGroup = async () => {
+        const name = newGroupName.trim()
+        if (!name) return
+        try {
+            const token = localStorage.getItem("token")
+            const res = await fetch(`${getApiBaseUrl()}/groups/`, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Bearer ${token}`
+                },
+                body: JSON.stringify({ name })
+            })
+            if (res.ok) {
+                setNewGroupName("")
+                await fetchGroups()
+            } else {
+                alert("Failed to create group (admin only)")
+            }
+        } catch (error) {
+            console.error("Error creating group", error)
+        }
+    }
+
     useEffect(() => {
         fetchUsers()
+        fetchGroups()
     }, [])
 
     const handleCreateUser = async (e: React.FormEvent) => {
@@ -65,7 +155,7 @@ export default function UsersPage() {
 
             if (res.ok) {
                 setShowCreate(false)
-                setNewUser({ email: "", password: "", full_name: "", role: "user" })
+                setNewUser({ email: "", password: "", full_name: "", role: "user", group_ids: [] })
                 fetchUsers()
             } else {
                 alert("Failed to create user")
@@ -83,6 +173,7 @@ export default function UsersPage() {
             const payload: Record<string, any> = {
                 full_name: editingUser.full_name,
                 role: editingUser.role,
+                group_ids: editingGroupIds,
                 is_active: editingUser.is_active,
             }
             if (editPassword) payload.password = editPassword
@@ -128,11 +219,18 @@ export default function UsersPage() {
 
     if (loading) return <div>Loading...</div>
 
-    if (normalizedRole !== "admin") {
+    const isAdmin = normalizedRole === "admin"
+    const isManager = normalizedRole === "manager"
+
+    // Manager only selects groups they belong to; admin sees all groups.
+    const ownGroupIds = currentUser?.groups?.map((g) => g.id) || []
+    const selectableGroups = isManager ? groups.filter((g) => ownGroupIds.includes(g.id)) : groups
+
+    if (!isAdmin && !isManager) {
         return (
             <div className="bg-white rounded-lg border shadow-sm p-6">
                 <h2 className="text-xl font-semibold text-slate-900">Access restricted</h2>
-                <p className="text-slate-600 mt-2">Only Admins can manage users.</p>
+                <p className="text-slate-600 mt-2">Only Admins and Managers can manage users.</p>
             </div>
         )
     }
@@ -193,6 +291,23 @@ export default function UsersPage() {
                                     <option value="admin">Admin</option>
                                 </select>
                             </div>
+                            <div className="space-y-2 col-span-2">
+                                <label className="text-sm font-medium">Groups</label>
+                                <GroupPicker
+                                    groups={selectableGroups}
+                                    selectedIds={newUser.group_ids}
+                                    onToggle={(id) => setNewUser({
+                                        ...newUser,
+                                        group_ids: newUser.group_ids.includes(id)
+                                            ? newUser.group_ids.filter((g) => g !== id)
+                                            : [...newUser.group_ids, id]
+                                    })}
+                                    isAdmin={isAdmin}
+                                    newGroupName={newGroupName}
+                                    setNewGroupName={setNewGroupName}
+                                    onCreateGroup={handleCreateGroup}
+                                />
+                            </div>
                         </div>
                         <div className="flex justify-end gap-2">
                             <Button type="button" variant="outline" onClick={() => setShowCreate(false)}>Cancel</Button>
@@ -240,6 +355,22 @@ export default function UsersPage() {
                                     <option value="admin">Admin</option>
                                 </select>
                             </div>
+                            <div className="space-y-2 col-span-2">
+                                <label className="text-sm font-medium">Groups</label>
+                                <GroupPicker
+                                    groups={selectableGroups}
+                                    selectedIds={editingGroupIds}
+                                    onToggle={(id) => setEditingGroupIds(
+                                        editingGroupIds.includes(id)
+                                            ? editingGroupIds.filter((g) => g !== id)
+                                            : [...editingGroupIds, id]
+                                    )}
+                                    isAdmin={isAdmin}
+                                    newGroupName={newGroupName}
+                                    setNewGroupName={setNewGroupName}
+                                    onCreateGroup={handleCreateGroup}
+                                />
+                            </div>
                             <div className="space-y-2">
                                 <label className="text-sm font-medium">Status</label>
                                 <select
@@ -267,6 +398,7 @@ export default function UsersPage() {
                             <tr>
                                 <th className="px-6 py-3">User</th>
                                 <th className="px-6 py-3">Role</th>
+                                <th className="px-6 py-3">Group</th>
                                 <th className="px-6 py-3">Status</th>
                                 <th className="px-6 py-3">Actions</th>
                             </tr>
@@ -291,13 +423,26 @@ export default function UsersPage() {
                                             </span>
                                         </div>
                                     </td>
+                                    <td className="px-6 py-4 text-slate-600">
+                                        {user.groups && user.groups.length > 0 ? (
+                                            <div className="flex flex-wrap gap-1">
+                                                {user.groups.map((g) => (
+                                                    <span key={g.id} className="px-2 py-0.5 rounded-full text-xs bg-blue-50 text-blue-700 border border-blue-200">
+                                                        {g.name}
+                                                    </span>
+                                                ))}
+                                            </div>
+                                        ) : (
+                                            <span className="text-slate-400">—</span>
+                                        )}
+                                    </td>
                                     <td className="px-6 py-4">
                                         <span className={`px-2 py-1 rounded-full text-xs ${user.is_active ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
                                             {user.is_active ? 'Active' : 'Inactive'}
                                         </span>
                                     </td>
                                     <td className="px-6 py-4 flex gap-2">
-                                        <Button variant="ghost" size="sm" onClick={() => { setEditingUser(user); setEditPassword(""); }}>
+                                        <Button variant="ghost" size="sm" onClick={() => { setEditingUser(user); setEditPassword(""); setEditingGroupIds(user.groups?.map((g) => g.id) || []); }}>
                                             <Pencil className="h-4 w-4 mr-1" /> Edit
                                         </Button>
                                         <Button variant="ghost" size="sm" className="text-red-600 hover:text-red-700" onClick={() => handleDeleteUser(user.id)}>

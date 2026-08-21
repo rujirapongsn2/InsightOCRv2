@@ -14,10 +14,11 @@ class User(Base):
     is_active = Column(Boolean(), default=True)
     is_superuser = Column(Boolean(), default=False)
     role = Column(String, default="user") # admin, documents_admin, user
-    
+
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
     # Relationships
+    groups = relationship("Group", secondary="user_groups", back_populates="users")
     integrations = relationship("Integration", back_populates="user", cascade="all, delete-orphan")
     api_access_tokens = relationship("APIAccessToken", back_populates="user", cascade="all, delete-orphan")

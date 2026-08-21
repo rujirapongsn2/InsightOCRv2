@@ -19,6 +19,7 @@ from app.models.setting import Setting
 from app.schemas.schema import DocumentSchema as DocumentSchemaSchema
 from app.schemas.schema import DocumentSchemaCreate, DocumentSchemaUpdate, SchemaField
 from app.models.user import User
+from app.api.permissions import can_manage_group_resource
 from app.services.ai_suggestion_service import AISuggestionService
 from app.services.schema_suggestion_service import SchemaSuggestionService
 from app.services.anydoc_pipeline import (
@@ -108,6 +109,8 @@ def _ensure_can_manage(schema: DocumentSchema, current_user: User) -> None:
     if is_admin:
         return
     if normalized == "manager" and schema.created_by == current_user.id:
+        return
+    if can_manage_group_resource(current_user, schema.creator):
         return
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,

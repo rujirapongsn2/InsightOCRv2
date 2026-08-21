@@ -31,10 +31,10 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         { href: "/dashboard",     label: "Dashboard",     icon: LayoutDashboard, roles: ["admin", "manager", "user"] },
         { href: "/jobs",          label: "Jobs",           icon: FileText,        roles: ["admin", "manager", "user"] },
         { href: "/schemas",       label: "Schemas",        icon: Settings,        roles: ["admin", "manager"] },
-        { href: "/integrations",  label: "Integration",    icon: Plug,            roles: ["admin", "manager"] },
+        { href: "/integrations",  label: "Integration",    icon: Plug,            roles: ["admin", "manager", "user"] },
         { href: "/workflows",     label: "Workflow",       icon: WorkflowIcon,    roles: ["admin", "manager", "user"] },
         { href: "/activity-logs", label: "Activity Logs",  icon: FileText,        roles: ["admin", "manager", "user"] },
-        { href: "/users",         label: "Users",          icon: Users,           roles: ["admin"] },
+        { href: "/users",         label: "Users",          icon: Users,           roles: ["admin", "manager"] },
     ]
 
     const isActive = (href: string) =>

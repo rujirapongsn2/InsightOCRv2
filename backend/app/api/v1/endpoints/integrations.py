@@ -217,7 +217,7 @@ from sqlalchemy.orm import Session
 import httpx
 import json
 from app.api import deps
-from app.api.permissions import ensure_job_access, is_admin_user, normalize_role
+from app.api.permissions import ensure_job_access, is_admin_user, normalize_role, can_manage_group_resource
 from app.models.job import Job
 from app.models.user import User
 from app.models.integration import Integration, IntegrationType, IntegrationStatus
@@ -670,8 +670,8 @@ async def update_integration(
     if not existing:
         raise HTTPException(status_code=404, detail="Integration not found")
 
-    # Check permissions: admin can update any, managers can only update their own
-    if not is_admin and existing.user_id != current_user.id:
+    # Check permissions: admin can update any, managers can update their own or same-group
+    if not is_admin and existing.user_id != current_user.id and not can_manage_group_resource(current_user, existing.user):
         raise HTTPException(status_code=403, detail="You can only update your own integrations")
 
     # A masked credential in the payload means the client echoed back the
@@ -740,8 +740,8 @@ async def delete_integration(
     if not existing:
         raise HTTPException(status_code=404, detail="Integration not found")
 
-    # Check permissions: admin can delete any, managers can only delete their own
-    if not is_admin and existing.user_id != current_user.id:
+    # Check permissions: admin can delete any, managers can delete their own or same-group
+    if not is_admin and existing.user_id != current_user.id and not can_manage_group_resource(current_user, existing.user):
         raise HTTPException(status_code=403, detail="You can only delete your own integrations")
 
     # Delete integration

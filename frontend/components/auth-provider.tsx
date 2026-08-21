@@ -10,6 +10,7 @@ interface User {
     full_name: string
     role: string
     is_superuser: boolean
+    groups?: { id: string; name: string }[]
 }
 
 interface AuthContextType {

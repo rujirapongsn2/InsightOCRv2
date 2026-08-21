@@ -145,6 +145,21 @@ def get_current_active_admin(
     return current_user
 
 
+def get_current_active_admin_or_manager(
+    current_user: User = Depends(get_current_active_user),
+) -> User:
+    """Require an active admin or manager (documents_admin) for user/group management."""
+    if not (
+        current_user.is_superuser
+        or _normalize_role(current_user.role) in {"admin", "manager"}
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="The user doesn't have enough privileges",
+        )
+    return current_user
+
+
 def _normalize_role(role: str | None) -> str:
     """Normalize role for permission checks."""
     if not role:
