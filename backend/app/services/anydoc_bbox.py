@@ -262,6 +262,131 @@ def _value_from_words(locator: dict[str, Any], words: Iterable[dict[str, Any]]) 
     return " ".join(str(word["text"]) for word in selected_words).strip()
 
 
+def _words_in_locator(locator: dict[str, Any], words: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [word for word in words if _intersects(locator, word)]
+
+
+def _group_words_into_lines(words: Iterable[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    """Group positioned words into visual lines without relying on OCR order."""
+    ordered = sorted(
+        words,
+        key=lambda word: (
+            (float(word["y"]) + float(word["height"]) / 2),
+            float(word["x"]),
+        ),
+    )
+    if not ordered:
+        return []
+
+    heights = sorted(float(word["height"]) for word in ordered)
+    median_height = heights[len(heights) // 2]
+    tolerance = max(0.18, median_height * 0.7)
+    lines: list[list[dict[str, Any]]] = []
+    line_centers: list[float] = []
+    for word in ordered:
+        center = float(word["y"]) + float(word["height"]) / 2
+        if lines and abs(center - line_centers[-1]) <= tolerance:
+            lines[-1].append(word)
+            line_centers[-1] = sum(
+                float(item["y"]) + float(item["height"]) / 2
+                for item in lines[-1]
+            ) / len(lines[-1])
+        else:
+            lines.append([word])
+            line_centers.append(center)
+    for line in lines:
+        line.sort(key=lambda word: float(word["x"]))
+    return lines
+
+
+def _table_column_bounds(locator: dict[str, Any], column: dict[str, Any]) -> tuple[float, float]:
+    parent_x = float(locator["x"])
+    parent_width = float(locator["width"])
+    left = parent_x + parent_width * float(column["x"]) / 100
+    right = left + parent_width * float(column["width"]) / 100
+    return left, right
+
+
+def _line_table_cells(
+    line: Iterable[dict[str, Any]],
+    locator: dict[str, Any],
+    columns: list[dict[str, Any]],
+) -> dict[str, str]:
+    cells = {str(column["name"]): [] for column in columns}
+    for word in line:
+        word_center = float(word["x"]) + float(word["width"]) / 2
+        for column in columns:
+            left, right = _table_column_bounds(locator, column)
+            if left <= word_center <= right:
+                cells[str(column["name"])].append(str(word["text"]))
+                break
+    return {name: " ".join(parts).strip() for name, parts in cells.items()}
+
+
+def _append_table_cells(row: dict[str, str], cells: dict[str, str]) -> None:
+    for name, value in cells.items():
+        if not value:
+            continue
+        row[name] = " ".join(part for part in (row.get(name, ""), value) if part).strip()
+
+
+def _extract_table_rows(
+    locator: dict[str, Any],
+    array_config: dict[str, Any],
+    words: Iterable[dict[str, Any]],
+    *,
+    clean_placeholders: bool,
+) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    """Read a BBox table as raw rows and conservatively cleaned rows.
+
+    Anchor mode starts a new row only when the selected anchor column has text.
+    This is deliberately safer for quotations whose descriptions wrap across
+    multiple visual lines: subsequent lines are appended to the current item
+    instead of becoming phantom line items.
+    """
+    columns = [column for column in array_config.get("columns", []) if isinstance(column, dict)]
+    if not columns:
+        raise BboxLocatorError("A fixed-position array field needs at least one table column")
+    row_detection = array_config.get("row_detection", "anchor_column")
+    anchor_column = str(array_config.get("anchor_column") or "")
+    if row_detection == "anchor_column" and anchor_column not in {str(column.get("name")) for column in columns}:
+        raise BboxLocatorError("The selected table anchor column is invalid")
+
+    lines = _group_words_into_lines(_words_in_locator(locator, words))
+    header_rows = int(array_config.get("header_rows", 1) or 0)
+    raw_rows: list[dict[str, str]] = []
+    current_row: dict[str, str] | None = None
+    for line in lines[header_rows:]:
+        cells = _line_table_cells(line, locator, columns)
+        if not any(cells.values()):
+            continue
+        is_new_row = row_detection == "line" or bool(cells.get(anchor_column))
+        if is_new_row:
+            current_row = {str(column["name"]): cells.get(str(column["name"]), "") for column in columns}
+            raw_rows.append(current_row)
+        elif current_row is not None:
+            # A line without the anchor is usually a wrapped description. A
+            # non-text value on such a line is more likely a subtotal/total
+            # than a continuation, so leave it outside the item list.
+            non_text_values = [
+                cells.get(str(column["name"]), "")
+                for column in columns
+                if str(column.get("type") or "text") != "text"
+            ]
+            if not any(non_text_values):
+                _append_table_cells(current_row, cells)
+
+    cleaned_rows: list[dict[str, str]] = []
+    for row in raw_rows:
+        cleaned = {
+            name: clean_fixed_position_value(value, remove_placeholders=clean_placeholders)
+            for name, value in row.items()
+        }
+        if any(cleaned.values()):
+            cleaned_rows.append(cleaned)
+    return raw_rows, cleaned_rows
+
+
 def _read_bbox_from_tesseract(file_path: str, page_number: int) -> list[dict[str, Any]]:
     """Render one PDF page temporarily and return its local OCR word boxes."""
     image_path = _render_pdf_page(file_path, page_number)
@@ -271,14 +396,14 @@ def _read_bbox_from_tesseract(file_path: str, page_number: int) -> list[dict[str
         _cleanup_rendered_page(image_path)
 
 
-def extract_fixed_position_fields(file_path: str, fields: Iterable[dict[str, Any]]) -> tuple[dict[str, str], dict[str, Any]]:
+def extract_fixed_position_fields(file_path: str, fields: Iterable[dict[str, Any]]) -> tuple[dict[str, Any], dict[str, Any]]:
     """Extract field values and compact evidence for Schema BBox locators."""
     locator_fields = [field for field in fields if isinstance(field.get("locator"), dict)]
     if not locator_fields:
         return {}, {}
 
     layout = build_bbox_layout(file_path, (field["locator"].get("page", 1) for field in locator_fields))
-    values: dict[str, str] = {}
+    values: dict[str, Any] = {}
     evidence: dict[str, Any] = {}
     ocr_words_by_page: dict[int, list[dict[str, Any]]] = {}
     for field in locator_fields:
@@ -288,6 +413,48 @@ def extract_fixed_position_fields(file_path: str, fields: Iterable[dict[str, Any
             continue
         page_number = int(locator.get("page", 1))
         page_layout = layout[page_number]
+        array_config = field.get("array_config")
+        if field.get("type") == "array" and isinstance(array_config, dict):
+            remove_placeholders = bool(locator.get("clean_placeholders", True))
+            raw_rows, cleaned_rows = _extract_table_rows(
+                locator,
+                array_config,
+                page_layout["words"],
+                clean_placeholders=remove_placeholders,
+            )
+            source = page_layout["source"]
+            text_layer_rows: list[dict[str, str]] | None = None
+            if source == "text_layer" and not cleaned_rows:
+                if page_number not in ocr_words_by_page:
+                    if len(ocr_words_by_page) >= settings.ANYDOC_MAX_OCR_PAGES:
+                        raise BboxLocatorError("Too many text-layer BBoxes required local OCR fallback")
+                    ocr_words_by_page[page_number] = _read_bbox_from_tesseract(file_path, page_number)
+                ocr_raw_rows, ocr_cleaned_rows = _extract_table_rows(
+                    locator,
+                    array_config,
+                    ocr_words_by_page[page_number],
+                    clean_placeholders=remove_placeholders,
+                )
+                if ocr_cleaned_rows:
+                    text_layer_rows = raw_rows
+                    raw_rows = ocr_raw_rows
+                    cleaned_rows = ocr_cleaned_rows
+                    source = "tesseract_ocr_bbox_fallback"
+            values[name] = raw_rows
+            evidence[name] = {
+                "page": page_number,
+                "bbox": {key: locator[key] for key in ("x", "y", "width", "height")},
+                "raw_rows": raw_rows,
+                "cleaned_value": cleaned_rows,
+                "row_count": len(cleaned_rows),
+                "array_config": array_config,
+                "placeholder_cleanup": remove_placeholders,
+                "source": source,
+            }
+            if text_layer_rows is not None:
+                evidence[name]["text_layer_rows"] = text_layer_rows
+                evidence[name]["fallback_reason"] = "bbox_table_empty_after_placeholder_cleanup"
+            continue
         raw_value = _value_from_words(locator, page_layout["words"])
         remove_placeholders = bool(locator.get("clean_placeholders", True))
         cleaned_value = clean_fixed_position_value(
@@ -323,6 +490,7 @@ def extract_fixed_position_fields(file_path: str, fields: Iterable[dict[str, Any
             "text": raw_value,
             "raw_text": raw_value,
             "cleaned_text": cleaned_value,
+            "cleaned_value": cleaned_value,
             "placeholder_cleanup": remove_placeholders,
             "source": source,
         }

@@ -104,6 +104,27 @@ export function validateField(field: SchemaField, allFields: SchemaField[]): Val
     })
   }
 
+  if (field.type === "array" && field.locator) {
+    const config = field.array_config
+    const columnNames = config?.columns.map(column => column.name.trim()) || []
+    const invalidColumns = !config || !columnNames.length ||
+      columnNames.some(columnName => !isValidFieldName(columnName)) ||
+      new Set(columnNames).size !== columnNames.length ||
+      config.header_rows < 0 || !Number.isInteger(config.header_rows) ||
+      config.columns.some(column => column.x < 0 || column.width <= 0 || column.x + column.width > 100) ||
+      [...(config?.columns || [])]
+        .sort((left, right) => left.x - right.x)
+        .some((column, index, columns) => index > 0 && columns[index - 1].x + columns[index - 1].width > column.x) ||
+      (config.row_detection === "anchor_column" && !columnNames.includes(config.anchor_column || ""))
+    if (invalidColumns) {
+      errors.push({
+        field: field.id || field.name,
+        message: `Table field "${field.name}" needs valid unique column names, bounds, and row detection settings.`,
+        severity: "error"
+      })
+    }
+  }
+
   // Warn if description is empty (optional but recommended)
   if (!field.description || field.description.trim() === "") {
     errors.push({

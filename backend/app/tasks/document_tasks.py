@@ -468,14 +468,26 @@ def merge_missing_fields(primary: Any, fallback: dict[str, Any]) -> Any:
     return merged
 
 
-def map_field_type_to_json_schema(field_type: str, field_description: str) -> dict[str, Any]:
+def map_field_type_to_json_schema(
+    field_type: str,
+    field_description: str,
+    array_config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     normalized_type = (field_type or "text").lower()
 
     if normalized_type == "array":
+        item_properties: dict[str, Any] = {}
+        for column in (array_config or {}).get("columns", []):
+            if not isinstance(column, dict) or not column.get("name"):
+                continue
+            item_properties[str(column["name"])] = map_field_type_to_json_schema(
+                str(column.get("type") or "text"),
+                "",
+            )
         return {
             "type": "array",
             "description": field_description,
-            "items": {"type": "object"},
+            "items": {"type": "object", "properties": item_properties},
         }
     if normalized_type in {"number", "currency"}:
         return {"type": "number", "description": field_description}
@@ -505,6 +517,7 @@ def build_schema_json(
         field_schema = map_field_type_to_json_schema(
             field.get("type", "text"),
             field.get("description", ""),
+            field.get("array_config") if isinstance(field.get("array_config"), dict) else None,
         )
         validation_rules = field.get("validation_rules") or {}
         if isinstance(validation_rules, dict):
@@ -570,7 +583,29 @@ def _normalize_schema_value(value: Any, field_schema: dict[str, Any], field_name
     if expected_type == "array":
         if not isinstance(value, list):
             raise ValueError(f"Field '{field_name}' must be a list")
-        return value
+        item_schema = field_schema.get("items") or {}
+        properties = item_schema.get("properties") or {}
+        if not properties:
+            return value
+        normalised_items: list[dict[str, Any]] = []
+        for item_index, item in enumerate(value, start=1):
+            if not isinstance(item, dict):
+                raise ValueError(f"Field '{field_name}' item {item_index} must be an object")
+            unexpected = set(item) - set(properties)
+            if unexpected:
+                raise ValueError(
+                    f"Field '{field_name}' item {item_index} has unsupported columns: "
+                    + ", ".join(sorted(unexpected))
+                )
+            normalised_items.append({
+                column_name: _normalize_schema_value(
+                    None if item.get(column_name) == "" else item.get(column_name),
+                    column_schema,
+                    f"{field_name}[{item_index}].{column_name}",
+                )
+                for column_name, column_schema in properties.items()
+            })
+        return normalised_items
 
     raise ValueError(f"Field '{field_name}' has unsupported type '{expected_type}'")
 
@@ -629,12 +664,14 @@ def map_anydoc_schema_fields(
 
 
 def _normalise_fixed_position_value(
-    value: str,
+    value: Any,
     field_schema: dict[str, Any],
     field_name: str,
 ) -> Any:
     """Normalize deterministic BBox text through the same Schema type rules."""
-    if not value.strip():
+    if field_schema.get("type") == "array":
+        return _normalize_schema_value(value or [], field_schema, field_name)
+    if not isinstance(value, str) or not value.strip():
         return None
     if field_schema.get("format") == "date":
         value = _normalise_fixed_position_date(value)
@@ -714,7 +751,10 @@ def map_schema_fields_with_locators(
             continue
         field_evidence = evidence.get(name, {})
         mapped[name] = _normalise_fixed_position_value(
-            str(field_evidence.get("cleaned_text", raw_fixed_values.get(name, ""))),
+            field_evidence.get(
+                "cleaned_value",
+                field_evidence.get("cleaned_text", raw_fixed_values.get(name, "")),
+            ),
             schema_payload["properties"][name],
             name,
         )

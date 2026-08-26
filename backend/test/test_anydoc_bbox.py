@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.schemas.schema import BboxLocator
+from app.schemas.schema import BboxLocator, SchemaField
 from app.services import anydoc_bbox
 from app.tasks import document_tasks
 
@@ -11,6 +11,23 @@ from app.tasks import document_tasks
 def test_bbox_locator_rejects_rectangles_outside_page():
     with pytest.raises(ValueError, match="inside the page"):
         BboxLocator(page=1, x=80, y=10, width=21, height=10)
+
+
+def test_fixed_position_array_rejects_overlapping_columns():
+    with pytest.raises(ValueError, match="cannot overlap"):
+        SchemaField.model_validate({
+            "name": "line_items",
+            "type": "array",
+            "locator": {"page": 1, "x": 0, "y": 0, "width": 100, "height": 40},
+            "array_config": {
+                "row_detection": "line",
+                "header_rows": 0,
+                "columns": [
+                    {"name": "description", "type": "text", "x": 0, "width": 70},
+                    {"name": "amount", "type": "currency", "x": 60, "width": 40},
+                ],
+            },
+        })
 
 
 def test_extract_fixed_position_fields_uses_words_inside_selected_box(monkeypatch):
@@ -132,6 +149,98 @@ def test_bbox_keeps_usable_text_layer_value_without_running_tesseract(monkeypatc
 
     assert values == {"company_name": "Softnix"}
     assert evidence["company_name"]["source"] == "text_layer"
+
+
+def test_bbox_extracts_array_rows_and_keeps_wrapped_text_with_its_item(monkeypatch):
+    monkeypatch.setattr(
+        anydoc_bbox,
+        "build_bbox_layout",
+        lambda _path, _pages: {
+            1: {
+                "source": "text_layer",
+                "words": [
+                    {"text": "No", "x": 3, "y": 3, "width": 3, "height": 2},
+                    {"text": "Description", "x": 16, "y": 3, "width": 12, "height": 2},
+                    {"text": "Qty", "x": 73, "y": 3, "width": 4, "height": 2},
+                    {"text": "Amount", "x": 87, "y": 3, "width": 8, "height": 2},
+                    {"text": "1", "x": 3, "y": 10, "width": 2, "height": 2},
+                    {"text": "Service", "x": 16, "y": 10, "width": 8, "height": 2},
+                    {"text": "fee", "x": 25, "y": 10, "width": 4, "height": 2},
+                    {"text": "2", "x": 73, "y": 10, "width": 2, "height": 2},
+                    {"text": "1,000", "x": 87, "y": 10, "width": 7, "height": 2},
+                    {"text": "including", "x": 16, "y": 14, "width": 9, "height": 2},
+                    {"text": "support", "x": 26, "y": 14, "width": 8, "height": 2},
+                    {"text": "2", "x": 3, "y": 18, "width": 2, "height": 2},
+                    {"text": "License", "x": 16, "y": 18, "width": 8, "height": 2},
+                    {"text": "1", "x": 73, "y": 18, "width": 2, "height": 2},
+                    {"text": "500", "x": 87, "y": 18, "width": 5, "height": 2},
+                    {"text": "Total", "x": 16, "y": 22, "width": 6, "height": 2},
+                    {"text": "1,500", "x": 87, "y": 22, "width": 7, "height": 2},
+                ],
+            }
+        },
+    )
+    values, evidence = anydoc_bbox.extract_fixed_position_fields(
+        "/tmp/quotation.pdf",
+        [{
+            "name": "line_items",
+            "type": "array",
+            "locator": {"page": 1, "x": 0, "y": 0, "width": 100, "height": 30},
+            "array_config": {
+                "row_detection": "anchor_column",
+                "anchor_column": "line_no",
+                "header_rows": 1,
+                "columns": [
+                    {"name": "line_no", "type": "number", "x": 0, "width": 10},
+                    {"name": "description", "type": "text", "x": 10, "width": 60},
+                    {"name": "quantity", "type": "number", "x": 70, "width": 15},
+                    {"name": "amount", "type": "currency", "x": 85, "width": 15},
+                ],
+            },
+        }],
+    )
+
+    assert values["line_items"] == [
+        {"line_no": "1", "description": "Service fee including support", "quantity": "2", "amount": "1,000"},
+        {"line_no": "2", "description": "License", "quantity": "1", "amount": "500"},
+    ]
+    assert evidence["line_items"]["cleaned_value"] == values["line_items"]
+    assert evidence["line_items"]["row_count"] == 2
+
+
+def test_locator_mapping_normalizes_fixed_position_array_columns(monkeypatch):
+    schema = SimpleNamespace(
+        name="quotation",
+        fields=[{
+            "name": "line_items",
+            "type": "array",
+            "locator": {"type": "bbox", "page": 1, "x": 1, "y": 1, "width": 90, "height": 40},
+            "array_config": {
+                "row_detection": "line",
+                "header_rows": 0,
+                "columns": [
+                    {"name": "line_no", "type": "number", "x": 0, "width": 10},
+                    {"name": "description", "type": "text", "x": 10, "width": 70},
+                    {"name": "amount", "type": "currency", "x": 80, "width": 20},
+                ],
+            },
+        }],
+    )
+    monkeypatch.setattr(
+        document_tasks,
+        "extract_fixed_position_fields",
+        lambda *_args, **_kwargs: (
+            {"line_items": [{"line_no": "1", "description": "Service", "amount": "1,250.50"}]},
+            {"line_items": {"cleaned_value": [{"line_no": "1", "description": "Service", "amount": "1,250.50"}]}},
+        ),
+    )
+
+    mapped, _, provider = document_tasks.map_schema_fields_with_locators(
+        "document text", schema, object(), "/tmp/quotation.pdf"
+    )
+
+    assert mapped == {"line_items": [{"line_no": 1.0, "description": "Service", "amount": 1250.5}]}
+    assert provider == "bbox"
 
 
 def test_locator_mapping_uses_cleaned_value_and_preserves_raw_evidence(monkeypatch):

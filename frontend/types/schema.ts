@@ -22,6 +22,23 @@ export interface ArrayItems {
   properties?: Record<string, { type: string; description?: string }>
 }
 
+export type ArrayColumnType = "text" | "number" | "date" | "currency"
+
+export interface ArrayColumn {
+  name: string
+  type: ArrayColumnType
+  x: number
+  width: number
+}
+
+export interface ArrayConfig {
+  item_type: "object"
+  row_detection: "anchor_column" | "line"
+  anchor_column?: string
+  header_rows: number
+  columns: ArrayColumn[]
+}
+
 export interface SchemaField {
   id?: string // Temporary ID for frontend ordering (UUID)
   name: string
@@ -29,6 +46,7 @@ export interface SchemaField {
   description: string
   required: boolean
   items?: ArrayItems // For array type fields (JSON Schema)
+  array_config?: ArrayConfig
   validation_rules?: ValidationRule
   help_text?: string
   example?: string

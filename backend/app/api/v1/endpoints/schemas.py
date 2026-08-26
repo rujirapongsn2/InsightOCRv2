@@ -137,7 +137,7 @@ def _extract_schema_sample_in_worker(file_path: str):
         worker_db.close()
 
 
-def _extract_bbox_preview_in_worker(file_path: str, fields: list[dict[str, Any]]) -> tuple[dict[str, str], dict[str, Any]]:
+def _extract_bbox_preview_in_worker(file_path: str, fields: list[dict[str, Any]]) -> tuple[dict[str, Any], dict[str, Any]]:
     """Evaluate BBox locators outside the async request loop."""
     return extract_fixed_position_fields(file_path, fields)
 
@@ -338,7 +338,7 @@ async def preview_fixed_position_fields(
             tmp_path = tmp_file.name
         raw_values, evidence = await run_in_threadpool(_extract_bbox_preview_in_worker, tmp_path, fields)
         values = {
-            name: str(evidence.get(name, {}).get("cleaned_text", raw_value))
+            name: evidence.get(name, {}).get("cleaned_value", raw_value)
             for name, raw_value in raw_values.items()
         }
         return {
