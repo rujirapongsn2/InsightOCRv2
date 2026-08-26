@@ -208,6 +208,56 @@ def test_bbox_extracts_array_rows_and_keeps_wrapped_text_with_its_item(monkeypat
     assert evidence["line_items"]["row_count"] == 2
 
 
+def test_bbox_array_keeps_prices_aligned_with_wrapped_descriptions(monkeypatch):
+    monkeypatch.setattr(
+        anydoc_bbox,
+        "build_bbox_layout",
+        lambda _path, _pages: {
+            1: {
+                "source": "text_layer",
+                "words": [
+                    {"text": "No", "x": 3, "y": 3, "width": 3, "height": 2},
+                    {"text": "Description", "x": 16, "y": 3, "width": 12, "height": 2},
+                    {"text": "Amount", "x": 87, "y": 3, "width": 8, "height": 2},
+                    {"text": "1", "x": 3, "y": 10, "width": 2, "height": 2},
+                    {"text": "Managed", "x": 16, "y": 10, "width": 8, "height": 2},
+                    {"text": "service", "x": 16, "y": 14, "width": 7, "height": 2},
+                    {"text": "1,000", "x": 87, "y": 14, "width": 7, "height": 2},
+                    {"text": "2", "x": 3, "y": 18, "width": 2, "height": 2},
+                    {"text": "License", "x": 16, "y": 18, "width": 8, "height": 2},
+                    {"text": "500", "x": 87, "y": 18, "width": 5, "height": 2},
+                    {"text": "Total", "x": 16, "y": 22, "width": 6, "height": 2},
+                    {"text": "1,500", "x": 87, "y": 22, "width": 7, "height": 2},
+                ],
+            }
+        },
+    )
+
+    values, _ = anydoc_bbox.extract_fixed_position_fields(
+        "/tmp/quotation.pdf",
+        [{
+            "name": "line_items",
+            "type": "array",
+            "locator": {"page": 1, "x": 0, "y": 0, "width": 100, "height": 30},
+            "array_config": {
+                "row_detection": "anchor_column",
+                "anchor_column": "line_no",
+                "header_rows": 1,
+                "columns": [
+                    {"name": "line_no", "type": "number", "x": 0, "width": 10},
+                    {"name": "description", "type": "text", "x": 10, "width": 70},
+                    {"name": "amount", "type": "currency", "x": 80, "width": 20},
+                ],
+            },
+        }],
+    )
+
+    assert values["line_items"] == [
+        {"line_no": "1", "description": "Managed service", "amount": "1,000"},
+        {"line_no": "2", "description": "License", "amount": "500"},
+    ]
+
+
 def test_locator_mapping_normalizes_fixed_position_array_columns(monkeypatch):
     schema = SimpleNamespace(
         name="quotation",
@@ -240,6 +290,40 @@ def test_locator_mapping_normalizes_fixed_position_array_columns(monkeypatch):
     )
 
     assert mapped == {"line_items": [{"line_no": 1.0, "description": "Service", "amount": 1250.5}]}
+    assert provider == "bbox"
+
+
+def test_locator_mapping_treats_bare_dash_currency_cell_as_null(monkeypatch):
+    schema = SimpleNamespace(
+        name="quotation",
+        fields=[{
+            "name": "line_items",
+            "type": "array",
+            "locator": {"type": "bbox", "page": 1, "x": 1, "y": 1, "width": 90, "height": 40},
+            "array_config": {
+                "row_detection": "line",
+                "header_rows": 0,
+                "columns": [
+                    {"name": "description", "type": "text", "x": 0, "width": 80},
+                    {"name": "amount", "type": "currency", "x": 80, "width": 20},
+                ],
+            },
+        }],
+    )
+    monkeypatch.setattr(
+        document_tasks,
+        "extract_fixed_position_fields",
+        lambda *_args, **_kwargs: (
+            {"line_items": [{"description": "Included service", "amount": "-"}]},
+            {"line_items": {"cleaned_value": [{"description": "Included service", "amount": "-"}]}},
+        ),
+    )
+
+    mapped, _, provider = document_tasks.map_schema_fields_with_locators(
+        "document text", schema, object(), "/tmp/quotation.pdf"
+    )
+
+    assert mapped == {"line_items": [{"description": "Included service", "amount": None}]}
     assert provider == "bbox"
 
 

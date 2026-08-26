@@ -32,6 +32,11 @@ class BboxLocatorError(ValueError):
 # and ordinary punctuation remain untouched.
 _FORM_PLACEHOLDER_PATTERN = re.compile(r"[._\u00b7\u2022\u2024\u2025\u2026\u22ef]{3,}")
 _WHITESPACE_PATTERN = re.compile(r"\s+")
+_TABLE_SUMMARY_LABEL_PATTERN = re.compile(
+    r"^\s*(?:total|subtotal|grand\s+total|vat|tax|discount|balance|"
+    r"รวม(?:เป็นเงิน|ทั้งสิ้น|สุทธิ)?|ภาษี|ส่วนลด|ยอด(?:รวม|สุทธิ|คงเหลือ))",
+    re.IGNORECASE,
+)
 
 
 def clean_fixed_position_value(value: str, *, remove_placeholders: bool = True) -> str:
@@ -330,6 +335,40 @@ def _append_table_cells(row: dict[str, str], cells: dict[str, str]) -> None:
         row[name] = " ".join(part for part in (row.get(name, ""), value) if part).strip()
 
 
+def _has_text_table_cells(cells: dict[str, str], columns: Iterable[dict[str, Any]]) -> bool:
+    return any(
+        cells.get(str(column["name"]), "")
+        for column in columns
+        if str(column.get("type") or "text") == "text"
+    )
+
+
+def _is_table_summary_line(cells: dict[str, str], columns: Iterable[dict[str, Any]]) -> bool:
+    labels = " ".join(
+        cells.get(str(column["name"]), "")
+        for column in columns
+        if str(column.get("type") or "text") == "text"
+    ).strip()
+    return bool(_TABLE_SUMMARY_LABEL_PATTERN.match(labels))
+
+
+def _append_table_continuation(
+    row: dict[str, str],
+    cells: dict[str, str],
+    columns: Iterable[dict[str, Any]],
+) -> None:
+    """Append wrapped text and fill values that are aligned on a later line."""
+    for column in columns:
+        name = str(column["name"])
+        value = cells.get(name, "")
+        if not value:
+            continue
+        if str(column.get("type") or "text") == "text":
+            row[name] = " ".join(part for part in (row.get(name, ""), value) if part).strip()
+        elif not row.get(name):
+            row[name] = value
+
+
 def _extract_table_rows(
     locator: dict[str, Any],
     array_config: dict[str, Any],
@@ -365,15 +404,19 @@ def _extract_table_rows(
             current_row = {str(column["name"]): cells.get(str(column["name"]), "") for column in columns}
             raw_rows.append(current_row)
         elif current_row is not None:
-            # A line without the anchor is usually a wrapped description. A
-            # non-text value on such a line is more likely a subtotal/total
-            # than a continuation, so leave it outside the item list.
+            # Spreadsheet-originated PDFs can put prices at the baseline of a
+            # wrapped description, after the row's anchor number. Keep those
+            # values with the active item, while excluding recognizable totals.
             non_text_values = [
                 cells.get(str(column["name"]), "")
                 for column in columns
                 if str(column.get("type") or "text") != "text"
             ]
-            if not any(non_text_values):
+            if _is_table_summary_line(cells, columns):
+                continue
+            if _has_text_table_cells(cells, columns):
+                _append_table_continuation(current_row, cells, columns)
+            elif not any(non_text_values):
                 _append_table_cells(current_row, cells)
 
     cleaned_rows: list[dict[str, str]] = []

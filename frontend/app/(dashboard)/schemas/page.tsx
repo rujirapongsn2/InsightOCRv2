@@ -17,7 +17,7 @@ interface Schema {
     fields: SchemaField[]
     created_by?: string
     created_at?: string
-    updated_at: string
+    updated_at?: string
     extraction_profile?: "legacy" | "anydoc_hybrid"
 }
 
@@ -40,6 +40,12 @@ interface SchemaField {
 type ExtractionProfile = "legacy" | "anydoc_hybrid"
 
 type SchemaSort = "updated_desc" | "updated_asc" | "name_asc" | "name_desc" | "fields_desc" | "fields_asc"
+
+const schemaActivityTimestamp = (schema: Schema) =>
+    new Date(schema.updated_at || schema.created_at || 0).getTime()
+
+const schemaActivityDate = (schema: Schema) =>
+    schema.updated_at || schema.created_at
 
 const getDocumentTypeIcon = (type: string) => {
     switch (type.toLowerCase()) {
@@ -323,9 +329,9 @@ export default function SchemasPage() {
                     case "name_desc": return b.name.localeCompare(a.name)
                     case "fields_desc": return b.fields.length - a.fields.length
                     case "fields_asc": return a.fields.length - b.fields.length
-                    case "updated_asc": return new Date(a.updated_at || 0).getTime() - new Date(b.updated_at || 0).getTime()
+                    case "updated_asc": return schemaActivityTimestamp(a) - schemaActivityTimestamp(b)
                     case "updated_desc":
-                    default: return new Date(b.updated_at || 0).getTime() - new Date(a.updated_at || 0).getTime()
+                    default: return schemaActivityTimestamp(b) - schemaActivityTimestamp(a)
                 }
             })
     }, [schemas, searchQuery, documentTypeFilter, pipelineFilter, sortBy])
@@ -506,7 +512,10 @@ export default function SchemasPage() {
                                         <FileText className="h-3 w-3" />
                                         {schema.fields.length} fields
                                     </span>
-                                    <span>{new Date(schema.updated_at || Date.now()).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })}</span>
+                                    <span>{schemaActivityDate(schema)
+                                        ? new Date(schemaActivityDate(schema)!).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })
+                                        : "-"}
+                                    </span>
                                 </div>
                                 {canManage && (
                                     <Button

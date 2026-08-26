@@ -6,6 +6,7 @@ from typing import List, Any
 from urllib.parse import urlparse, urlencode
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, status
 from pydantic import BaseModel
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from starlette.concurrency import run_in_threadpool
@@ -159,7 +160,18 @@ def read_schemas(
 
     query = db.query(DocumentSchema)
 
-    schemas = query.offset(skip).limit(limit).all()
+    # New schemas have no updated_at until their first edit, so use created_at
+    # as the initial activity timestamp.
+    schemas = (
+        query
+        .order_by(
+            func.coalesce(DocumentSchema.updated_at, DocumentSchema.created_at).desc(),
+            DocumentSchema.id.desc(),
+        )
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
 
     for schema in schemas:
         if schema.creator:

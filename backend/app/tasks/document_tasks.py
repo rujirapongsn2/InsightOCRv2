@@ -563,8 +563,15 @@ def _normalize_schema_value(value: Any, field_schema: dict[str, Any], field_name
         if isinstance(value, bool):
             raise ValueError(f"Field '{field_name}' must be a number")
         if isinstance(value, str):
+            normalized_value = value.strip()
+            # Fixed-layout tables commonly use a bare dash to mean that a
+            # numeric cell is intentionally blank. It is not a negative
+            # number, so preserve it as a null value rather than failing the
+            # complete Schema mapping.
+            if normalized_value in {"-", "–", "—"}:
+                return None
             try:
-                value = float(value.replace(",", "").strip())
+                value = float(normalized_value.replace(",", ""))
             except ValueError as exc:
                 raise ValueError(f"Field '{field_name}' must be a number") from exc
         if not isinstance(value, (int, float)):
