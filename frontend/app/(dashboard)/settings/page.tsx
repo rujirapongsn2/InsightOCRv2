@@ -5,7 +5,7 @@ import { useAuth } from "@/components/auth-provider"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { AlertCircle, Bot, CheckCircle2, ChevronDown, Cloud, Eye, EyeOff, FileText, KeyRound, Loader2, Package, Pencil, Plus, Settings, ShieldCheck, Trash2 } from "lucide-react"
+import { AlertCircle, Bot, Check, CheckCircle2, ChevronDown, Cloud, Copy, Eye, EyeOff, FileText, KeyRound, Loader2, Package, Pencil, Plus, Settings, ShieldCheck, Trash2 } from "lucide-react"
 import { getApiBaseUrl, getPublicApiBaseUrl } from "@/lib/api"
 import { ApiAccessTokens } from "@/components/settings/ApiAccessTokens"
 import { ApiWorkflowDocs } from "@/components/profile/ApiWorkflowDocs"
@@ -87,13 +87,14 @@ export default function SettingsPage() {
     client_id: "",
     client_secret: "",
     redirect_uri: "",
-    scope: "https://www.googleapis.com/auth/drive",
+    scope: "openid email profile https://www.googleapis.com/auth/drive",
     configured: false,
   })
   const [googleOAuthLoading, setGoogleOAuthLoading] = useState(false)
   const [googleOAuthSaving, setGoogleOAuthSaving] = useState(false)
   const [googleOAuthError, setGoogleOAuthError] = useState<string | null>(null)
   const [googleOAuthSuccess, setGoogleOAuthSuccess] = useState<string | null>(null)
+  const [googleOAuthCopied, setGoogleOAuthCopied] = useState<"redirect" | "scope" | null>(null)
 
   const isAdmin = Boolean(user?.is_superuser || normalizedRole === "admin")
 
@@ -189,7 +190,7 @@ export default function SettingsPage() {
           client_id: data.client_id ?? "",
           client_secret: data.client_secret ?? "",
           redirect_uri: data.redirect_uri ?? "",
-          scope: data.scope ?? "https://www.googleapis.com/auth/drive",
+          scope: data.scope ?? "openid email profile https://www.googleapis.com/auth/drive",
           configured: Boolean(data.configured),
         })
       } catch (err) {
@@ -461,6 +462,17 @@ export default function SettingsPage() {
     }
   }
 
+  const copyGoogleOAuthValue = async (field: "redirect" | "scope", value: string) => {
+    if (!value || typeof navigator === "undefined" || !navigator.clipboard) return
+    try {
+      await navigator.clipboard.writeText(value)
+      setGoogleOAuthCopied(field)
+      window.setTimeout(() => setGoogleOAuthCopied(null), 1800)
+    } catch {
+      setGoogleOAuthError("คัดลอกค่าไม่สำเร็จ กรุณาเลือกและคัดลอกด้วยตนเอง")
+    }
+  }
+
   const handleSaveGoogleOAuth = async () => {
     setGoogleOAuthSaving(true)
     setGoogleOAuthError(null)
@@ -644,14 +656,17 @@ export default function SettingsPage() {
             <details className="mt-3 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
               <summary className="cursor-pointer text-sm font-semibold text-slate-700">วิธีตั้งค่า Google OAuth</summary>
               <ol className="mt-3 list-decimal space-y-1.5 pl-5 text-sm text-slate-600">
-                <li>เปิด Google Cloud Console แล้วเลือกหรือสร้าง Project</li>
-                <li>ไปที่ APIs &amp; Services &gt; Library และเปิดใช้งาน <span className="font-medium">Google Drive API</span></li>
-                <li>ตั้งค่า OAuth consent screen; หากเป็น External ให้เพิ่มบัญชีทดสอบที่ต้องการใช้งาน</li>
-                <li>ไปที่ Credentials &gt; Create credentials &gt; OAuth client ID เลือกประเภท Web application</li>
-                <li>เพิ่ม Redirect URI ที่แสดงด้านล่างใน Authorized redirect URIs แล้วคัดลอก Client ID และ Client Secret</li>
-                <li>นำค่ามาวางในฟอร์ม ตรวจ Scopes และกดบันทึก จากนั้นผู้ใช้จึงกด Connect Google Drive ได้</li>
+                <li>เปิด Google Cloud Console และเลือก Project ที่ใช้กับระบบ</li>
+                <li>ไปที่ APIs &amp; Services &gt; Library แล้วเปิดใช้งาน <span className="font-medium">Google Drive API</span></li>
+                <li>ไปที่ Google Auth Platform &gt; Branding และตั้งค่า OAuth consent screen ให้เรียบร้อย</li>
+                <li>ถ้าเป็น External ให้เพิ่มบัญชีผู้ใช้ที่จะทดสอบในหน้า Audience &gt; Test users</li>
+                <li>ไปที่ Clients &gt; Create client &gt; Web application แล้วคัดลอก Client ID และ Client Secret มาใส่ด้านล่าง</li>
+                <li>คัดลอก Redirect URI และเพิ่มเป็น Authorized redirect URI ใน Google Cloud Console จากนั้นกดบันทึก</li>
               </ol>
-              <p className="mt-3 text-xs text-slate-500">Redirect URI ต้องตรงทุกตัวอักษร รวมถึง https และ path ห้ามใช้ localhost กับระบบจริง</p>
+              <div className="mt-3 flex items-start gap-2 rounded-md border border-blue-100 bg-blue-50 px-3 py-2 text-xs text-blue-800">
+                <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+                <p>ระบบกำหนด Redirect URI และ Scope ให้อัตโนมัติ ไม่ต้องพิมพ์หรือแก้ไขสองค่านี้</p>
+              </div>
             </details>
           </CardHeader>
           <CardContent className="space-y-4">
@@ -660,7 +675,7 @@ export default function SettingsPage() {
             <div className="grid gap-4 md:grid-cols-2">
               <div className="space-y-2">
                 <label htmlFor="google-oauth-client-id" className="text-sm font-medium">Client ID *</label>
-                <Input id="google-oauth-client-id" value={googleOAuth.client_id} onChange={(e) => setGoogleOAuth((prev) => ({ ...prev, client_id: e.target.value }))} disabled={googleOAuthLoading || googleOAuthSaving} />
+                <Input id="google-oauth-client-id" value={googleOAuth.client_id} onChange={(e) => setGoogleOAuth((prev) => ({ ...prev, client_id: e.target.value }))} placeholder="...apps.googleusercontent.com" disabled={googleOAuthLoading || googleOAuthSaving} />
               </div>
               <div className="space-y-2">
                 <label htmlFor="google-oauth-client-secret" className="text-sm font-medium">Client Secret *</label>
@@ -669,13 +684,26 @@ export default function SettingsPage() {
               </div>
             </div>
             <div className="space-y-2">
-              <label htmlFor="google-oauth-redirect-uri" className="text-sm font-medium">Redirect URI</label>
-              <Input id="google-oauth-redirect-uri" value={googleOAuth.redirect_uri} onChange={(e) => setGoogleOAuth((prev) => ({ ...prev, redirect_uri: e.target.value }))} placeholder="เว้นว่างเพื่อใช้ URL ของระบบ" disabled={googleOAuthLoading || googleOAuthSaving} />
-              <p className="text-xs text-slate-500">ต้องเพิ่ม URL นี้เป็น Authorized redirect URI ใน Google Cloud Console</p>
+              <div className="flex items-center justify-between gap-3">
+                <label htmlFor="google-oauth-redirect-uri" className="text-sm font-medium">Redirect URI <span className="ml-1 text-xs font-normal text-emerald-700">ระบบกำหนด</span></label>
+              </div>
+              <div className="flex items-center gap-2">
+                <Input id="google-oauth-redirect-uri" value={googleOAuth.redirect_uri} readOnly className="bg-slate-50 text-slate-600" aria-label="Google OAuth redirect URI" disabled={googleOAuthLoading || googleOAuthSaving} />
+                <Button type="button" variant="outline" size="icon" onClick={() => copyGoogleOAuthValue("redirect", googleOAuth.redirect_uri)} disabled={!googleOAuth.redirect_uri || googleOAuthLoading || googleOAuthSaving} aria-label={googleOAuthCopied === "redirect" ? "คัดลอก Redirect URI แล้ว" : "คัดลอก Redirect URI"} title={googleOAuthCopied === "redirect" ? "คัดลอกแล้ว" : "คัดลอก Redirect URI"}>
+                  {googleOAuthCopied === "redirect" ? <Check className="h-4 w-4 text-emerald-600" /> : <Copy className="h-4 w-4" />}
+                </Button>
+              </div>
+              <p className="text-xs text-slate-500">นำค่านี้ไปเพิ่มใน Authorized redirect URIs ของ Google Cloud Console โดยต้องตรงทุกตัวอักษร</p>
             </div>
             <div className="space-y-2">
-              <label htmlFor="google-oauth-scope" className="text-sm font-medium">Scopes *</label>
-              <Input id="google-oauth-scope" value={googleOAuth.scope} onChange={(e) => setGoogleOAuth((prev) => ({ ...prev, scope: e.target.value }))} disabled={googleOAuthLoading || googleOAuthSaving} />
+              <label htmlFor="google-oauth-scope" className="text-sm font-medium">Scopes <span className="ml-1 text-xs font-normal text-emerald-700">ระบบกำหนด</span></label>
+              <div className="flex items-center gap-2">
+                <Input id="google-oauth-scope" value={googleOAuth.scope} readOnly className="bg-slate-50 text-slate-600" aria-label="Google OAuth scopes" disabled={googleOAuthLoading || googleOAuthSaving} />
+                <Button type="button" variant="outline" size="icon" onClick={() => copyGoogleOAuthValue("scope", googleOAuth.scope)} disabled={!googleOAuth.scope || googleOAuthLoading || googleOAuthSaving} aria-label={googleOAuthCopied === "scope" ? "คัดลอก Scopes แล้ว" : "คัดลอก Scopes"} title={googleOAuthCopied === "scope" ? "คัดลอกแล้ว" : "คัดลอก Scopes"}>
+                  {googleOAuthCopied === "scope" ? <Check className="h-4 w-4 text-emerald-600" /> : <Copy className="h-4 w-4" />}
+                </Button>
+              </div>
+              <p className="text-xs text-slate-500">ใช้สำหรับอ่านข้อมูลบัญชีและจัดการไฟล์ Google Drive ตามการทำงานของระบบ</p>
             </div>
             <Button type="button" onClick={handleSaveGoogleOAuth} disabled={googleOAuthLoading || googleOAuthSaving}>
               {googleOAuthSaving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}

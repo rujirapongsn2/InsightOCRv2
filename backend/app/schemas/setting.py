@@ -58,7 +58,7 @@ class GoogleOAuthConfigUpdate(BaseModel):
     client_secret: str | None = Field(default=None, max_length=4096)
     redirect_uri: str | None = Field(default=None, max_length=2048)
     scope: str = Field(
-        default="https://www.googleapis.com/auth/drive",
+        default="openid email profile https://www.googleapis.com/auth/drive",
         min_length=1,
         max_length=2048,
     )

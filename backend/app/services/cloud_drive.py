@@ -20,7 +20,6 @@ from typing import Any, Dict, List
 
 import requests
 from jose import jwt
-from app.core.config import settings
 
 GOOGLE_SCOPE = "https://www.googleapis.com/auth/drive"
 GOOGLE_DEFAULT_TOKEN_URI = "https://oauth2.googleapis.com/token"
@@ -59,7 +58,25 @@ class GoogleDriveClient:
 
     def _token(self) -> str:
         if self.auth_mode == "oauth":
-            from app.services.cloud_oauth import CloudOAuthError, decrypt_refresh_token, encrypt_refresh_token
+            from app.services.cloud_oauth import (
+                CloudOAuthError,
+                decrypt_refresh_token,
+                encrypt_refresh_token,
+                get_google_oauth_config,
+            )
+
+            if self.db is None:
+                raise CloudDriveError("Google Drive OAuth configuration ต้องใช้ฐานข้อมูล")
+
+            try:
+                oauth_config = get_google_oauth_config(self.db)
+            except CloudOAuthError as exc:
+                raise CloudDriveError(str(exc)) from exc
+
+            client_id = oauth_config.get("client_id")
+            client_secret = oauth_config.get("client_secret")
+            if not client_id or not client_secret:
+                raise CloudDriveError("Google Drive OAuth configuration ไม่ครบถ้วน กรุณาตรวจสอบ Settings")
 
             try:
                 refresh_token = decrypt_refresh_token(self.refresh_token_encrypted)
@@ -71,8 +88,8 @@ class GoogleDriveClient:
                 resp = requests.post(
                     GOOGLE_DEFAULT_TOKEN_URI,
                     data={
-                        "client_id": settings.GOOGLE_OAUTH_CLIENT_ID,
-                        "client_secret": settings.GOOGLE_OAUTH_CLIENT_SECRET,
+                        "client_id": client_id,
+                        "client_secret": client_secret,
                         "refresh_token": refresh_token,
                         "grant_type": "refresh_token",
                     },

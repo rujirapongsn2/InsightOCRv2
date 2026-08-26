@@ -26,7 +26,7 @@ OAUTH_STATE_TTL_SECONDS = 10 * 60
 OAUTH_TIMEOUT = 30
 OAUTH_STATE_PREFIX = "insightdoc:oauth-state:"
 DEFAULT_MICROSOFT_OAUTH_SCOPE = "openid profile email offline_access User.Read Files.ReadWrite"
-DEFAULT_GOOGLE_OAUTH_SCOPE = "https://www.googleapis.com/auth/drive"
+DEFAULT_GOOGLE_OAUTH_SCOPE = "openid email profile https://www.googleapis.com/auth/drive"
 
 
 class CloudOAuthError(Exception):
@@ -98,9 +98,9 @@ def get_microsoft_oauth_config(db: Any = None) -> Dict[str, str | None]:
 
 
 def get_google_oauth_config(db: Any = None) -> Dict[str, str | None]:
-    """Resolve admin DB settings first, then deployment env defaults."""
+    """Resolve Google OAuth settings from the admin-managed database row."""
     stored = db.query(Setting).first() if db is not None else None
-    client_secret = settings.GOOGLE_OAUTH_CLIENT_SECRET
+    client_secret = None
     encrypted_secret = getattr(stored, "google_oauth_client_secret_encrypted", None)
     if encrypted_secret:
         try:
@@ -108,10 +108,10 @@ def get_google_oauth_config(db: Any = None) -> Dict[str, str | None]:
         except SecretStoreError as exc:
             raise CloudOAuthError("ไม่สามารถถอดรหัส Google OAuth Client Secret ได้") from exc
     return {
-        "client_id": getattr(stored, "google_oauth_client_id", None) or settings.GOOGLE_OAUTH_CLIENT_ID,
+        "client_id": getattr(stored, "google_oauth_client_id", None),
         "client_secret": client_secret,
-        "redirect_uri": getattr(stored, "google_oauth_redirect_uri", None) or settings.GOOGLE_OAUTH_REDIRECT_URI,
-        "scope": getattr(stored, "google_oauth_scope", None) or settings.GOOGLE_OAUTH_SCOPE or DEFAULT_GOOGLE_OAUTH_SCOPE,
+        "redirect_uri": getattr(stored, "google_oauth_redirect_uri", None),
+        "scope": getattr(stored, "google_oauth_scope", None) or DEFAULT_GOOGLE_OAUTH_SCOPE,
     }
 
 

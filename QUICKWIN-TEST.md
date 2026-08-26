@@ -1,5 +1,24 @@
 # QUICKWIN TEST
 
+Date: 2026-08-26
+
+## Manual Verification - Google OAuth Settings Defaults
+
+1. UI and configuration guidance
+   - Updated Settings > Google OAuth so Redirect URI and Scopes are populated from the system response, read-only, and copyable.
+   - Default Scope is `openid email profile https://www.googleapis.com/auth/drive`.
+   - Updated the setup guide for Google Cloud Console, Google Drive API, OAuth consent screen, test users, Web client, and Authorized redirect URI.
+
+2. Verification commands
+   - `docker compose up -d --build backend celery_worker celery_beat frontend` completed successfully.
+   - Frontend production build passed Next.js compilation, TypeScript, and static page generation; existing Astryx CSS optimizer warnings remain non-fatal.
+   - `docker compose exec -T backend pytest -q test/test_cloud_oauth.py`: `3 passed`.
+   - Confirmed Google OAuth environment values are unset in the backend container and the DB-managed config path is used.
+   - Confirmed backend, frontend, worker, beat, and nginx are running; backend/frontend healthchecks pass.
+   - Confirmed `https://insightdoc.softnix.ai/settings` returns HTTP `200` after refreshing nginx upstream resolution.
+   - Ran `git diff --check` successfully.
+
+
 
 Date: 2026-07-14
 
