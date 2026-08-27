@@ -98,6 +98,59 @@ def test_publish_artifact_resolution_is_shared_by_single_node_execution_path():
     assert resolved["_inferred_job_id"] == job_id
 
 
+def test_publish_artifact_automatically_uses_the_verified_upstream_artifact():
+    job_id = str(uuid4())
+    resolved = workflow_engine._resolve_node_config(
+        {"id": "publish", "type": "publish_artifact"},
+        {"auto_source": True},
+        [{"source": "agent", "target": "publish"}],
+        {"agent": {"job_id": job_id, "artifacts": [{
+            "path": "outputs/workflow/run/agent/report.html",
+            "verified": True,
+        }]}},
+        {"agent": "succeeded"},
+    )
+
+    assert resolved["source_path"] == "outputs/workflow/run/agent/report.html"
+    assert resolved["_inferred_job_id"] == job_id
+
+
+def test_agent_handoffs_include_all_earlier_agent_stages_within_a_prompt_budget():
+    resolved = workflow_engine._resolve_node_config(
+        {"id": "report", "type": "llm"},
+        {"mode": "agent", "agent_task": "report"},
+        [
+            {"source": "analysis", "target": "risk"},
+            {"source": "risk", "target": "recommendations"},
+            {"source": "recommendations", "target": "report"},
+        ],
+        {
+            "analysis": {"status": "succeeded", "text": "facts"},
+            "risk": {"status": "succeeded", "text": "risks"},
+            "recommendations": {"status": "succeeded", "text": "actions"},
+        },
+        {"analysis": "succeeded", "risk": "succeeded", "recommendations": "succeeded"},
+    )
+
+    assert [item["source_node"] for item in resolved["_upstream_agent_handoffs"]] == [
+        "analysis", "risk", "recommendations",
+    ]
+
+
+def test_analysis_agent_receives_a_bounded_upstream_job_dossier():
+    resolved = workflow_engine._resolve_node_config(
+        {"id": "analysis", "type": "llm"},
+        {"mode": "agent", "agent_task": "analysis"},
+        [{"source": "jobs", "target": "analysis"}],
+        {"jobs": {"job_id": "job-1", "records": "x" * 50_000}},
+        {"jobs": "succeeded"},
+        [{"id": "jobs", "type": "job_source"}, {"id": "analysis", "type": "llm"}],
+    )
+
+    assert resolved["_workflow_dossier"][0]["source_node"] == "jobs"
+    assert len(resolved["_workflow_dossier"][0]["content"]) <= 32_100
+
+
 def test_safe_json_keeps_artifact_metadata_when_agent_output_is_truncated():
     artifact = {"filename": "report.docx", "path": "outputs/report.docx", "verified": True}
     result = workflow_engine._safe_json({

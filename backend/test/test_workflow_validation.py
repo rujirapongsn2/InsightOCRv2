@@ -95,6 +95,41 @@ def test_agent_mode_requires_skill_and_bounded_runtime():
     assert {"skill_ids", "max_iterations", "timeout_seconds"} <= fields
 
 
+def test_agent_max_output_tokens_override_is_optional_but_bounded():
+    definition = {
+        "nodes": [
+            _node("t1", "trigger_manual"),
+            _node("a1", "llm", {
+                "mode": "agent",
+                "prompt": "Create a report",
+                "skill_ids": [],
+                "max_output_tokens": 100,  # below the 256 floor
+            }),
+        ],
+        "edges": [{"id": "e", "source": "t1", "target": "a1"}],
+    }
+    issues = validate_workflow_definition(_FakeSession(), definition, _User())
+    fields = {issue["field"] for issue in issues if issue["level"] == "error"}
+    assert "max_output_tokens" in fields
+
+
+def test_agent_max_output_tokens_left_empty_is_valid():
+    definition = {
+        "nodes": [
+            _node("t1", "trigger_manual"),
+            _node("a1", "llm", {
+                "mode": "agent",
+                "prompt": "Create a report",
+                "skill_ids": [],
+            }),
+        ],
+        "edges": [{"id": "e", "source": "t1", "target": "a1"}],
+    }
+    issues = validate_workflow_definition(_FakeSession(), definition, _User())
+    fields = {issue["field"] for issue in issues if issue["level"] == "error"}
+    assert "max_output_tokens" not in fields
+
+
 def test_file_agent_requires_job_context_or_an_upstream_job_node():
     definition = {
         "nodes": [

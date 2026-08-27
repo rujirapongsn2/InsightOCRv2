@@ -34,8 +34,10 @@ from app.services.workflow_engine import (
     _topological_order,
 )
 from app.services.workflow_agent_contracts import (
+    AGENT_TASK_PRESETS,
     FILE_OUTPUT_FORMATS,
-    OUTPUT_FORMAT_REQUIRED_TOOLS,
+    agent_task_preset,
+    missing_output_tools,
 )
 from app.agent.tools.skill_tools import _normalize_allowed_tools
 
@@ -226,6 +228,10 @@ def validate_workflow_definition(
             issues.append(_issue(nid, "error", "mode", "โหมด AI ต้องเป็น llm หรือ agent"))
 
         if ntype == "llm" and (config.get("mode") or "llm") == "agent":
+            agent_task = str(config.get("agent_task") or "custom")
+            preset = agent_task_preset(agent_task)
+            if agent_task not in AGENT_TASK_PRESETS:
+                issues.append(_issue(nid, "error", "agent_task", "ไม่รู้จักงาน Agent ที่เลือก"))
             if not config.get("ai_provider_id"):
                 configured_agent_provider = db.query(AISettings).filter(
                     AISettings.is_agent_provider == True,  # noqa: E712
@@ -311,12 +317,18 @@ def validate_workflow_definition(
                                 ))
 
             output_format = str(config.get("output_format") or "text").lower()
+            fixed_output_format = str((preset or {}).get("output_format") or "")
+            if fixed_output_format and output_format != fixed_output_format:
+                issues.append(_issue(
+                    nid, "error", "output_format",
+                    f"งาน Agent '{agent_task}' กำหนดผลลัพธ์เป็น {fixed_output_format.upper()} เท่านั้น",
+                ))
             if output_format not in {"text", "json", "html", "docx", "pdf", "xlsx"}:
                 issues.append(_issue(nid, "error", "output_format", "รูปแบบผลลัพธ์ Agent ไม่ถูกต้อง"))
             else:
-                required_tools = OUTPUT_FORMAT_REQUIRED_TOOLS[output_format]
-                if has_declared_policy and not required_tools.issubset(declared_tools):
-                    missing_tools = ", ".join(sorted(required_tools - declared_tools))
+                missing = missing_output_tools(set(declared_tools), output_format)
+                if has_declared_policy and missing:
+                    missing_tools = ", ".join(sorted(missing))
                     issues.append(_issue(
                         nid,
                         "error",
@@ -346,6 +358,17 @@ def validate_workflow_definition(
                 timeout_seconds = 0
             if not 60 <= timeout_seconds <= 900:
                 issues.append(_issue(nid, "error", "timeout_seconds", "Timeout Agent ต้องอยู่ระหว่าง 60-900 วินาที"))
+            raw_max_output_tokens = config.get("max_output_tokens")
+            if raw_max_output_tokens not in (None, ""):
+                try:
+                    max_output_tokens = int(raw_max_output_tokens)
+                except (TypeError, ValueError):
+                    max_output_tokens = 0
+                if not 256 <= max_output_tokens <= 16000:
+                    issues.append(_issue(
+                        nid, "error", "max_output_tokens",
+                        "Output tokens สูงสุดต้องอยู่ระหว่าง 256-16000 หรือเว้นว่างไว้",
+                    ))
 
         # Template refs must point at a node present in the graph.
         for ref in set(_node_ids_referenced(config)):

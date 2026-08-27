@@ -139,11 +139,19 @@ const TRIGGER_TYPE_LABEL: Record<string, string> = {
     node_test: "ทดสอบโหนด",
 }
 
+type NodeTaskPresetRow = {
+    task: string
+    role: string
+    budget: string
+    best_for: string
+}
+
 type NodeHelpContent = {
     purpose: string
     steps: string[]
     example: string
     caution?: string
+    task_table?: NodeTaskPresetRow[]
 }
 
 const NODE_HELP_CONTENT: Record<string, NodeHelpContent> = {
@@ -200,7 +208,13 @@ const NODE_HELP_CONTENT: Record<string, NodeHelpContent> = {
             "เปิด JSON output เฉพาะเมื่อ Prompt สั่งให้ตอบ JSON ที่ถูกต้องและ node ถัดไปต้องอ้างฟิลด์ภายใน",
         ],
         example: "ตัวอย่าง: ใช้ {{job.documents}} ใน prompt เพื่อสรุปประเด็นสำคัญ",
-        caution: "ระบุรูปแบบผลลัพธ์ให้ชัดเจน เช่น หัวข้อ ตาราง หรือ JSON เพื่อให้ node ถัดไปใช้งานต่อได้แน่นอน",
+        task_table: [
+            { task: "วิเคราะห์เอกสาร", role: "วิเคราะห์เนื้อหาแล้วส่งข้อสรุปต่อให้ node ถัดไป", budget: "3 รอบ · 120 วิ · 1,600 tokens", best_for: "สกัดประเด็น สรุปข้อเท็จจริง จัดหมวดหมู่เอกสาร" },
+            { task: "ประเมินความเสี่ยง", role: "ตรวจสอบและระบุความเสี่ยงหรือความผิดปกติ", budget: "3 รอบ · 120 วิ · 1,200 tokens", best_for: "ตรวจสัญญา ใบแจ้งหนี้ หรือข้อมูลที่ต้องชี้ข้อควรระวัง" },
+            { task: "จัดทำข้อเสนอแนะ", role: "เสนอแนวทางหรือข้อเสนอแนะจากผลของ node ก่อนหน้า", budget: "3 รอบ · 120 วิ · 1,200 tokens", best_for: "ขั้นตอนถัดไป เช่น วิธีลดความเสี่ยงที่ตรวจพบ" },
+            { task: "สร้างรายงาน", role: "รวบรวมผลทุก stage เป็นเอกสารจริงและผูกไฟล์ให้ดาวน์โหลด", budget: "3 รอบ · 300 วิ · 8,000 tokens", best_for: "จุดสุดท้ายของสาย Agent ที่ต้องส่งมอบไฟล์ HTML/DOCX/PDF/XLSX" },
+        ],
+        caution: "โหมด LLM: ระบุรูปแบบผลลัพธ์ให้ชัดเจน เช่น หัวข้อ ตาราง หรือ JSON เพื่อให้ node ถัดไปใช้งานต่อได้แน่นอน · โหมด Agent: งาน วิเคราะห์/ประเมินความเสี่ยง/ข้อเสนอแนะ ส่งผลได้เฉพาะข้อความ — หากต้องการไฟล์ ให้วาง node ที่เลือก “สร้างรายงาน” ไว้ตัวสุดท้ายของสาย Agent",
     },
     condition: {
         purpose: "ใช้ตัดสินใจและส่งงานต่อคนละเส้นทางตามผล True หรือ False",
@@ -1095,6 +1109,17 @@ function ConfigField({
         )
     }
 
+    if (field.type === "skill_select") {
+        const selectedId = Array.isArray(value) ? value[0] || "" : ""
+        return (
+            <select className={base} value={selectedId} onChange={(event) => onChange(event.target.value ? [event.target.value] : [])}>
+                <option value="">— เลือก Skill —</option>
+                {agentSkills.map((skill) => (
+                    <option key={skill.id} value={skill.id}>{skill.name}</option>
+                ))}
+            </select>
+        )
+    }
     if (field.type === "skill_multi_select") {
         const selected = new Set(Array.isArray(value) ? value : [])
         if (agentSkillsLoading) {
@@ -1151,7 +1176,9 @@ function ConfigField({
         }
     }
     if (field.type === "ai_provider_select") {
-        const activeProviders = aiProviders.filter((p) => p.is_active)
+        const activeProviders = aiProviders.filter((p) => p.is_active && (
+            !field.agent_provider_only || p.provider_type === "openai_compatible"
+        ))
         const known = activeProviders.some((p) => p.id === value)
         return (
             <div>
@@ -1280,7 +1307,12 @@ function ConfigField({
                 className={base}
                 placeholder={field.placeholder}
                 value={value ?? field.default ?? ""}
-                onChange={(e) => onChange(field.type === "number" ? Number(e.target.value) : e.target.value)}
+                onChange={(e) => {
+                    if (field.type !== "number") { onChange(e.target.value); return }
+                    // An emptied optional number field must fall back to the
+                    // node/task default, not silently become 0.
+                    onChange(e.target.value === "" ? null : Number(e.target.value))
+                }}
             />
         </div>
     )
@@ -1513,6 +1545,7 @@ function Builder() {
     // output จริงของแต่ละโหนดจากการรันเต็มล่าสุด — ใช้เติมฟิลด์ใน variable picker
     const [nodeOutputs, setNodeOutputs] = useState<Record<string, any>>({})
     const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+    const visibilityRefreshRef = useRef<(() => void) | null>(null)
 
     const loadAgentSkills = useCallback(async () => {
         if (!token) return
@@ -1547,7 +1580,10 @@ function Builder() {
         listAIProviders(token).then(setAiProviders).catch(() => { /* select shows empty hint */ })
         loadAgentSkills()
         loadLatestOutputs()
-        return () => { if (pollRef.current) clearInterval(pollRef.current) }
+        return () => {
+            if (pollRef.current) clearInterval(pollRef.current)
+            if (visibilityRefreshRef.current) visibilityRefreshRef.current()
+        }
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [token, workflowId, loadAgentSkills])
 
@@ -1585,6 +1621,7 @@ function Builder() {
         if (!token) return
         setRunPanelOpen(true)
         if (pollRef.current) clearInterval(pollRef.current)
+        if (visibilityRefreshRef.current) visibilityRefreshRef.current()
         const tick = async () => {
             try {
                 const run = await getRun(token, runId)
@@ -1599,6 +1636,14 @@ function Builder() {
         }
         tick()
         pollRef.current = setInterval(tick, 1500)
+        const refreshWhenVisible = () => {
+            if (document.visibilityState === "visible") tick()
+        }
+        document.addEventListener("visibilitychange", refreshWhenVisible)
+        visibilityRefreshRef.current = () => {
+            document.removeEventListener("visibilitychange", refreshWhenVisible)
+            visibilityRefreshRef.current = null
+        }
     }, [token, applyRunToCanvas])
 
     // ── DnD from palette ──
@@ -1709,10 +1754,17 @@ function Builder() {
     const selectedConfig = selectedNode ? (selectedNode.data as WfNodeData).config || {} : {}
     const visibleConfigFields = selectedDef?.config_fields.filter((field) => {
         if (!field.visible_when) return true
+        // A missing key falls back to the same default the backend infers for an
+        // unset field (e.g. run_workflow_agent treats a missing agent_task as
+        // "custom"), so legacy saved nodes evaluate visibility consistently with
+        // how the server will actually run them.
         const actual = selectedConfig[field.visible_when.field] ?? (
-            field.visible_when.field === "mode" ? "llm" : undefined
+            field.visible_when.field === "mode" ? "llm"
+                : field.visible_when.field === "agent_task" ? "custom"
+                    : undefined
         )
-        return actual === field.visible_when.equals
+        const expected = field.visible_when.equals
+        return Array.isArray(expected) ? expected.includes(actual) : actual === expected
     }) || []
     const primaryConfigFields = visibleConfigFields.filter((field) => !field.advanced)
     const advancedConfigFields = visibleConfigFields.filter((field) => field.advanced)
@@ -1729,9 +1781,21 @@ function Builder() {
     }, [selectedId])
 
     const updateSelectedConfig = (name: string, value: any) => {
-        setNodes((nds) => nds.map((n) => n.id === selectedId
-            ? { ...n, data: { ...n.data, config: { ...(n.data as WfNodeData).config, [name]: value } } }
-            : n))
+        setNodes((nds) => nds.map((n) => {
+            if (n.id !== selectedId) return n
+            const current = (n.data as WfNodeData).config || {}
+            let next = { ...current, [name]: value }
+            if (name === "agent_task") {
+                const defaults: Record<string, Record<string, any>> = {
+                    analysis: { output_format: "text", output_filename: "", max_iterations: 3, timeout_seconds: 120 },
+                    risk_assessment: { output_format: "text", output_filename: "", max_iterations: 3, timeout_seconds: 90 },
+                    recommendations: { output_format: "text", output_filename: "", max_iterations: 3, timeout_seconds: 90 },
+                    report: { output_format: "html", output_filename: "report.html", max_iterations: 3, timeout_seconds: 180 },
+                }
+                next = { ...next, ...(defaults[String(value)] || {}) }
+            }
+            return { ...n, data: { ...n.data, config: next } }
+        }))
         setDirty(true)
     }
 
@@ -2228,6 +2292,35 @@ function Builder() {
                                                 {selectedHelp.steps.map((step) => <li key={step}>{step}</li>)}
                                             </ol>
                                         </section>
+
+                                        {selectedHelp.task_table && selectedHelp.task_table.length > 0 && (
+                                            <section>
+                                                <p className="font-semibold text-[#0D1B2A]">งานของ Agent — เลือกให้ตรงกับงาน</p>
+                                                <div className="mt-1 overflow-x-auto">
+                                                    <table className="w-full border-collapse text-xs">
+                                                        <thead>
+                                                            <tr className="text-left text-[#778DA9]">
+                                                                <th className="border-b border-[#E2E8F0] py-1 pr-2 font-medium">งาน</th>
+                                                                <th className="border-b border-[#E2E8F0] py-1 pr-2 font-medium">หน้าที่</th>
+                                                                <th className="border-b border-[#E2E8F0] py-1 pr-2 font-medium">งบประมาณ</th>
+                                                                <th className="border-b border-[#E2E8F0] py-1 font-medium">เหมาะกับ</th>
+                                                            </tr>
+                                                        </thead>
+                                                        <tbody>
+                                                            {selectedHelp.task_table.map((row) => (
+                                                                <tr key={row.task} className="align-top">
+                                                                    <td className="border-b border-[#E2E8F0] py-1.5 pr-2 font-medium text-[#0D1B2A]">{row.task}</td>
+                                                                    <td className="border-b border-[#E2E8F0] py-1.5 pr-2">{row.role}</td>
+                                                                    <td className="border-b border-[#E2E8F0] py-1.5 pr-2 whitespace-nowrap text-[#778DA9]">{row.budget}</td>
+                                                                    <td className="border-b border-[#E2E8F0] py-1.5">{row.best_for}</td>
+                                                                </tr>
+                                                            ))}
+                                                        </tbody>
+                                                    </table>
+                                                </div>
+                                                <p className="mt-1 text-[#778DA9]">งบประมาณ = จำนวนรอบสูงสุด · เวลาสูงสุด · output tokens สูงสุดต่อการเรียก LLM 1 ครั้ง (ค่าที่ระบบบังคับใช้ตามงานที่เลือก)</p>
+                                            </section>
+                                        )}
 
                                         <section>
                                             <p className="font-semibold text-[#0D1B2A]">ตัวอย่าง</p>

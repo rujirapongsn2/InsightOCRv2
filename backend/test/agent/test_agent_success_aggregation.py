@@ -14,6 +14,8 @@ from app.agent.loop import (
     AgentLoop,
     _aggregate_success,
     _chat_with_retry,
+    _is_context_length_error,
+    _is_report_success,
     _tool_failed,
 )
 
@@ -124,6 +126,81 @@ async def test_required_tool_call_provider_failure_is_not_silently_degraded():
             tool_choice="auto",
             require_tools=True,
         )
+
+
+# ── context-length overflow: fail fast, don't burn retries ─────────────
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        RuntimeError("Error code: 400 - This model's maximum context length is 8192 tokens"),
+        RuntimeError("400 context_length_exceeded: reduce the length of the messages"),
+        RuntimeError("the prompt is too long for this model's context window"),
+    ],
+)
+def test_is_context_length_error_matches_common_provider_messages(exc):
+    assert _is_context_length_error(exc) is True
+
+
+def test_is_context_length_error_ignores_unrelated_failures():
+    assert _is_context_length_error(RuntimeError("connection reset by peer")) is False
+
+
+def test_is_context_length_error_ignores_rate_limit_errors_with_overlapping_wording():
+    """A 429 tokens-per-minute message can legitimately say 'too many tokens' —
+    that must still be retried with backoff, not treated as a fatal overflow."""
+    exc = RuntimeError("Rate limit reached: too many tokens per minute, please retry later")
+    exc.status_code = 429
+    assert _is_context_length_error(exc) is False
+
+
+def test_is_context_length_error_ignores_rate_limit_error_class_name():
+    class RateLimitError(RuntimeError):
+        pass
+
+    assert _is_context_length_error(RateLimitError("context window busy, try again")) is False
+
+
+# ── _is_report_success recognizes every report-producing tool ──────────
+
+
+def test_is_report_success_recognizes_create_html():
+    result = {"ok": True, "verified": True, "path": "outputs/report.html"}
+    assert _is_report_success("create_html", result) is True
+
+
+def test_is_report_success_still_recognizes_run_report_code():
+    result = {"ok": True, "verified": True, "path": "outputs/report.html"}
+    assert _is_report_success("run_report_code", result) is True
+
+
+def test_is_report_success_rejects_unrelated_tools():
+    result = {"ok": True, "verified": True, "path": "outputs/data.xlsx"}
+    assert _is_report_success("convert_to_xlsx", result) is False
+
+
+@pytest.mark.asyncio
+async def test_context_length_overflow_fails_fast_without_retrying():
+    """Retrying a too-large prompt just resends the same size — must not retry."""
+    client = MagicMock()
+    call_count = 0
+
+    async def raise_context_error(**_kwargs):
+        nonlocal call_count
+        call_count += 1
+        raise RuntimeError("Error code: 400 - This model's maximum context length is 4096 tokens")
+
+    client.chat.completions.create = AsyncMock(side_effect=raise_context_error)
+
+    with pytest.raises(RuntimeError, match="context window"):
+        await _chat_with_retry(
+            client,
+            model="test",
+            messages=[{"role": "user", "content": "x" * 50_000}],
+            max_attempts=3,
+        )
+    assert call_count == 1
 
 
 # ── _reflect honesty ─────────────────────────────────────────────────

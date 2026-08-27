@@ -88,6 +88,7 @@ export interface NodeTypeField {
   placeholder?: string
   hint?: string
   provider?: string
+  agent_provider_only?: boolean
   option_labels?: Record<string, string>
   visible_when?: { field: string; equals: any }
   advanced?: boolean
@@ -132,6 +133,7 @@ const authHeaders = (token: string) => ({
 async function request<T>(token: string, path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(apiUrl(path), {
     ...init,
+    cache: "no-store",
     headers: { ...authHeaders(token), ...(init?.headers || {}) },
   })
   handleAuthError(response)

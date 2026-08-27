@@ -26,7 +26,7 @@ interface AgentToolCallsProps {
     autoConfirmedIds?: Set<string>
 }
 
-const FILE_WRITE_TOOLS = new Set(["write_file", "create_docx", "create_pdf", "convert_to_xlsx", "run_report_code"])
+const FILE_WRITE_TOOLS = new Set(["write_file", "create_html", "create_docx", "create_pdf", "convert_to_xlsx", "run_report_code"])
 
 function isRecord(value: unknown): value is JsonRecord {
     return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -61,7 +61,7 @@ function getCategory(name: string): string {
     if (["list_documents", "get_document_detail", "search_documents", "compare_documents", "update_document_field", "approve_document", "reject_document", "bulk_approve"].includes(name)) return "document"
     if (["list_integrations", "call_api_integration", "send_to_workflow"].includes(name)) return "integration"
     if (["execute_python", "run_report_code"].includes(name)) return "code"
-    if (["read_file", "write_file", "list_files", "delete_file", "create_docx", "create_pdf", "convert_to_xlsx"].includes(name)) return "filesystem"
+    if (["read_file", "write_file", "list_files", "delete_file", "create_html", "create_docx", "create_pdf", "convert_to_xlsx"].includes(name)) return "filesystem"
     if (["save_memory", "recall_memory", "list_memories", "forget_memory"].includes(name)) return "memory"
     if (["create_skill", "import_skill", "export_skill", "list_skills", "execute_skill", "delete_skill", "discover_skills"].includes(name)) return "skill"
     return "tool"

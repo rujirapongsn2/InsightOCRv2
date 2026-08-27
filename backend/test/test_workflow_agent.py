@@ -17,7 +17,9 @@ from app.services.workflow_agent import (
     _skill_tool_allowlist,
     _workflow_artifact_prefix,
     _workflow_output_filename,
+    _system_instructions,
 )
+from app.services.workflow_agent_contracts import missing_output_tools
 
 
 def test_workflow_agent_allowlist_never_includes_confirmation_tools():
@@ -247,6 +249,84 @@ def test_node_requires_file_uses_output_format_for_autonomous_agent():
     assert _node_requires_file("text", "สร้างไฟล์สรุป", autonomous=False) is True
 
 
+def test_text_workflow_agent_does_not_inherit_file_requirement_from_handoff():
+    assert _node_requires_file(
+        "text",
+        "ผลจาก Agent ก่อนหน้า: บันทึกไฟล์ outputs/summary.md แล้ว",
+        autonomous=True,
+    ) is False
+
+
+def test_handoff_preset_excludes_filesystem_tools_even_when_skill_allows_them():
+    skill = SimpleNamespace(
+        allowed_tools="list_documents get_document_detail read_file write_file create_pdf"
+    )
+
+    assert _skill_tool_allowlist([skill], agent_task="analysis") == set()
+
+
+def test_handoff_system_prompt_uses_compact_skill_guidance():
+    skill = SimpleNamespace(
+        name="long-skill", description="Domain guidance",
+        procedure="very long interactive instruction " * 1000,
+    )
+
+    prompt = _system_instructions([skill], "text", None, "risk_assessment")
+
+    assert "Domain guidance" in prompt
+    assert "very long interactive instruction" not in prompt
+
+
+def test_report_preset_exposes_only_the_required_artifact_tool():
+    skill = SimpleNamespace(allowed_tools="list_documents read_file write_file run_report_code")
+
+    assert _skill_tool_allowlist([skill], output_format="html", agent_task="report") == {
+        "create_html",
+    }
+
+
+def test_workflow_agent_presets_skip_the_extra_planning_call(monkeypatch):
+    captured = {}
+
+    class FakeLoop:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            self.context = SimpleNamespace(output_path_prefix=None)
+
+        async def run(self, _prompt):
+            yield sse_event(SSEEventType.DELTA, {"text": "handoff"})
+            yield sse_event(SSEEventType.DONE, {"iterations": 1, "success": True})
+
+    user_id = uuid4()
+    skill = SimpleNamespace(id=uuid4(), name="analysis", description="", procedure="", version=None, allowed_tools=None)
+    monkeypatch.setattr(workflow_agent_mod, "_selected_skills", lambda *_args: [skill])
+    monkeypatch.setattr(workflow_agent_mod, "AgentLoop", FakeLoop)
+    monkeypatch.setattr(workflow_agent_mod.crud_conv, "create", lambda *_args, **_kwargs: SimpleNamespace(id=uuid4()))
+    monkeypatch.setattr(workflow_agent_mod.crud_conv, "delete", lambda *_args: True)
+
+    class FakeQuery:
+        def filter(self, *_args, **_kwargs):
+            return self
+
+        def first(self):
+            return SimpleNamespace(id=user_id)
+
+    class FakeDB:
+        def query(self, *_args, **_kwargs):
+            return FakeQuery()
+
+    import asyncio
+    result = asyncio.run(workflow_agent_mod.run_workflow_agent(
+        FakeDB(), user_id=user_id, job_id=None,
+        provider={"provider": "openai_compatible", "apiKey": "test"},
+        prompt="Analyze the supplied dossier", skill_ids=[str(skill.id)], agent_task="analysis",
+    ))
+
+    assert result["status"] == "succeeded"
+    assert captured["initial_allowed_tools"] == set()
+    assert captured["skip_planning"] is True
+
+
 def test_agent_status_rejects_artifact_of_wrong_type():
     # A DOCX node must not report success on a markdown artifact.
     status = _agent_status(
@@ -269,3 +349,288 @@ def test_agent_status_rejects_artifact_of_wrong_type():
         output_format="docx",
     )
     assert status == "succeeded"
+
+
+def _file_node_db(user_id, job_id, monkeypatch):
+    """Minimal DB/permission stubs for a file-producing Agent node."""
+    class FakeQuery:
+        def filter(self, *_args, **_kwargs):
+            return self
+
+        def first(self):
+            return SimpleNamespace(id=user_id)
+
+    class FakeDB:
+        def query(self, *_args, **_kwargs):
+            return FakeQuery()
+
+    monkeypatch.setattr(workflow_agent_mod, "can_access_job", lambda *_args: True)
+    monkeypatch.setattr(workflow_agent_mod.crud_conv, "create", lambda *_a, **_k: SimpleNamespace(id=uuid4()))
+    monkeypatch.setattr(workflow_agent_mod.crud_conv, "delete", lambda *_args: True)
+    monkeypatch.setattr(workflow_agent_mod, "_verify_file_tool_result", lambda _ctx, _name, result: result)
+    return FakeDB()
+
+
+def _fake_render(recorder):
+    async def execute(tool_name, args, _context):
+        recorder.append({"tool": tool_name, "args": args})
+        return {
+            "ok": True,
+            "verified": True,
+            "path": "outputs/workflow/run1/node1/report.html",
+            "size": 2048,
+            "mime_type": "text/html; charset=utf-8",
+        }
+
+    return execute
+
+
+def test_report_node_composes_content_and_renders_the_file_itself(monkeypatch):
+    """The report preset must not depend on the model generating code."""
+    import asyncio
+
+    user_id, job_id = uuid4(), uuid4()
+    calls: list[dict] = []
+    skill = SimpleNamespace(id=uuid4(), name="report", description="", procedure="", version=None, allowed_tools=None)
+    monkeypatch.setattr(workflow_agent_mod, "_selected_skills", lambda *_args: [skill])
+    monkeypatch.setattr(workflow_agent_mod, "AgentLoop", None)  # must never be used
+    monkeypatch.setattr(workflow_agent_mod.tool_registry, "execute", _fake_render(calls))
+
+    async def fake_compose(**_kwargs):
+        return "# Contract Report\n\n## Findings\n- one", False
+
+    monkeypatch.setattr(workflow_agent_mod, "_compose_document_content", fake_compose)
+
+    result = asyncio.run(workflow_agent_mod.run_workflow_agent(
+        _file_node_db(user_id, job_id, monkeypatch),
+        user_id=user_id, job_id=job_id,
+        provider={"provider": "openai_compatible", "apiKey": "test"},
+        prompt="Write the report", skill_ids=[str(skill.id)],
+        output_format="html", agent_task="report",
+        workflow_run_id="run1", workflow_node_id="node1",
+    ))
+
+    assert result["status"] == "succeeded"
+    assert [a["path"] for a in result["artifacts"]] == ["outputs/workflow/run1/node1/report.html"]
+    assert [call["tool"] for call in calls] == ["create_html"]
+    assert calls[0]["args"]["title"] == "Contract Report"
+    assert result["metrics"]["stop_reason"] == "composed"
+    # Composition is the primary route here, not a fallback after a failed loop.
+    assert not any("rendered" in warning for warning in result["warnings"])
+
+
+def test_file_node_renders_a_fallback_document_instead_of_failing(monkeypatch):
+    """A stalled agent loop degrades to a rendered file plus a warning."""
+    import asyncio
+
+    user_id, job_id = uuid4(), uuid4()
+    calls: list[dict] = []
+
+    class StalledLoop:
+        def __init__(self, **_kwargs):
+            self.context = SimpleNamespace(output_path_prefix=None)
+
+        async def run(self, _prompt):
+            yield sse_event(SSEEventType.DONE, {
+                "iterations": 3, "success": False, "stopped": "no_progress",
+                "failed_steps": ["Agent made no progress"],
+            })
+
+    skill = SimpleNamespace(id=uuid4(), name="custom", description="", procedure="", version=None, allowed_tools=None)
+    monkeypatch.setattr(workflow_agent_mod, "_selected_skills", lambda *_args: [skill])
+    monkeypatch.setattr(workflow_agent_mod, "AgentLoop", StalledLoop)
+    monkeypatch.setattr(workflow_agent_mod.tool_registry, "execute", _fake_render(calls))
+
+    async def fake_compose(**_kwargs):
+        return "# Fallback Report\n\ncontent", False
+
+    monkeypatch.setattr(workflow_agent_mod, "_compose_document_content", fake_compose)
+
+    result = asyncio.run(workflow_agent_mod.run_workflow_agent(
+        _file_node_db(user_id, job_id, monkeypatch),
+        user_id=user_id, job_id=job_id,
+        provider={"provider": "openai_compatible", "apiKey": "test"},
+        prompt="Write the report", skill_ids=[str(skill.id)],
+        output_format="html", agent_task="custom",
+        workflow_run_id="run1", workflow_node_id="node1",
+    ))
+
+    assert result["status"] == "succeeded"
+    assert result["error"] is None
+    assert result["artifacts"]
+    assert any("rendered" in warning for warning in result["warnings"])
+
+
+def test_fallback_renders_the_agent_answer_without_a_second_llm_call(monkeypatch):
+    import asyncio
+
+    user_id, job_id = uuid4(), uuid4()
+    calls: list[dict] = []
+    answer = "# Contract Review\n\n" + ("Clause analysis paragraph. " * 40)
+
+    class TextOnlyLoop:
+        def __init__(self, **_kwargs):
+            self.context = SimpleNamespace(output_path_prefix=None)
+
+        async def run(self, _prompt):
+            yield sse_event(SSEEventType.DELTA, {"text": answer})
+            yield sse_event(SSEEventType.DONE, {"iterations": 2, "success": True})
+
+    skill = SimpleNamespace(id=uuid4(), name="custom", description="", procedure="", version=None, allowed_tools=None)
+    monkeypatch.setattr(workflow_agent_mod, "_selected_skills", lambda *_args: [skill])
+    monkeypatch.setattr(workflow_agent_mod, "AgentLoop", TextOnlyLoop)
+    monkeypatch.setattr(workflow_agent_mod.tool_registry, "execute", _fake_render(calls))
+
+    async def forbidden_compose(**_kwargs):
+        raise AssertionError("the agent's own answer should be rendered as-is")
+
+    monkeypatch.setattr(workflow_agent_mod, "_compose_document_content", forbidden_compose)
+
+    result = asyncio.run(workflow_agent_mod.run_workflow_agent(
+        _file_node_db(user_id, job_id, monkeypatch),
+        user_id=user_id, job_id=job_id,
+        provider={"provider": "openai_compatible", "apiKey": "test"},
+        prompt="Write the report", skill_ids=[str(skill.id)],
+        output_format="html", agent_task="custom",
+        workflow_run_id="run1", workflow_node_id="node1",
+    ))
+
+    assert result["status"] == "succeeded"
+    assert calls[0]["args"]["content"].startswith("# Contract Review")
+
+
+def test_max_output_tokens_override_reaches_the_agent_loop(monkeypatch):
+    """A per-node override must win over the task preset's fixed budget."""
+    import asyncio
+
+    captured = {}
+    user_id = uuid4()
+
+    class FakeLoop:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            self.context = SimpleNamespace(output_path_prefix=None)
+
+        async def run(self, _prompt):
+            yield sse_event(SSEEventType.DELTA, {"text": "handoff"})
+            yield sse_event(SSEEventType.DONE, {"iterations": 1, "success": True})
+
+    skill = SimpleNamespace(id=uuid4(), name="analysis", description="", procedure="", version=None, allowed_tools=None)
+    monkeypatch.setattr(workflow_agent_mod, "_selected_skills", lambda *_args: [skill])
+    monkeypatch.setattr(workflow_agent_mod, "AgentLoop", FakeLoop)
+    monkeypatch.setattr(workflow_agent_mod.crud_conv, "create", lambda *_args, **_kwargs: SimpleNamespace(id=uuid4()))
+    monkeypatch.setattr(workflow_agent_mod.crud_conv, "delete", lambda *_args: True)
+
+    class FakeQuery:
+        def filter(self, *_args, **_kwargs):
+            return self
+
+        def first(self):
+            return SimpleNamespace(id=user_id)
+
+    class FakeDB:
+        def query(self, *_args, **_kwargs):
+            return FakeQuery()
+
+    asyncio.run(workflow_agent_mod.run_workflow_agent(
+        FakeDB(), user_id=user_id, job_id=None,
+        provider={"provider": "openai_compatible", "apiKey": "test"},
+        prompt="Analyze the supplied dossier", skill_ids=[str(skill.id)], agent_task="analysis",
+        max_output_tokens=512,
+    ))
+
+    # The preset default for "analysis" is 1600 — the override must replace it.
+    assert captured["max_output_tokens"] == 512
+
+
+def test_max_output_tokens_override_is_clamped_to_a_safe_range(monkeypatch):
+    import asyncio
+
+    captured = {}
+    user_id = uuid4()
+
+    class FakeLoop:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            self.context = SimpleNamespace(output_path_prefix=None)
+
+        async def run(self, _prompt):
+            yield sse_event(SSEEventType.DONE, {"iterations": 1, "success": True})
+
+    skill = SimpleNamespace(id=uuid4(), name="analysis", description="", procedure="", version=None, allowed_tools=None)
+    monkeypatch.setattr(workflow_agent_mod, "_selected_skills", lambda *_args: [skill])
+    monkeypatch.setattr(workflow_agent_mod, "AgentLoop", FakeLoop)
+    monkeypatch.setattr(workflow_agent_mod.crud_conv, "create", lambda *_args, **_kwargs: SimpleNamespace(id=uuid4()))
+    monkeypatch.setattr(workflow_agent_mod.crud_conv, "delete", lambda *_args: True)
+
+    class FakeQuery:
+        def filter(self, *_args, **_kwargs):
+            return self
+
+        def first(self):
+            return SimpleNamespace(id=user_id)
+
+    class FakeDB:
+        def query(self, *_args, **_kwargs):
+            return FakeQuery()
+
+    asyncio.run(workflow_agent_mod.run_workflow_agent(
+        FakeDB(), user_id=user_id, job_id=None,
+        provider={"provider": "openai_compatible", "apiKey": "test"},
+        prompt="Analyze the supplied dossier", skill_ids=[str(skill.id)], agent_task="analysis",
+        max_output_tokens=999_999,
+    ))
+
+    assert captured["max_output_tokens"] == 16000
+
+
+def test_max_output_tokens_override_of_zero_is_clamped_not_ignored(monkeypatch):
+    """An explicit 0 (e.g. from a definition saved before the 256-16000
+    validator existed) must be clamped to the floor, not silently treated as
+    'unset' and fall back to the task preset's default."""
+    import asyncio
+
+    captured = {}
+    user_id = uuid4()
+
+    class FakeLoop:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            self.context = SimpleNamespace(output_path_prefix=None)
+
+        async def run(self, _prompt):
+            yield sse_event(SSEEventType.DONE, {"iterations": 1, "success": True})
+
+    skill = SimpleNamespace(id=uuid4(), name="analysis", description="", procedure="", version=None, allowed_tools=None)
+    monkeypatch.setattr(workflow_agent_mod, "_selected_skills", lambda *_args: [skill])
+    monkeypatch.setattr(workflow_agent_mod, "AgentLoop", FakeLoop)
+    monkeypatch.setattr(workflow_agent_mod.crud_conv, "create", lambda *_args, **_kwargs: SimpleNamespace(id=uuid4()))
+    monkeypatch.setattr(workflow_agent_mod.crud_conv, "delete", lambda *_args: True)
+
+    class FakeQuery:
+        def filter(self, *_args, **_kwargs):
+            return self
+
+        def first(self):
+            return SimpleNamespace(id=user_id)
+
+    class FakeDB:
+        def query(self, *_args, **_kwargs):
+            return FakeQuery()
+
+    asyncio.run(workflow_agent_mod.run_workflow_agent(
+        FakeDB(), user_id=user_id, job_id=None,
+        provider={"provider": "openai_compatible", "apiKey": "test"},
+        prompt="Analyze the supplied dossier", skill_ids=[str(skill.id)], agent_task="analysis",
+        max_output_tokens=0,
+    ))
+
+    # analysis preset default is 1600 — if 0 were treated as "unset" that's
+    # what would come through instead of the clamped floor.
+    assert captured["max_output_tokens"] == 256
+
+
+def test_html_output_accepts_a_skill_that_only_declares_run_report_code():
+    # Skills authored before create_html existed stay valid for HTML nodes.
+    assert missing_output_tools({"run_report_code"}, "html") == set()
+    assert missing_output_tools({"read_file"}, "html") == {"create_html"}

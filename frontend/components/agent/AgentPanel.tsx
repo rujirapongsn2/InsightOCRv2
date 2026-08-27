@@ -353,6 +353,13 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
                                     setMessages(prev => [...prev, { id: crypto.randomUUID(), role: "assistant", content: finalText, created_at: new Date().toISOString() }])
                                     setStreamText("")
                                 }
+                                if (evt.success === false) {
+                                    // A graceful-stop DONE (e.g. no_progress) still means the
+                                    // run failed — surface it like case "error" would, since a
+                                    // silent "done" with no assistant text looks like nothing
+                                    // happened at all.
+                                    setError((evt.failed_steps || []).join(" ") || "Agent could not complete the request")
+                                }
                                 // Reconcile with authoritative history (adds the persisted
                                 // plan card + tool messages in order), then drop the live
                                 // event cards so they don't double-render.

@@ -12,7 +12,7 @@ function getCategory(name: string): string {
     if (["list_documents", "get_document_detail", "search_documents", "compare_documents", "update_document_field", "approve_document", "reject_document", "bulk_approve"].includes(name)) return "document"
     if (["list_integrations", "call_api_integration", "send_to_workflow"].includes(name)) return "integration"
     if (["execute_python", "run_report_code"].includes(name)) return "code"
-    if (["read_file", "write_file", "list_files", "delete_file", "create_docx", "create_pdf", "convert_to_xlsx"].includes(name)) return "filesystem"
+    if (["read_file", "write_file", "list_files", "delete_file", "create_html", "create_docx", "create_pdf", "convert_to_xlsx"].includes(name)) return "filesystem"
     if (["save_memory", "recall_memory", "list_memories", "forget_memory"].includes(name)) return "memory"
     if (["create_skill", "import_skill", "export_skill", "list_skills", "execute_skill", "delete_skill", "discover_skills"].includes(name)) return "skill"
     return "other"
@@ -37,7 +37,7 @@ export default function ToolCallCard({ call, result, conversationId, autoConfirm
     const icon = CATEGORY_ICONS[getCategory(call.name || "")] || "🔧"
     const hasResult = result !== undefined
     const errorMessage = getErrorMessage(result)
-    const isWriteSuccess = ["write_file", "create_docx", "create_pdf", "convert_to_xlsx", "run_report_code"].includes(call.name || "") && result?.ok === true && result?.path
+    const isWriteSuccess = ["write_file", "create_html", "create_docx", "create_pdf", "convert_to_xlsx", "run_report_code"].includes(call.name || "") && result?.ok === true && result?.path
     const normalizedPath = isWriteSuccess ? normalizeAgentFilePath(result.path) : ""
     const [downloadError, setDownloadError] = useState<string | null>(null)
     const [downloading, setDownloading] = useState(false)

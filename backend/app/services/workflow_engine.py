@@ -148,14 +148,26 @@ NODE_TYPES: List[Dict[str, Any]] = [
         "config_fields": [
             {"name": "mode", "label": "โหมด", "type": "segmented", "options": ["llm", "agent"],
              "option_labels": {"llm": "LLM", "agent": "Agent"}, "default": "llm"},
+            {"name": "agent_task", "label": "งานของ Agent", "type": "select",
+             "options": ["analysis", "risk_assessment", "recommendations", "report"],
+             "option_labels": {
+                 "analysis": "วิเคราะห์เอกสาร",
+                 "risk_assessment": "ประเมินความเสี่ยง",
+                 "recommendations": "จัดทำข้อเสนอแนะ",
+                 "report": "สร้างรายงาน",
+             },
+             "default": "analysis", "visible_when": {"field": "mode", "equals": "agent"},
+             "hint": "ระบบกำหนดรูปแบบผลลัพธ์ เครื่องมือ และเวลารันให้เหมาะกับงานนี้"},
             {"name": "ai_provider_id", "label": "AI Agent Provider", "type": "ai_provider_select", "required": False,
-             "hint": "เลือก provider จาก Setting AI; เว้นว่าง = ใช้ Agent Provider ที่ตั้งไว้กลางระบบ"},
+             "agent_provider_only": True,
+             "hint": "เลือกเฉพาะ provider ที่รองรับ tool calling; เว้นว่าง = ใช้ค่า Agent Provider กลางระบบ",
+             "visible_when": {"field": "mode", "equals": "agent"}, "advanced": True},
             {"name": "system_prompt", "label": "System prompt", "type": "textarea", "required": False,
              "placeholder": "คุณเป็นผู้ช่วยสรุปข้อมูลเอกสาร ตอบเป็นภาษาไทย กระชับ",
              "hint": "กำหนดบทบาท/สไตล์การตอบของ AI", "visible_when": {"field": "mode", "equals": "llm"}},
             {"name": "prompt", "label": "Prompt", "type": "textarea", "required": True,
              "placeholder": "สรุปรายการต่อไปนี้เป็น bullet:\n\n{{job_source_xxx.records}}",
-             "hint": "ใช้ปุ่ม “+ แทรกข้อมูล” ด้านบนช่องเพื่ออ้างผลจากโหนดก่อนหน้า"},
+             "hint": "Agent จะได้รับสรุปที่ตรวจสอบแล้วจาก Agent ก่อนหน้าอัตโนมัติ"},
             {"name": "json_output", "label": "แปลงคำตอบเป็น JSON", "type": "boolean", "default": False,
              "hint": "เปิดเมื่อสั่งให้ AI ตอบเป็น JSON แล้วต้องการใช้ฟิลด์ data ต่อ",
              "visible_when": {"field": "mode", "equals": "llm"}},
@@ -166,16 +178,24 @@ NODE_TYPES: List[Dict[str, Any]] = [
              "hint": "Agent ใช้เฉพาะคำสั่งและเครื่องมือจาก Skills ที่เลือก",
              "visible_when": {"field": "mode", "equals": "agent"}},
             {"name": "output_format", "label": "ผลลัพธ์", "type": "select",
-             "options": ["text", "json", "html", "docx", "pdf", "xlsx"], "default": "text",
-             "option_labels": {"text": "Text", "json": "JSON", "html": "HTML Report", "docx": "DOCX", "pdf": "PDF", "xlsx": "XLSX"},
-             "visible_when": {"field": "mode", "equals": "agent"}},
+             "options": ["html", "docx", "pdf", "xlsx"], "default": "html",
+             "option_labels": {"html": "HTML Report", "docx": "DOCX", "pdf": "PDF", "xlsx": "XLSX"},
+             # "custom" covers legacy nodes saved before Agent task presets existed
+             # (run_workflow_agent still lets them pick any output_format); only the
+             # fixed-format presets (analysis/risk_assessment/recommendations) hide this.
+             "visible_when": {"field": "agent_task", "equals": ["report", "custom"]}},
             {"name": "output_filename", "label": "ชื่อไฟล์ผลลัพธ์", "type": "text", "required": False,
-             "placeholder": "outputs/report.html", "hint": "ใช้เมื่อเลือกผลลัพธ์เป็นไฟล์ แล้วต่อ Publish Artifact เพื่อเก็บผลลัพธ์ของ run",
-             "visible_when": {"field": "mode", "equals": "agent"}},
+             "placeholder": "report.html", "hint": "ระบบกำหนด path ที่ปลอดภัยให้โดยอัตโนมัติ",
+             "visible_when": {"field": "agent_task", "equals": ["report", "custom"]}},
             {"name": "max_iterations", "label": "จำนวนรอบสูงสุด", "type": "number", "default": 7,
              "hint": "กำหนดได้ 3-20 รอบ", "visible_when": {"field": "mode", "equals": "agent"}, "advanced": True},
             {"name": "timeout_seconds", "label": "Timeout (วินาที)", "type": "number", "default": 300,
              "hint": "กำหนดได้ 60-900 วินาที", "visible_when": {"field": "mode", "equals": "agent"}, "advanced": True},
+            {"name": "max_output_tokens", "label": "Output tokens สูงสุด (ต่อการเรียก LLM 1 ครั้ง)",
+             "type": "number", "required": False,
+             "hint": "เว้นว่าง = ใช้ค่าเริ่มต้นของงานนี้ ปรับลงหากเลือกโมเดลที่มี context window เล็ก "
+                      "(ค่ารวม prompt + output ต้องไม่เกิน context window ของโมเดลที่เลือก) ช่วงที่กำหนดได้ 256-16000",
+             "visible_when": {"field": "mode", "equals": "agent"}, "advanced": True},
         ],
         "output_fields": [
             {"name": "status", "label": "สถานะ Agent"},
@@ -304,9 +324,11 @@ NODE_TYPES: List[Dict[str, Any]] = [
         "label": "Publish Artifact",
         "description": "คัดลอกไฟล์ที่ Agent สร้างและตรวจสอบแล้วมาเก็บเป็นผลลัพธ์ถาวรของ Workflow run",
         "config_fields": [
-            {"name": "source_path", "label": "ไฟล์จาก Agent", "type": "text", "required": True,
+            {"name": "auto_source", "label": "ใช้ไฟล์ที่ตรวจสอบแล้วจาก Agent ก่อนหน้า", "type": "boolean", "default": True,
+             "hint": "ระบบเลือก artifact ที่ verified โดยอัตโนมัติ"},
+            {"name": "source_path", "label": "ไฟล์จาก Agent", "type": "text", "required": False,
              "placeholder": "{{llm_xxx.artifacts.0.path}}",
-             "hint": "เลือก path ของ artifact จากโหนด Agent ก่อนหน้า"},
+             "hint": "ใช้เฉพาะกรณีปิดการเลือกอัตโนมัติ", "visible_when": {"field": "auto_source", "equals": False}, "advanced": True},
             {"name": "job_id", "label": "Job context", "type": "job_select", "required": False,
              "hint": "เว้นว่างเพื่อใช้ Job เดียวจากโหนดก่อนหน้า"},
             {"name": "filename", "label": "ชื่อไฟล์ที่เผยแพร่", "type": "text", "required": False,
@@ -916,13 +938,21 @@ def _exec_llm(db: Session, config: dict, context: dict, log: Callable[[str], Non
         raw_fingerprints = config.get("skill_fingerprints") or {}
         if not isinstance(raw_fingerprints, dict):
             raise NodeExecutionError("Agent node skill_fingerprints must be an object")
+        prompt = _stringify(config.get("prompt"))
+        dossier = config.get("_workflow_dossier")
+        if isinstance(dossier, list) and dossier:
+            prompt += "\n\n## Workflow dossier (authoritative source data)\n" + _stringify(dossier)
+        handoffs = config.get("_upstream_agent_handoffs")
+        if isinstance(handoffs, list) and handoffs:
+            prompt += "\n\n## Verified upstream handoffs\n" + _stringify(handoffs)
+        raw_max_output_tokens = config.get("max_output_tokens")
         try:
             result = asyncio.run(run_workflow_agent(
                 db,
                 user_id=UUID(str(owner_user_id)),
                 job_id=UUID(str(job_id)) if job_id else None,
                 provider=provider,
-                prompt=_stringify(prompt),
+                prompt=prompt,
                 skill_ids=[str(item) for item in skill_ids],
                 skill_fingerprints={
                     str(key): str(value)
@@ -932,15 +962,30 @@ def _exec_llm(db: Session, config: dict, context: dict, log: Callable[[str], Non
                 output_filename=(str(config.get("output_filename") or "").strip() or None),
                 max_iterations=int(config.get("max_iterations") or 7),
                 timeout_seconds=int(config.get("timeout_seconds") or 300),
+                agent_task=str(config.get("agent_task") or "custom"),
+                # Lets a node using a small-context model stay under its limit
+                # instead of relying solely on the task preset's fixed budget.
+                max_output_tokens=(
+                    int(raw_max_output_tokens) if raw_max_output_tokens not in (None, "") else None
+                ),
                 workflow_run_id=str(context.get("_run_id") or ""),
                 workflow_node_id=str(context.get("_node_id") or ""),
             ))
         except (ValueError, WorkflowAgentConfigurationError) as exc:
             raise NodeExecutionError(f"Agent node configuration error: {exc}") from exc
+        metrics = result.get("metrics") or {}
         log(
             f"Agent finished with status={result.get('status')} "
-            f"iterations={result.get('iterations')} artifacts={len(result.get('artifacts') or [])}"
+            f"iterations={result.get('iterations')} artifacts={len(result.get('artifacts') or [])} "
+            f"stop_reason={metrics.get('stop_reason')}"
         )
+        tools_used = result.get("tool_summary") or []
+        if tools_used:
+            log("Agent tools: " + ", ".join(
+                f"{item.get('tool')}{'' if item.get('ok') else ' (failed)'}" for item in tools_used
+            ))
+        for warning in (result.get("warnings") or []):
+            log(f"Warning: {warning}")
         if result.get("status") != "succeeded":
             detail = result.get("error") or "; ".join(result.get("warnings") or [])
             raise NodeExecutionError(detail or result.get("text") or "Agent did not complete successfully")
@@ -2014,16 +2059,152 @@ def _add_inferred_publish_artifact_job_id(
     return {**resolved_config, "_inferred_job_id": next(iter(job_ids))}
 
 
+def _upstream_node_ids(node_id: str, edges: List[dict]) -> list[str]:
+    """Return upstream nodes from oldest to newest without following cycles."""
+    parents: dict[str, list[str]] = {}
+    for edge in edges:
+        source = edge.get("source")
+        target = edge.get("target")
+        if source and target:
+            parents.setdefault(str(target), []).append(str(source))
+
+    ordered: list[str] = []
+    visited: set[str] = set()
+
+    def visit(current: str) -> None:
+        for parent in parents.get(current, []):
+            if parent in visited:
+                continue
+            visited.add(parent)
+            visit(parent)
+            ordered.append(parent)
+
+    visit(node_id)
+    return ordered
+
+
+def _compact_prompt_value(value: Any, limit: int) -> str:
+    """Serialize workflow context within a predictable prompt-size budget."""
+    serialized = _stringify(value).strip()
+    if len(serialized) <= limit:
+        return serialized
+    return serialized[:limit].rstrip() + "\n[truncated by Workflow context limit]"
+
+
+def _add_inferred_agent_handoffs(
+    node: dict,
+    resolved_config: dict,
+    edges: List[dict],
+    context: Dict[str, Any],
+    node_status: Optional[Dict[str, str]] = None,
+) -> dict:
+    if (
+        node.get("type") != "llm"
+        or (resolved_config.get("mode") or "llm") != "agent"
+        or str(resolved_config.get("agent_task") or "custom") == "custom"
+    ):
+        return resolved_config
+    handoffs: list[dict[str, Any]] = []
+    remaining = 36_000
+    for source in _upstream_node_ids(str(node.get("id") or ""), edges):
+        if node_status and node_status.get(source) != "succeeded":
+            continue
+        output = context.get(source)
+        if not isinstance(output, dict) or "status" not in output:
+            continue
+        if remaining <= 0:
+            break
+        text = _compact_prompt_value(output.get("text") or "", min(12_000, remaining))
+        remaining -= len(text)
+        handoffs.append({
+            "source_node": source,
+            "text": text,
+        })
+    return {**resolved_config, "_upstream_agent_handoffs": handoffs} if handoffs else resolved_config
+
+
+def _add_inferred_agent_dossier(
+    node: dict,
+    resolved_config: dict,
+    edges: List[dict],
+    context: Dict[str, Any],
+    nodes: List[dict],
+    node_status: Optional[Dict[str, str]] = None,
+) -> dict:
+    """Give the discovery stage a bounded snapshot from its upstream data node."""
+    if (
+        node.get("type") != "llm"
+        or (resolved_config.get("mode") or "llm") != "agent"
+        or str(resolved_config.get("agent_task") or "custom") != "analysis"
+    ):
+        return resolved_config
+    node_types = {str(item.get("id")): item.get("type") for item in nodes}
+    snapshots: list[dict[str, str]] = []
+    remaining = 32_000
+    for source in _upstream_node_ids(str(node.get("id") or ""), edges):
+        if node_types.get(source) not in {"job_source", "document_source"}:
+            continue
+        if node_status and node_status.get(source) != "succeeded":
+            continue
+        output = context.get(source)
+        if output is None or remaining <= 0:
+            continue
+        snapshot = _compact_prompt_value(output, remaining)
+        remaining -= len(snapshot)
+        snapshots.append({"source_node": source, "content": snapshot})
+    return {**resolved_config, "_workflow_dossier": snapshots} if snapshots else resolved_config
+
+
+def _add_inferred_publish_artifact_source(
+    node: dict,
+    resolved_config: dict,
+    edges: List[dict],
+    context: Dict[str, Any],
+    node_status: Optional[Dict[str, str]] = None,
+) -> dict:
+    if node.get("type") != "publish_artifact" or resolved_config.get("auto_source") is not True:
+        return resolved_config
+    candidates: list[str] = []
+    for edge in edges:
+        if edge.get("target") != node.get("id"):
+            continue
+        source = edge.get("source")
+        if node_status and node_status.get(source) != "succeeded":
+            continue
+        output = context.get(source)
+        if not isinstance(output, dict):
+            continue
+        for artifact in output.get("artifacts") or []:
+            if isinstance(artifact, dict) and artifact.get("verified") and artifact.get("path"):
+                candidates.append(str(artifact["path"]))
+    candidates = list(dict.fromkeys(candidates))
+    if not candidates:
+        raise NodeExecutionError("Publish Artifact: no verified artifact was produced by the connected Agent")
+    if len(candidates) > 1:
+        raise NodeExecutionError("Publish Artifact: multiple verified artifacts found; choose a source file explicitly")
+    return {**resolved_config, "source_path": candidates[0]}
+
+
 def _resolve_node_config(
     node: dict,
     raw_config: dict,
     edges: List[dict],
     context: Dict[str, Any],
     node_status: Optional[Dict[str, str]] = None,
+    nodes: Optional[List[dict]] = None,
 ) -> dict:
     """Resolve templates and infer a single upstream Job in every execution path."""
     resolved_config = resolve_template(raw_config, context)
     resolved_config = _add_inferred_agent_job_id(
+        node, resolved_config, edges, context, node_status
+    )
+    resolved_config = _add_inferred_agent_handoffs(
+        node, resolved_config, edges, context, node_status
+    )
+    resolved_config = _add_inferred_agent_dossier(
+        node, resolved_config, edges, context, nodes or [], node_status
+    )
+    resolved_config = _add_inferred_publish_artifact_source(
         node, resolved_config, edges, context, node_status
     )
     return _add_inferred_publish_artifact_job_id(
@@ -2130,7 +2311,7 @@ def execute_workflow_run(db: Session, run: WorkflowRun) -> None:
 
         try:
             resolved_config = _resolve_node_config(
-                node, raw_config, edges, context, node_status
+            node, raw_config, edges, context, node_status, nodes
             )
             nr.input = _safe_json(redact_secrets(resolved_config))
             executor = EXECUTORS.get(node_type)

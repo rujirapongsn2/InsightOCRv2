@@ -149,6 +149,7 @@ class AISuggestionService:
                 model=settings.model or "gpt-4o-mini",
                 messages=_schema_suggestion_messages(ocr_content, document_type),
                 temperature=0.1,
+                max_tokens=2048,
             )
 
         content = ""

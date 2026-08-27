@@ -54,6 +54,48 @@ LLM_RETRY_BASE_DELAY_S = 2.0
 AGENT_MAX_RUNTIME_S = int(os.environ.get("AGENT_MAX_RUNTIME_S", "900"))
 
 
+_CONTEXT_LENGTH_ERROR_MARKERS = (
+    "context_length_exceeded",
+    "maximum context length",
+    "context window",
+    "too many tokens",
+    "reduce the length of the messages",
+    "input is too long",
+    "prompt is too long",
+    "context_length",
+)
+
+
+def _is_context_length_error(exc: Exception) -> bool:
+    """Detect a model-context overflow across OpenAI-compatible providers.
+
+    Providers disagree on shape: some set ``.code``, some nest it in
+    ``.body["error"]["code"]``, others only put it in the message text. This
+    checks all three so the caller can fail fast instead of retrying a
+    request that will be the same size on every attempt.
+    """
+    if str(getattr(exc, "code", "") or "").lower() == "context_length_exceeded":
+        return True
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        error = body.get("error")
+        if isinstance(error, dict) and str(error.get("code") or "").lower() == "context_length_exceeded":
+            return True
+    # A 429 rate-limit response is transient and must still be retried with
+    # backoff. Its message can legitimately contain phrases like "too many
+    # tokens" (tokens-per-minute quota) that would otherwise collide with the
+    # substring markers below, so rule it out before falling back to them.
+    if getattr(exc, "status_code", None) == 429 or type(exc).__name__ == "RateLimitError":
+        return False
+    msg = str(exc).lower()
+    return any(marker in msg for marker in _CONTEXT_LENGTH_ERROR_MARKERS)
+
+
+def _prompt_char_count(kwargs: dict) -> int:
+    messages = kwargs.get("messages") or []
+    return sum(len(str(m.get("content") or "")) for m in messages if isinstance(m, dict))
+
+
 async def _chat_with_retry(client: AsyncOpenAI, **kwargs):
     """chat.completions.create with retries and a temperature fallback.
 
@@ -61,13 +103,23 @@ async def _chat_with_retry(client: AsyncOpenAI, **kwargs):
     an error we drop it and retry immediately instead of burning attempts.
     """
     require_tools = bool(kwargs.pop("require_tools", False))
+    max_attempts = max(1, int(kwargs.pop("max_attempts", LLM_MAX_ATTEMPTS)))
     last_exc: Exception | None = None
-    for attempt in range(1, LLM_MAX_ATTEMPTS + 1):
+    for attempt in range(1, max_attempts + 1):
         try:
             return await client.chat.completions.create(**kwargs)
         except Exception as e:
             last_exc = e
             msg = str(e).lower()
+            if _is_context_length_error(e):
+                # Retrying sends the exact same prompt size again, so it can
+                # only waste the run's remaining attempts and time budget.
+                raise RuntimeError(
+                    "Selected AI provider rejected the request because the prompt "
+                    f"(~{_prompt_char_count(kwargs):,} characters) exceeds the model's context "
+                    "window. Choose a model with a larger context window for this node, or "
+                    "reduce the Skill procedure / Job data / upstream handoffs feeding it."
+                ) from e
             if "temperature" in msg and "temperature" in kwargs:
                 kwargs.pop("temperature")
                 continue
@@ -83,7 +135,7 @@ async def _chat_with_retry(client: AsyncOpenAI, **kwargs):
                 kwargs.pop("tools", None)
                 kwargs.pop("tool_choice", None)
                 continue
-            if attempt < LLM_MAX_ATTEMPTS:
+            if attempt < max_attempts:
                 await asyncio.sleep(LLM_RETRY_BASE_DELAY_S * (2 ** (attempt - 1)))
     raise last_exc
 
@@ -381,9 +433,15 @@ def _evidence_note(tool_name: str, result: Any) -> str | None:
     return None
 
 
+_FILE_WRITE_TOOLS = frozenset({
+    "execute_python", "write_file", "create_html", "create_docx", "create_pdf",
+    "convert_to_xlsx", "run_report_code",
+})
+
+
 def _is_file_write_success(tool_name: str, result: Any) -> bool:
     return (
-        tool_name in {"execute_python", "write_file", "create_docx", "create_pdf", "convert_to_xlsx", "run_report_code"}
+        tool_name in _FILE_WRITE_TOOLS
         and isinstance(result, dict)
         and result.get("ok") is True
         and result.get("verified") is True
@@ -391,12 +449,15 @@ def _is_file_write_success(tool_name: str, result: Any) -> bool:
     )
 
 
+_REPORT_TOOLS = frozenset({"run_report_code", "create_html"})
+
+
 def _is_report_success(tool_name: str, result: Any) -> bool:
-    return tool_name == "run_report_code" and _is_file_write_success(tool_name, result)
+    return tool_name in _REPORT_TOOLS and _is_file_write_success(tool_name, result)
 
 
 def _verify_file_tool_result(context: AgentContext, tool_name: str, result: Any) -> Any:
-    if tool_name not in {"execute_python", "write_file", "create_docx", "create_pdf", "convert_to_xlsx", "run_report_code"}:
+    if tool_name not in _FILE_WRITE_TOOLS:
         return result
     if not isinstance(result, dict) or result.get("ok") is not True or not result.get("path"):
         return result
@@ -494,7 +555,7 @@ def _format_tool_name(output_format: str) -> str:
         "docx": "create_docx",
         "pdf": "create_pdf",
         "xlsx": "convert_to_xlsx",
-        "html": "run_report_code",
+        "html": "create_html",
     }
     return mapping.get(output_format, "appropriate file tool")
 
@@ -518,8 +579,11 @@ def _node_requires_file(output_format: str, user_message: str, autonomous: bool)
     back to prompt-keyword matching. This keeps the false-failure fix from
     regressing when a prompt happens to omit the word "ไฟล์".
     """
-    if autonomous and output_format in _FILE_OUTPUT_FORMATS:
-        return True
+    if autonomous:
+        # Workflow nodes declare their output contract explicitly.  Do not let
+        # words such as "file" in an upstream handoff turn a text-only node
+        # into an accidental file-generation task.
+        return output_format in _FILE_OUTPUT_FORMATS
     return _requires_file_output(user_message)
 
 
@@ -595,7 +659,7 @@ def _required_tool_instruction(kind: str) -> str:
     return (
         "The user's current request asks to create or update a Word/file artifact. "
         "Call convert_to_xlsx for existing-file-to-Excel conversion, or execute_python with _save_file auto-capture, "
-        "create_docx, run_report_code, or write_file in this same turn "
+        "create_docx, create_html, or write_file in this same turn "
         "and only give the file name after the tool returns ok=true and verified=true. "
         "Do not reuse an older file-success result from conversation history."
     )
@@ -768,6 +832,11 @@ class AgentLoop:
         autonomous: bool = False,
         output_format: str = "text",
         output_filename: str | None = None,
+        skip_planning: bool = False,
+        system_prompt_override: str | None = None,
+        request_timeout_seconds: float | None = None,
+        max_output_tokens: int | None = None,
+        max_request_attempts: int | None = None,
     ):
         self.db = db
         self.conversation_id = conversation_id
@@ -781,10 +850,15 @@ class AgentLoop:
         self.autonomous = autonomous
         self.output_format = output_format
         self.output_filename = output_filename
+        self.skip_planning = skip_planning
+        self.system_prompt_override = (system_prompt_override or "").strip()
+        self.request_timeout_seconds = request_timeout_seconds
+        self.max_output_tokens = max_output_tokens
+        self.max_request_attempts = max_request_attempts
         self.context = AgentContext(db=db, user_id=user_id, job_id=job_id, conversation_id=conversation_id, kind=kind)
 
     def _build_system_prompt(self, user_message: str) -> str:
-        prompt = build_system_prompt(self.context, user_message)
+        prompt = self.system_prompt_override or build_system_prompt(self.context, user_message)
         if self.additional_system_prompt:
             prompt = f"{prompt}\n\n{self.additional_system_prompt}"
         return prompt
@@ -846,7 +920,7 @@ class AgentLoop:
         client = AsyncOpenAI(
             api_key=api_key,
             base_url=self.llm_config.get("baseUrl") or None,
-            timeout=LLM_REQUEST_TIMEOUT_S,
+            timeout=self.request_timeout_seconds or LLM_REQUEST_TIMEOUT_S,
             max_retries=0,  # retries are handled by _chat_with_retry with backoff
         )
         model = self.llm_config.get("model", "gpt-4o-mini")
@@ -865,6 +939,7 @@ class AgentLoop:
         evidence_notes: list[str] = []
         evidence_found = False
         no_progress_streak = 0
+        last_assistant_text = ""
         seen_search_queries: set[str] = set()
         seen_tool_signatures: set[str] = set()
         legal_search_calls = 0
@@ -901,7 +976,7 @@ class AgentLoop:
         plan_steps: list[str] = []
         plan_msg = None
         reflected = False
-        if _is_complex_request(user_message) and not focused_legal_qa:
+        if _is_complex_request(user_message) and not focused_legal_qa and not self.skip_planning:
             plan_steps = await self._build_plan(client, model, user_message, history)
             if plan_steps:
                 yield sse_event(SSEEventType.PLAN, {"steps": plan_steps})
@@ -939,15 +1014,21 @@ class AgentLoop:
             tools_schema = tool_registry.get_openai_schemas(allowed_names=visible_tools)
 
             try:
+                request_kwargs: dict[str, Any] = {
+                    "model": model,
+                    "messages": messages,
+                    "tools": tools_schema,
+                    "tool_choice": tool_choice,
+                    "temperature": LLM_TEMPERATURE,
+                    "stream": False,
+                    "require_tools": bool(self.autonomous and requires_file and tools_schema),
+                    "max_attempts": self.max_request_attempts or LLM_MAX_ATTEMPTS,
+                }
+                if self.max_output_tokens:
+                    request_kwargs["max_tokens"] = self.max_output_tokens
                 response = await _chat_with_retry(
                     client,
-                    model=model,
-                    messages=messages,
-                    tools=tools_schema,
-                    tool_choice=tool_choice,
-                    temperature=LLM_TEMPERATURE,
-                    stream=False,
-                    require_tools=bool(self.autonomous and requires_file and tools_schema),
+                    **request_kwargs,
                 )
             except Exception as e:
                 yield sse_event(SSEEventType.ERROR, {"message": f"LLM error: {str(e)}"})
@@ -974,18 +1055,39 @@ class AgentLoop:
                     ]
                     assistant_content = None
 
+                if assistant_content and str(assistant_content).strip():
+                    last_assistant_text = str(assistant_content).strip()
+
                 crud_msg.add(self.db, conversation_id=self.conversation_id, role="assistant",
                              content=assistant_content, tool_calls=tcd,
                              iteration=iteration, model_used=model)
                 messages.append({"role": "assistant", "content": assistant_content, "tool_calls": tcd})
 
-                # Parse all tool calls
+                # Parse all tool calls. Unparseable arguments almost always mean
+                # the model hit its output limit mid-JSON; degrading them to {}
+                # silently turns that into an unexplained "argument is required"
+                # tool failure, so name the real cause for the retry nudge.
                 parsed: list[tuple] = []
+                truncated_arg_tools: list[str] = []
                 for tc in active_tool_calls:
                     try:
                         parsed.append((tc, tc.function.name, json.loads(tc.function.arguments or "{}")))
                     except Exception:
+                        truncated_arg_tools.append(tc.function.name)
                         parsed.append((tc, tc.function.name, {}))
+                if truncated_arg_tools:
+                    failure_reason = (
+                        "hit the model output limit"
+                        if str(getattr(choice, "finish_reason", "") or "") == "length"
+                        else "were not valid JSON"
+                    )
+                    truncated_arg_note = (
+                        f"The arguments for {', '.join(sorted(set(truncated_arg_tools)))} "
+                        f"{failure_reason} and could not be read. Retry with a much shorter "
+                        "argument payload: send finished content, not code, and keep it compact."
+                    )
+                else:
+                    truncated_arg_note = ""
 
                 # Emit TOOL_CALL events
                 for tc, name, args in parsed:
@@ -1010,6 +1112,8 @@ class AgentLoop:
                 # the tool messages of one assistant turn breaks the OpenAI
                 # "tool_calls must be followed by a tool message per id" rule.
                 failure_notes: list[str] = []
+                if truncated_arg_note:
+                    failure_notes.append(truncated_arg_note)
                 created_skill_result: dict | None = None
 
                 if needs_confirmation:
@@ -1225,11 +1329,25 @@ class AgentLoop:
                     return
 
                 if self.autonomous and no_progress_streak >= 3:
+                    # A graceful stop, not an error: the caller still owns the
+                    # node contract and can render the deliverable from the text
+                    # collected so far. A hard error here discards that option.
                     message = (
-                        "Agent stopped after repeated tool calls or errors without progress. "
-                        "Review the selected Skill, Job evidence, and AI provider before retrying."
+                        "Agent made no progress after repeated tool calls or errors. "
+                        "Review the selected Skill, Job evidence, and AI provider."
                     )
-                    yield sse_event(SSEEventType.ERROR, {"message": message})
+                    if last_assistant_text:
+                        for chunk in (
+                            last_assistant_text[i:i + 50]
+                            for i in range(0, len(last_assistant_text), 50)
+                        ):
+                            yield sse_event(SSEEventType.DELTA, {"text": chunk})
+                    yield sse_event(SSEEventType.DONE, {
+                        "iterations": iteration,
+                        "success": False,
+                        "stopped": "no_progress",
+                        "failed_steps": [message],
+                    })
                     return
 
                 if focused_legal_qa and not created_skill_result and (

@@ -565,6 +565,261 @@ async def _delete_file_handler(args: dict, context) -> dict:
     return {"ok": True, "verified": True, "path": path}
 
 
+_HTML_REPORT_CSS = """
+:root { color-scheme: light; }
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  padding: 32px 16px 64px;
+  background: #f4f5f7;
+  font-family: "Sarabun", "Noto Sans Thai", "IBM Plex Sans Thai", -apple-system,
+    BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  color: #1f2937;
+  line-height: 1.65;
+}
+.report {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 40px 48px 56px;
+  background: #ffffff;
+  border-radius: 14px;
+  box-shadow: 0 1px 3px rgba(16, 24, 40, .1), 0 12px 32px rgba(16, 24, 40, .06);
+}
+.report-title { margin: 0; font-size: 28px; font-weight: 700; color: #0f172a; }
+.report-meta {
+  margin: 6px 0 28px;
+  padding-bottom: 20px;
+  border-bottom: 1px solid #e5e7eb;
+  font-size: 13px;
+  color: #6b7280;
+}
+h2 { margin: 32px 0 12px; font-size: 21px; font-weight: 700; color: #0f172a; }
+h3 { margin: 24px 0 10px; font-size: 17px; font-weight: 600; color: #1f2937; }
+h4 { margin: 20px 0 8px; font-size: 15px; font-weight: 600; color: #374151; }
+p { margin: 0 0 14px; }
+ul, ol { margin: 0 0 16px; padding-left: 24px; }
+li { margin: 0 0 6px; }
+hr { margin: 28px 0; border: 0; border-top: 1px solid #e5e7eb; }
+code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: #f3f4f6;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: .92em;
+}
+table {
+  width: 100%;
+  margin: 0 0 20px;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+th, td {
+  padding: 10px 12px;
+  border: 1px solid #e5e7eb;
+  text-align: left;
+  vertical-align: top;
+}
+th { background: #f9fafb; font-weight: 600; color: #111827; }
+tbody tr:nth-child(even) { background: #fcfcfd; }
+@media print {
+  body { background: #ffffff; padding: 0; }
+  .report { box-shadow: none; border-radius: 0; padding: 0; max-width: none; }
+}
+"""
+
+_HTML_INLINE_RULES = (
+    (re.compile(r"\*\*(.+?)\*\*"), r"<strong>\1</strong>"),
+    (re.compile(r"`([^`]+?)`"), r"<code>\1</code>"),
+)
+
+
+def _html_inline(text: str) -> str:
+    rendered = escape(text.strip())
+    for pattern, replacement in _HTML_INLINE_RULES:
+        rendered = pattern.sub(replacement, rendered)
+    return rendered
+
+
+def _is_table_divider_row(cells: list[str]) -> bool:
+    return bool(cells) and all(re.fullmatch(r":?-{2,}:?", cell.replace(" ", "")) for cell in cells)
+
+
+def _html_table(rows: list[list[str]]) -> str:
+    header, *body = rows
+    width = max(len(row) for row in rows)
+    def cells(row: list[str], tag: str) -> str:
+        padded = row + [""] * (width - len(row))
+        return "".join(f"<{tag}>{_html_inline(cell)}</{tag}>" for cell in padded)
+    head_html = f"<thead><tr>{cells(header, 'th')}</tr></thead>"
+    body_html = "".join(f"<tr>{cells(row, 'td')}</tr>" for row in body)
+    return f"<table>{head_html}<tbody>{body_html}</tbody></table>"
+
+
+def _markdown_to_html_body(content: str) -> str:
+    """Render the markdown subset agents actually produce (headings, tables,
+    lists, paragraphs) into HTML.
+
+    Deterministic rendering is what makes an HTML deliverable reliable: the model
+    only has to write report content, never code that generates a document.
+    """
+    blocks: list[str] = []
+    paragraph: list[str] = []
+    list_items: list[str] = []
+    table_rows: list[list[str]] = []
+    list_tag = ""
+
+    def flush_paragraph() -> None:
+        if paragraph:
+            blocks.append("<p>" + "<br/>".join(_html_inline(line) for line in paragraph) + "</p>")
+            paragraph.clear()
+
+    def flush_list() -> None:
+        nonlocal list_tag
+        if list_items:
+            items = "".join(f"<li>{_html_inline(item)}</li>" for item in list_items)
+            blocks.append(f"<{list_tag}>{items}</{list_tag}>")
+            list_items.clear()
+        list_tag = ""
+
+    def flush_table() -> None:
+        if table_rows:
+            blocks.append(_html_table(table_rows))
+            table_rows.clear()
+
+    for raw_line in (content or "").replace("\r\n", "\n").split("\n"):
+        line = raw_line.strip()
+        if not line:
+            flush_paragraph()
+            flush_list()
+            flush_table()
+            continue
+
+        if line.startswith("|"):
+            flush_paragraph()
+            flush_list()
+            cells = [cell.strip() for cell in line.strip("|").split("|")]
+            # The divider row is only meaningful directly after the header (the
+            # second line of a table block) — a dash-filled row anywhere else is
+            # real data (e.g. an "N/A" placeholder) and must be kept.
+            if len(table_rows) == 1 and _is_table_divider_row(cells):
+                continue
+            table_rows.append(cells)
+            continue
+        flush_table()
+
+        heading = re.match(r"(#{1,4})\s+(.+)", line)
+        if heading:
+            flush_paragraph()
+            flush_list()
+            blocks.append(
+                f"<h{len(heading.group(1))}>{_html_inline(heading.group(2))}"
+                f"</h{len(heading.group(1))}>"
+            )
+            continue
+
+        if re.fullmatch(r"([-*_])\1{2,}", line):
+            flush_paragraph()
+            flush_list()
+            blocks.append("<hr/>")
+            continue
+
+        bullet = re.match(r"[-*+]\s+(.+)", line)
+        ordered = re.match(r"\d+[.)]\s+(.+)", line)
+        if bullet or ordered:
+            tag = "ul" if bullet else "ol"
+            if list_tag and list_tag != tag:
+                flush_list()
+            flush_paragraph()
+            list_tag = tag
+            list_items.append((bullet or ordered).group(1))
+            continue
+
+        flush_list()
+        paragraph.append(line)
+
+    flush_paragraph()
+    flush_list()
+    flush_table()
+    return "\n".join(blocks)
+
+
+def _first_markdown_heading(content: str) -> str:
+    for line in (content or "").splitlines():
+        heading = re.match(r"#{1,3}\s+(.+)", line.strip())
+        if heading:
+            return heading.group(1).strip()
+    return ""
+
+
+def _build_html_document(content: str, title: str) -> str:
+    body = (content or "").strip()
+    if "<html" in body.lower():
+        # The model wrote a complete document — keep it verbatim.
+        return body if body.lower().startswith("<!doctype") else f"<!DOCTYPE html>\n{body}"
+
+    # A leading H1 duplicates the rendered report title. _first_markdown_heading
+    # scans every line (not just the first), so the strip must too — otherwise
+    # any leading blank line or prose before the heading leaves it un-stripped.
+    if _first_markdown_heading(body) == title:
+        body = re.sub(r"(?m)^[ \t]*#{1,3}[ \t]+.+\n?", "", body, count=1)
+    generated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    return (
+        '<!DOCTYPE html>\n<html lang="th">\n<head>\n<meta charset="utf-8"/>\n'
+        '<meta name="viewport" content="width=device-width, initial-scale=1"/>\n'
+        f"<title>{escape(title)}</title>\n<style>{_HTML_REPORT_CSS}</style>\n"
+        "</head>\n<body>\n<main class=\"report\">\n"
+        f'<h1 class="report-title">{escape(title)}</h1>\n'
+        f'<div class="report-meta">InsightDOC · generated {escape(generated)}</div>\n'
+        f"{_markdown_to_html_body(body)}\n"
+        "</main>\n</body>\n</html>\n"
+    )
+
+
+def _output_path_from_title(title: str, extension: str) -> str:
+    slug = re.sub(r"[^a-zA-Z0-9_\-฀-๿]+", "-", title.strip()).strip("-")
+    return f"outputs/{slug or 'document'}{extension}"
+
+
+async def _create_html_handler(args: dict, context) -> dict:
+    content = str(args.get("content") or args.get("html") or "")
+    title = str(args.get("title") or "").strip()
+    path = str(args.get("path") or args.get("output_path") or args.get("filename") or "").strip()
+
+    if not content.strip():
+        return {"error": "content is required"}
+    if not title:
+        title = _first_markdown_heading(content) or "InsightDOC Report"
+    if not path:
+        path = _output_path_from_title(title, ".html")
+    else:
+        if not path.lower().endswith(".html"):
+            path = f"{path}.html"
+        path = _coerce_outputs_path(path)
+    path = _workflow_output_path(context, path)
+
+    try:
+        scoped = _resolve_path(str(context.job_id), path)
+    except ValueError as e:
+        return {"error": str(e)}
+
+    data = _build_html_document(content, title).encode("utf-8")
+    if len(data) > MAX_FILE_SIZE_WRITE:
+        return {"error": f"Content too large ({len(data)} bytes, max {MAX_FILE_SIZE_WRITE})"}
+
+    try:
+        storage = get_storage_service()
+        storage.upload_file(io.BytesIO(data), scoped, content_type="text/html; charset=utf-8")
+    except Exception as e:
+        return {"error": f"HTML creation failed: {str(e)}"}
+    verification = verify_saved_file(str(context.job_id), path, expected_size=len(data))
+    if verification.get("ok") is not True:
+        return {"ok": False, "verified": False, "path": path,
+                "error": verification.get("error") or "HTML verification failed"}
+    return {"ok": True, "verified": True, "path": path,
+            "size": verification.get("size", len(data)),
+            "mime_type": "text/html; charset=utf-8"}
+
+
 def _docx_xml(text: str) -> str:
     lines = text.splitlines() or [""]
     paragraphs: list[str] = []
@@ -824,6 +1079,41 @@ tool_registry.register(ToolDef(
         "required": ["path"],
     },
     handler=_write_file_handler,
+))
+
+
+tool_registry.register(ToolDef(
+    name="create_html",
+    category="filesystem",
+    description=(
+        "Create a polished, standalone .html report in the current job's outputs from markdown-like content. "
+        "Headings, markdown tables, lists, bold and inline code are rendered with a print-ready stylesheet, "
+        "so you only write report content — never code that generates HTML. "
+        "Prefer this over run_report_code + execute_python unless the report needs custom scripting or charts. "
+        "The result includes a downloadable path when successful."
+    ),
+    parameters_schema={
+        "type": "object",
+        "properties": {
+            "content": {
+                "type": "string",
+                "description": (
+                    "Report body as markdown: '# ', '## ', '- ', '1. ', markdown tables and **bold** are supported. "
+                    "A complete '<html>...' document is also accepted and stored verbatim."
+                ),
+            },
+            "title": {
+                "type": "string",
+                "description": "Report title rendered at the top. Derived from the first heading when omitted.",
+            },
+            "path": {
+                "type": "string",
+                "description": "Output path under outputs/, e.g. 'outputs/contract_review.html'. Optional — derived from the title.",
+            },
+        },
+        "required": ["content"],
+    },
+    handler=_create_html_handler,
 ))
 
 

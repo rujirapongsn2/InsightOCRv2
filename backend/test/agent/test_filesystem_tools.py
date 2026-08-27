@@ -17,6 +17,7 @@ from app.agent.tools.filesystem_tools import (
     _write_file_handler,
     _convert_to_xlsx_handler,
     _build_docx_bytes,
+    _build_html_document,
     _list_files_handler,
     _delete_file_handler,
     _resolve_path,
@@ -368,3 +369,45 @@ class TestAllowedExtensions:
     def test_dangerous_extensions_blocked(self):
         for ext in [".exe", ".bin", ".dll", ".so", ".shs", ".ps1", ".bat"]:
             assert ext not in ALLOWED_EXTENSIONS, f"Extension {ext} should NOT be allowed"
+
+
+# ── HTML Rendering ───────────────────────────────────────────────────────────
+
+class TestBuildHtmlDocument:
+    def test_markdown_becomes_a_standalone_styled_document(self):
+        html = _build_html_document(
+            "# รายงานสัญญา\n\n## สรุป\n- ข้อ **หนึ่ง**\n\n| A | B |\n|---|---|\n| 1 | 2 |",
+            "รายงานสัญญา",
+        )
+        assert html.startswith("<!DOCTYPE html>")
+        assert "<title>รายงานสัญญา</title>" in html
+        assert "<h2>สรุป</h2>" in html
+        assert "<strong>หนึ่ง</strong>" in html
+        assert "<th>A</th>" in html and "<td>2</td>" in html
+        # The title already renders as the document heading.
+        assert html.count("รายงานสัญญา") == 2
+
+    def test_escapes_untrusted_markup_in_content(self):
+        html = _build_html_document("Value <script>alert(1)</script>", "Report")
+        assert "<script>" not in html
+        assert "&lt;script&gt;" in html
+
+    def test_complete_html_document_is_passed_through(self):
+        source = "<html><body><p>done</p></body></html>"
+        assert _build_html_document(source, "Report") == "<!DOCTYPE html>\n" + source
+
+    def test_dash_filled_data_row_is_not_mistaken_for_the_header_divider(self):
+        """Only the row immediately after the header is a divider; a later
+        all-dash row (e.g. an 'N/A' placeholder) is real data and must survive.
+        """
+        html = _build_html_document(
+            "| Field | Value |\n|---|---|\n| Amount | -- |\n| Note | -- |",
+            "Report",
+        )
+        assert html.count("<td>--</td>") == 2
+
+    def test_duplicate_title_heading_is_stripped_even_with_leading_blank_line(self):
+        html = _build_html_document("\n# Report\n\nBody text", "Report")
+        # Stripped from the body — only the <h1 class="report-title"> remains.
+        assert html.count("Report") == 2  # <title> + report-title, not a third in <p>/body</p>
+        assert "<p>Report</p>" not in html
