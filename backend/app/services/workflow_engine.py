@@ -932,6 +932,8 @@ def _exec_llm(db: Session, config: dict, context: dict, log: Callable[[str], Non
                 output_filename=(str(config.get("output_filename") or "").strip() or None),
                 max_iterations=int(config.get("max_iterations") or 7),
                 timeout_seconds=int(config.get("timeout_seconds") or 300),
+                workflow_run_id=str(context.get("_run_id") or ""),
+                workflow_node_id=str(context.get("_node_id") or ""),
             ))
         except (ValueError, WorkflowAgentConfigurationError) as exc:
             raise NodeExecutionError(f"Agent node configuration error: {exc}") from exc

@@ -3,7 +3,13 @@ import base64
 import io
 from pathlib import Path
 
-from app.agent.tools.filesystem_tools import MAX_FILE_SIZE_WRITE, _normalize_job_path, _resolve_path, verify_saved_file
+from app.agent.tools.filesystem_tools import (
+    MAX_FILE_SIZE_WRITE,
+    _normalize_job_path,
+    _resolve_path,
+    _workflow_output_path,
+    verify_saved_file,
+)
 from app.agent.tools.registry import ToolDef, tool_registry
 from app.services.code_sandbox import execute_python
 from app.services.storage import get_storage_service
@@ -40,7 +46,7 @@ def _persist_execution_files(execution: dict, context) -> dict:
         if len(data) > MAX_FILE_SIZE_WRITE:
             return {"error": f"Generated file too large ({len(data)} bytes, max {MAX_FILE_SIZE_WRITE})", "execution": execution}
 
-        output_path = _normalize_output_file_path(filename)
+        output_path = _workflow_output_path(context, _normalize_output_file_path(filename))
         try:
             scoped = _resolve_path(str(context.job_id), output_path)
         except ValueError as e:
@@ -194,6 +200,7 @@ async def _create_pdf_handler(args: dict, context) -> dict:
         output_path = _normalize_pdf_path(f"outputs/{stem}.pdf")
     if not output_path:
         return {"error": "output_path must be a .pdf file under outputs/"}
+    output_path = _workflow_output_path(context, output_path)
 
     filename = Path(output_path).name
     code = r'''
@@ -347,6 +354,7 @@ async def _run_report_code_handler(args: dict, context) -> dict:
     output_path = _normalize_report_path(args.get("output_path") or "outputs/report.html")
     if not output_path:
         return {"error": "output_path must be an .html file under outputs/"}
+    output_path = _workflow_output_path(context, output_path)
 
     timeout = min(int(args.get("timeout", 45)), 60)
     execution = await execute_python(

@@ -10,6 +10,7 @@ import asyncio
 import hashlib
 import json
 import re
+import time
 from typing import Any
 from uuid import UUID
 
@@ -144,9 +145,14 @@ def _system_instructions(skills: list[Any], output_format: str, output_filename:
         )
     output_rule = OUTPUT_INSTRUCTIONS.get(output_format, OUTPUT_INSTRUCTIONS["text"])
     approach = _format_approach(output_format)
+    output_path = (
+        str(output_filename).strip()
+        if output_filename and str(output_filename).strip().startswith("outputs/")
+        else f"outputs/{output_filename}"
+    )
     filename_rule = (
         f"Required output format: {output_format.upper()}, filename '{output_filename}'. "
-        f"{approach} Save the final file at 'outputs/{output_filename}' (or '{output_filename}'). "
+        f"{approach} Save the final file at '{output_path}' (or '{output_filename}'). "
         f"Ignore any default output format (such as Markdown or PDF) mentioned in the Skill procedure above when it differs from {output_format.upper()}."
         if output_filename else
         f"Required output format: {output_format.upper()}. {approach} Save the final file in outputs/."
@@ -299,6 +305,24 @@ def _agent_status(
     return status
 
 
+def _workflow_artifact_prefix(workflow_run_id: str | None, workflow_node_id: str | None) -> str:
+    """Build a storage-safe namespace for one Workflow node execution."""
+    if not workflow_run_id or not workflow_node_id:
+        return ""
+    safe_run = re.sub(r"[^A-Za-z0-9_-]", "", str(workflow_run_id))
+    safe_node = re.sub(r"[^A-Za-z0-9_-]", "", str(workflow_node_id))
+    if not safe_run or not safe_node:
+        raise WorkflowAgentConfigurationError("Workflow artifact namespace is invalid")
+    return f"outputs/workflow/{safe_run}/{safe_node}"
+
+
+def _workflow_output_filename(filename: str | None, artifact_prefix: str) -> str | None:
+    """Keep the user-selected filename while placing it under the node namespace."""
+    if not artifact_prefix or not filename:
+        return filename
+    return f"{artifact_prefix}/{str(filename).strip().rsplit('/', 1)[-1]}"
+
+
 async def run_workflow_agent(
     db: Session,
     *,
@@ -312,10 +336,16 @@ async def run_workflow_agent(
     skill_fingerprints: dict[str, str] | None = None,
     max_iterations: int = 7,
     timeout_seconds: int = 300,
+    workflow_run_id: str | None = None,
+    workflow_node_id: str | None = None,
 ) -> dict[str, Any]:
     if output_format in FILE_OUTPUT_FORMATS and not job_id:
         raise WorkflowAgentConfigurationError(
             "File output requires a Job context so artifacts can be stored and downloaded safely"
+        )
+    if provider.get("provider") != "openai_compatible":
+        raise WorkflowAgentConfigurationError(
+            "Agent mode requires an OpenAI-compatible provider with native tool calling"
         )
     skills = _selected_skills(db, user_id, skill_ids, skill_fingerprints)
     allowed_tools = _skill_tool_allowlist(skills, output_format=output_format)
@@ -329,6 +359,9 @@ async def run_workflow_agent(
 
     max_iterations = min(max(int(max_iterations or 7), 3), 20)
     timeout_seconds = min(max(int(timeout_seconds or 300), 60), 900)
+    artifact_prefix = _workflow_artifact_prefix(workflow_run_id, workflow_node_id)
+    effective_output_filename = _workflow_output_filename(output_filename, artifact_prefix)
+    started_at = time.monotonic()
     conversation = crud_conv.create(
         db,
         job_id=job_id,
@@ -339,6 +372,7 @@ async def run_workflow_agent(
     text_parts: list[str] = []
     artifacts: list[dict[str, Any]] = []
     tool_summary: list[dict[str, Any]] = []
+    trace: list[dict[str, Any]] = []
     warnings: list[str] = []
     done: dict[str, Any] = {}
     done_seen = False
@@ -353,11 +387,12 @@ async def run_workflow_agent(
         max_iterations=max_iterations,
         kind="document",
         initial_allowed_tools=allowed_tools,
-        additional_system_prompt=_system_instructions(skills, output_format, output_filename),
+        additional_system_prompt=_system_instructions(skills, output_format, effective_output_filename),
         autonomous=True,
         output_format=output_format,
-        output_filename=output_filename,
+        output_filename=effective_output_filename,
     )
+    loop.context.output_path_prefix = artifact_prefix or None
 
     async def consume() -> None:
         nonlocal done, done_seen, error_message
@@ -376,6 +411,7 @@ async def run_workflow_agent(
                     and (bool(result.get("error")) or result.get("ok") is False)
                 )
                 tool_summary.append({"tool": tool_name, "ok": not failed})
+                trace.append({"event": "tool_result", "tool": tool_name, "ok": not failed})
                 artifact = _artifact_from_result(tool_name, result)
                 if artifact and job_id:
                     artifact["job_id"] = str(job_id)
@@ -392,10 +428,17 @@ async def run_workflow_agent(
                 for step in (event.get("failed_steps") or []):
                     if step not in warnings:
                         warnings.append(str(step))
+                trace.append({
+                    "event": "done",
+                    "success": event.get("success"),
+                    "stopped": event.get("stopped"),
+                    "iterations": event.get("iterations"),
+                })
             elif event_type == "confirmation_required":
                 error_message = "Autonomous Agent attempted an action that requires confirmation"
             elif event_type == "error":
                 error_message = str(event.get("message") or "Agent execution failed")
+                trace.append({"event": "error", "message": error_message[:500]})
 
     try:
         await asyncio.wait_for(consume(), timeout=timeout_seconds)
@@ -411,6 +454,7 @@ async def run_workflow_agent(
     if output_format in {"html", "docx", "pdf", "xlsx"} and not artifacts:
         warnings.append(f"Agent did not produce the required {output_format.upper()} artifact")
 
+    elapsed_ms = round((time.monotonic() - started_at) * 1000)
     return {
         "status": status,
         "text": final_text or error_message or "Agent finished without a final response",
@@ -421,6 +465,13 @@ async def run_workflow_agent(
         "iterations": int(done.get("iterations") or max_iterations),
         "warnings": list(dict.fromkeys(warnings)),
         "error": error_message,
+        "trace": trace[-100:],
+        "metrics": {
+            "elapsed_ms": elapsed_ms,
+            "provider": str(provider.get("source") or provider.get("provider") or "unknown"),
+            "model": str(provider.get("model") or "unknown"),
+            "stop_reason": str(done.get("stopped") or ("timeout" if error_message and "timeout" in error_message.lower() else "completed")),
+        },
         "selected_skills": [
             {"id": str(skill.id), "name": skill.name, "version": skill.version}
             for skill in skills

@@ -60,6 +60,7 @@ async def _chat_with_retry(client: AsyncOpenAI, **kwargs):
     Some OpenAI-compatible providers reject the temperature parameter; on such
     an error we drop it and retry immediately instead of burning attempts.
     """
+    require_tools = bool(kwargs.pop("require_tools", False))
     last_exc: Exception | None = None
     for attempt in range(1, LLM_MAX_ATTEMPTS + 1):
         try:
@@ -70,9 +71,15 @@ async def _chat_with_retry(client: AsyncOpenAI, **kwargs):
             if "temperature" in msg and "temperature" in kwargs:
                 kwargs.pop("temperature")
                 continue
-            # Some providers don't support function calling — drop tools and retry
-            # immediately so callers can fall back to parsing JSON from content.
+            # A file-producing Workflow Agent cannot safely fall back to plain
+            # chat: it would be unable to create or verify the required output.
             if ("tool" in msg or "function" in msg) and "tools" in kwargs:
+                if require_tools:
+                    raise RuntimeError(
+                        "Selected AI provider rejected tool/function calling. "
+                        "Choose a provider that supports OpenAI-compatible tool calls for Agent mode."
+                    ) from e
+                # Interactive chat can still use the JSON-in-content fallback.
                 kwargs.pop("tools", None)
                 kwargs.pop("tool_choice", None)
                 continue
@@ -940,6 +947,7 @@ class AgentLoop:
                     tool_choice=tool_choice,
                     temperature=LLM_TEMPERATURE,
                     stream=False,
+                    require_tools=bool(self.autonomous and requires_file and tools_schema),
                 )
             except Exception as e:
                 yield sse_event(SSEEventType.ERROR, {"message": f"LLM error: {str(e)}"})
@@ -1058,7 +1066,7 @@ class AgentLoop:
                         tool_signature = f"{tool_name}:{json.dumps(tool_args, sort_keys=True, ensure_ascii=False)}"
                         duplicate_tool_call = tool_signature in seen_tool_signatures
                         seen_tool_signatures.add(tool_signature)
-                        if focused_legal_qa and duplicate_tool_call:
+                        if duplicate_tool_call or _tool_failed(result):
                             no_progress_streak += 1
                         note = _evidence_note(tool_name, result)
                         if note:
@@ -1086,6 +1094,7 @@ class AgentLoop:
                         if _is_file_write_success(tool_name, result):
                             current_turn_file_success = True
                             latest_file_success_result = result
+                            no_progress_streak = 0
                         if _is_report_success(tool_name, result):
                             latest_report_success = result
                         if _tool_failed(result):
@@ -1138,7 +1147,7 @@ class AgentLoop:
                         tool_signature = f"{tool_name}:{json.dumps(tool_args, sort_keys=True, ensure_ascii=False)}"
                         duplicate_tool_call = tool_signature in seen_tool_signatures
                         seen_tool_signatures.add(tool_signature)
-                        if focused_legal_qa and duplicate_tool_call:
+                        if duplicate_tool_call or _tool_failed(result):
                             no_progress_streak += 1
                         note = _evidence_note(tool_name, result)
                         if note:
@@ -1167,6 +1176,7 @@ class AgentLoop:
                         if _is_file_write_success(tool_name, result):
                             current_turn_file_success = True
                             latest_file_success_result = result
+                            no_progress_streak = 0
                         if _is_report_success(tool_name, result):
                             latest_report_success = result
                         if _tool_failed(result):
@@ -1184,6 +1194,43 @@ class AgentLoop:
                 # this assistant turn are contiguous, system messages are safe.
                 for note in failure_notes:
                     messages.append({"role": "system", "content": note})
+
+                # A verified file is the terminal contract for a background
+                # file-producing node. Skipping reflection here prevents a
+                # valid artifact from being discarded after an unrelated LLM
+                # timeout while trying to polish its final narrative.
+                if (
+                    self.autonomous
+                    and requires_file
+                    and current_turn_file_success
+                    and latest_file_success_result
+                ):
+                    final_text = _file_success_final_text(latest_file_success_result, user_message)
+                    crud_msg.add(
+                        self.db,
+                        conversation_id=self.conversation_id,
+                        role="assistant",
+                        content=final_text,
+                        iteration=iteration,
+                        model_used=model,
+                    )
+                    for chunk in (final_text[i:i + 50] for i in range(0, len(final_text), 50)):
+                        yield sse_event(SSEEventType.DELTA, {"text": chunk})
+                    yield sse_event(SSEEventType.DONE, {
+                        "iterations": iteration,
+                        "success": True,
+                        "stopped": "verified_artifact",
+                        "failed_steps": [],
+                    })
+                    return
+
+                if self.autonomous and no_progress_streak >= 3:
+                    message = (
+                        "Agent stopped after repeated tool calls or errors without progress. "
+                        "Review the selected Skill, Job evidence, and AI provider before retrying."
+                    )
+                    yield sse_event(SSEEventType.ERROR, {"message": message})
+                    return
 
                 if focused_legal_qa and not created_skill_result and (
                     evidence_found or no_progress_streak >= 2 or legal_search_calls >= 4

@@ -97,8 +97,9 @@ services:
 
   celery_worker:
     build: ./backend
-    # no container_name so `docker compose up --scale celery_worker=N` works
-    command: celery -A app.celery_app worker --loglevel=info --concurrency=8 -Q documents,workflows,celery
+    # OCR/import work is isolated from autonomous Workflow Agents. Scale this
+    # service for document throughput without consuming Agent capacity.
+    command: celery -A app.celery_app worker --loglevel=info --concurrency=6 -Q documents,celery
     volumes:
       - documents_uploads:/app/uploads
       - /var/run/docker.sock:/var/run/docker.sock  # Sandbox: workflow Python Code nodes
@@ -137,6 +138,50 @@ services:
       resources:
         limits:
           memory: 3G
+    restart: unless-stopped
+
+  celery_workflow_worker:
+    build: ./backend
+    # Agent nodes may hold a model/tool turn for minutes. Keep their queue
+    # separate so document OCR remains responsive, and bound concurrency to
+    # protect the database, model provider, and sandbox Docker daemon.
+    command: celery -A app.celery_app worker --loglevel=info --concurrency=2 -Q workflows
+    volumes:
+      - documents_uploads:/app/uploads
+      - /var/run/docker.sock:/var/run/docker.sock
+    env_file:
+      - ./backend/.env
+    environment:
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
+      - SANDBOX_IMAGE=insightocr-sandbox:py312
+      - SANDBOX_AUTO_BUILD=true
+      - SANDBOX_DOCKER_NETWORK=auto
+      - SANDBOX_MEMORY_MB=512
+      - SANDBOX_TMPFS_MB=512
+      - HTTP_PROXY=http://gateway:8888
+      - HTTPS_PROXY=http://gateway:8888
+      - NO_PROXY=localhost,127.0.0.1,backend,db,redis,minio,frontend,nginx,gateway
+    depends_on:
+      - db
+      - redis
+      - backend
+    networks:
+      - public
+      - internal
+    security_opt:
+      - no-new-privileges:true
+    group_add:
+      - "0"
+      - "${DOCKER_GID:-988}"
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+    deploy:
+      resources:
+        limits:
+          memory: 2G
     restart: unless-stopped
 
   celery_beat:

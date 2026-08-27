@@ -160,6 +160,9 @@ class AgentContext:
         self.job_id = job_id
         self.conversation_id = conversation_id
         self.kind = kind
+        # Set only by Workflow Agent nodes. File tools use it to isolate output
+        # paths per workflow run and node, avoiding collisions between runs.
+        self.output_path_prefix: str | None = None
         self.current_request: str = ""
         # None keeps legacy skills unrestricted. An empty set means a strict
         # skill intentionally has no tool access.

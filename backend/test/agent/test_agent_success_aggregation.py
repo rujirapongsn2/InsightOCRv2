@@ -13,6 +13,7 @@ import pytest
 from app.agent.loop import (
     AgentLoop,
     _aggregate_success,
+    _chat_with_retry,
     _tool_failed,
 )
 
@@ -107,6 +108,22 @@ def test_aggregate_success_no_reflection_is_tolerated():
     )
     assert ok is True
     assert steps == []
+
+
+@pytest.mark.asyncio
+async def test_required_tool_call_provider_failure_is_not_silently_degraded():
+    client = MagicMock()
+    client.chat.completions.create = AsyncMock(side_effect=RuntimeError("function calling unsupported"))
+
+    with pytest.raises(RuntimeError, match="rejected tool/function calling"):
+        await _chat_with_retry(
+            client,
+            model="test",
+            messages=[],
+            tools=[{"type": "function", "function": {"name": "create_docx"}}],
+            tool_choice="auto",
+            require_tools=True,
+        )
 
 
 # ── _reflect honesty ─────────────────────────────────────────────────

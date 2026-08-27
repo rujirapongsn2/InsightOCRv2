@@ -15,6 +15,8 @@ from app.services.workflow_agent import (
     _artifact_from_result,
     _remove_interactive_tail,
     _skill_tool_allowlist,
+    _workflow_artifact_prefix,
+    _workflow_output_filename,
 )
 
 
@@ -65,6 +67,15 @@ def test_artifact_requires_an_outputs_path():
         "verified": True,
     }
     assert _artifact_from_result("read_file", {"path": "source/input.pdf"}) is None
+
+
+def test_workflow_artifacts_are_namespaced_per_run_and_node():
+    prefix = _workflow_artifact_prefix("run-123", "agent_node")
+
+    assert prefix == "outputs/workflow/run-123/agent_node"
+    assert _workflow_output_filename("reports/summary.docx", prefix) == (
+        "outputs/workflow/run-123/agent_node/summary.docx"
+    )
 
 
 def test_max_iterations_is_never_a_success_without_explicit_completion():
@@ -167,6 +178,7 @@ async def test_headless_adapter_returns_verified_terminal_artifact(monkeypatch):
         def __init__(self, **kwargs):
             assert kwargs["autonomous"] is True
             assert "create_pdf" in kwargs["initial_allowed_tools"]
+            self.context = SimpleNamespace(output_path_prefix=None)
 
         async def run(self, prompt):
             yield sse_event(SSEEventType.TOOL_RESULT, {
@@ -209,6 +221,20 @@ async def test_file_output_rejects_missing_job_context_before_agent_execution():
             prompt="Create report",
             skill_ids=[str(uuid4())],
             output_format="docx",
+        )
+
+
+@pytest.mark.asyncio
+async def test_agent_rejects_completion_only_provider_before_execution():
+    with pytest.raises(WorkflowAgentConfigurationError, match="OpenAI-compatible"):
+        await workflow_agent_mod.run_workflow_agent(
+            object(),
+            user_id=uuid4(),
+            job_id=uuid4(),
+            provider={"provider": "completion_messages", "apiKey": "test"},
+            prompt="Create report",
+            skill_ids=[str(uuid4())],
+            output_format="html",
         )
 
 

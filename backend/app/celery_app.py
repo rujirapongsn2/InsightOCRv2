@@ -39,9 +39,9 @@ celery_app.conf.update(
     # executing. Redelivery after a genuine worker death is then gated by the
     # atomic status claims in the tasks themselves.
     broker_transport_options={"visibility_timeout": 2400},
-    # Separate queues so long OCR tasks cannot starve short workflow runs.
-    # The default worker consumes both (-Q documents,workflows,celery); extra
-    # workers can be scaled per queue.
+    # Separate queues so long OCR tasks cannot starve Workflow/Agent runs.
+    # Compose runs dedicated document and workflow workers; each can be scaled
+    # independently without changing routing.
     task_routes={
         "app.tasks.document_tasks.*": {"queue": "documents"},
         "app.tasks.workflow_tasks.*": {"queue": "workflows"},

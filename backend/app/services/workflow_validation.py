@@ -214,11 +214,34 @@ def validate_workflow_definition(
                 issues.append(_issue(nid, "warning", "ai_provider_id", "ไม่พบ AI provider ที่อ้างถึง"))
             elif not ai.is_active:
                 issues.append(_issue(nid, "error", "ai_provider_id", "AI provider ที่เลือกถูกปิดใช้งาน"))
+            elif (config.get("mode") or "llm") == "agent" and (getattr(ai, "provider_type", None) or "completion_messages") != "openai_compatible":
+                issues.append(_issue(
+                    nid,
+                    "error",
+                    "ai_provider_id",
+                    "Agent mode ต้องใช้ AI provider แบบ OpenAI-compatible ที่รองรับ native tool calling",
+                ))
 
         if ntype == "llm" and (config.get("mode") or "llm") not in {"llm", "agent"}:
             issues.append(_issue(nid, "error", "mode", "โหมด AI ต้องเป็น llm หรือ agent"))
 
         if ntype == "llm" and (config.get("mode") or "llm") == "agent":
+            if not config.get("ai_provider_id"):
+                configured_agent_provider = db.query(AISettings).filter(
+                    AISettings.is_agent_provider == True,  # noqa: E712
+                    AISettings.is_active == True,  # noqa: E712
+                ).first()
+                if (
+                    configured_agent_provider
+                    and (getattr(configured_agent_provider, "provider_type", None) or "completion_messages")
+                    != "openai_compatible"
+                ):
+                    issues.append(_issue(
+                        nid,
+                        "error",
+                        "ai_provider_id",
+                        "Agent Provider ที่ตั้งไว้กลางระบบไม่รองรับ native tool calling; เลือก OpenAI-compatible provider สำหรับ Agent node",
+                    ))
             skill_ids = config.get("skill_ids") or []
             declared_tools: set[str] = set()
             has_declared_policy = False

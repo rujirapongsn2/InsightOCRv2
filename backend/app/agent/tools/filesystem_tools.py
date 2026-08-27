@@ -308,6 +308,15 @@ def _coerce_outputs_path(path: str) -> str:
     return f"outputs/{cleaned}"
 
 
+def _workflow_output_path(context, path: str) -> str:
+    """Place autonomous Workflow files in their immutable node namespace."""
+    prefix = str(getattr(context, "output_path_prefix", "") or "").strip().strip("/")
+    if not prefix:
+        return path
+    filename = Path(_coerce_outputs_path(path)).name
+    return f"{prefix}/{filename}"
+
+
 def _safe_read(
     storage,
     path: str,
@@ -459,7 +468,7 @@ async def _write_file_handler(args: dict, context) -> dict:
         return {"error": "content or content_base64 is required"}
 
     # Scope writes to outputs/ by default for safety
-    path = _coerce_outputs_path(path)
+    path = _workflow_output_path(context, path)
 
     try:
         path = _normalize_job_path(str(context.job_id), path)
@@ -643,6 +652,7 @@ async def _create_docx_handler(args: dict, context) -> dict:
         if not path.endswith(".docx"):
             path = f"{path}.docx"
         path = _coerce_outputs_path(path)
+    path = _workflow_output_path(context, path)
     if not str(content).strip():
         return {"error": "content is required"}
 
@@ -695,7 +705,7 @@ async def _convert_to_xlsx_handler(args: dict, context) -> dict:
         output_path = f"outputs/{source_name}.xlsx"
     if not output_path.endswith(".xlsx"):
         output_path = f"{output_path}.xlsx"
-    output_path = _coerce_outputs_path(output_path)
+    output_path = _workflow_output_path(context, output_path)
 
     try:
         scoped_output = _resolve_path(str(context.job_id), output_path)
