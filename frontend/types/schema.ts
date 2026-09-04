@@ -76,6 +76,7 @@ export interface SchemaData {
 export interface SchemaWizardState {
   currentStep: WizardStep
   startingPoint: StartingPoint | null
+  manualEntry: boolean
   schemaData: SchemaData
   fields: SchemaField[]
   validationErrors: ValidationError[]
@@ -166,6 +167,7 @@ export interface CreateSchemaResponse {
 export interface SchemaWizardActions {
   setCurrentStep: (step: WizardStep) => void
   setStartingPoint: (point: StartingPoint) => void
+  setManualEntry: (enabled: boolean) => void
   updateSchemaData: (data: Partial<SchemaData>) => void
   addField: (field: SchemaField) => void
   updateField: (id: string, updates: Partial<SchemaField>) => void

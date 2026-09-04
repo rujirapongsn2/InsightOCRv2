@@ -10,6 +10,7 @@ import { WizardStep1 } from "./WizardStep1"
 import { AIFieldsStep } from "./AIFieldsStep"
 import { ImportSchemaStep } from "./ImportSchemaStep"
 import { DetailsAndSaveStep } from "./DetailsAndSaveStep"
+import { WizardStep3 } from "./WizardStep3"
 
 const FixedPositionFieldsStep = dynamic(
   () => import("./FixedPositionFieldsStep").then((module) => module.FixedPositionFieldsStep),
@@ -17,7 +18,7 @@ const FixedPositionFieldsStep = dynamic(
 )
 
 export function SchemaWizard({ embedded = false }: { embedded?: boolean }) {
-  const { currentStep, startingPoint } = useSchemaWizard()
+  const { currentStep, startingPoint, manualEntry } = useSchemaWizard()
 
   // We only show the stepper and content after a starting point is chosen
   const showStepper = startingPoint !== null
@@ -66,7 +67,7 @@ export function SchemaWizard({ embedded = false }: { embedded?: boolean }) {
         {startingPoint === null && <WizardStep1 />}
 
         {/* Step 1: Fields (AI upload + field list) */}
-        {startingPoint === "ai" && currentStep === 1 && <AIFieldsStep />}
+        {startingPoint === "ai" && currentStep === 1 && (manualEntry ? <WizardStep3 /> : <AIFieldsStep />)}
 
         {/* Step 1: Fixed-position PDF fields */}
         {startingPoint === "fixed" && currentStep === 1 && <FixedPositionFieldsStep />}

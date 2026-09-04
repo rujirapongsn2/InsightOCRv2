@@ -11,7 +11,7 @@ import { getApiBaseUrl } from "@/lib/api"
 const genId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
 
 export function AIFieldsStep() {
-    const { startingPoint, schemaData, fields, setFields, addField, updateField, removeField, nextStep } = useSchemaWizard()
+    const { startingPoint, schemaData, fields, setFields, addField, updateField, removeField, nextStep, setManualEntry } = useSchemaWizard()
     const isAIMode = startingPoint === "ai"
 
     // AI Upload State
@@ -248,7 +248,7 @@ export function AIFieldsStep() {
             )}
 
             <div className="text-center pt-4">
-                <Button variant="ghost" className="text-slate-500" onClick={nextStep} disabled={isAnalyzing}>
+                <Button variant="ghost" className="text-slate-500" onClick={() => setManualEntry(true)} disabled={isAnalyzing}>
                     Enter fields manually <ArrowRight className="h-4 w-4 ml-1" />
                 </Button>
             </div>

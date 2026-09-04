@@ -18,7 +18,7 @@ const FIELD_TYPE_OPTIONS: Array<{ value: FieldType; label: string }> = [
 ]
 
 export function WizardStep3() {
-  const { schemaData, fields, addField, updateField, removeField, validationErrors, nextStep, previousStep } = useSchemaWizard()
+  const { startingPoint, schemaData, fields, addField, updateField, removeField, validationErrors, nextStep, previousStep, setManualEntry } = useSchemaWizard()
   const [showSuggestions, setShowSuggestions] = useState(true)
 
   const suggestions = FIELD_SUGGESTIONS[schemaData.document_type] || []
@@ -267,9 +267,9 @@ export function WizardStep3() {
       <div className="flex justify-between pt-6 border-t">
         <Button
           variant="outline"
-          onClick={previousStep}
+          onClick={() => startingPoint === "ai" ? setManualEntry(false) : previousStep()}
         >
-          Previous
+          {startingPoint === "ai" ? "Back to upload" : "Previous"}
         </Button>
         <Button
           onClick={handleNext}

@@ -35,6 +35,7 @@ const initialSchemaData: SchemaData = {
 const initialState: SchemaWizardState = {
   currentStep: 1,
   startingPoint: null,
+  manualEntry: false,
   schemaData: initialSchemaData,
   fields: [],
   validationErrors: [],
@@ -55,7 +56,11 @@ export function SchemaWizardProvider({ children, onSaved }: { children: ReactNod
   }
 
   const setStartingPoint = (point: StartingPoint) => {
-    setState(prev => ({ ...prev, startingPoint: point }))
+    setState(prev => ({ ...prev, startingPoint: point, manualEntry: false }))
+  }
+
+  const setManualEntry = (enabled: boolean) => {
+    setState(prev => ({ ...prev, manualEntry: enabled, currentStep: 1 }))
   }
 
   const updateSchemaData = (data: Partial<SchemaData>) => {
@@ -212,6 +217,7 @@ export function SchemaWizardProvider({ children, onSaved }: { children: ReactNod
     ...state,
     setCurrentStep,
     setStartingPoint,
+    setManualEntry,
     updateSchemaData,
     addField,
     updateField,
