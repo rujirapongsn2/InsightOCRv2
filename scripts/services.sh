@@ -25,6 +25,7 @@ Shortcuts:
   api  = backend
   web  = frontend
   worker = celery_worker
+  workflow-worker = celery_workflow_worker
 
 EOF
 }
@@ -44,7 +45,7 @@ restart_service() {
 
 restart_backend_services() {
   echo "Restarting backend and task workers..."
-  $COMPOSE restart backend celery_worker celery_beat
+  $COMPOSE restart backend celery_worker celery_workflow_worker celery_beat
   wait_for_service_group backend
 }
 
@@ -67,7 +68,7 @@ rebuild_service() {
 
 rebuild_backend_services() {
   echo "Rebuilding backend and recreating task workers..."
-  $COMPOSE up -d --build --force-recreate backend celery_worker celery_beat
+  $COMPOSE up -d --build --force-recreate backend celery_worker celery_workflow_worker celery_beat
   echo "Refreshing nginx upstreams..."
   $COMPOSE restart nginx
   wait_for_service_group backend
@@ -109,6 +110,22 @@ wait_for_worker_ready() {
   done
 
   echo "celery_worker did not become ready within ${timeout_seconds} seconds" >&2
+  return 1
+}
+
+wait_for_workflow_worker_ready() {
+  local timeout_seconds="${1:-180}"
+  local elapsed=0
+
+  while [ "$elapsed" -lt "$timeout_seconds" ]; do
+    if $COMPOSE exec -T celery_workflow_worker sh -lc 'celery -A app.celery_app inspect ping -d "celery@$(hostname)" 2>/dev/null | grep -q pong'; then
+      return 0
+    fi
+    sleep 3
+    elapsed=$((elapsed + 3))
+  done
+
+  echo "celery_workflow_worker did not become ready within ${timeout_seconds} seconds" >&2
   return 1
 }
 
@@ -172,7 +189,7 @@ update_stack() {
   write_build_info "$after_sha" "$branch_name"
 
   echo "Rebuilding application services..."
-  $COMPOSE up -d --build --force-recreate backend celery_worker celery_beat frontend gateway
+  $COMPOSE up -d --build --force-recreate backend celery_worker celery_workflow_worker celery_beat frontend gateway
 
   echo "Refreshing nginx..."
   $COMPOSE restart nginx
@@ -181,6 +198,7 @@ update_stack() {
   wait_for_healthy softnix_ocr_backend
   wait_for_healthy softnix_ocr_frontend
   wait_for_healthy softnix_ocr_nginx
+  wait_for_workflow_worker_ready
 
   if [ "$before_sha" = "$after_sha" ]; then
     echo "Already up to date."

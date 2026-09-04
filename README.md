@@ -203,6 +203,27 @@ scripts/services.sh ps
 - Watch for API request/response
 - Ctrl+C to stop following logs
 
+### Automatic deployment from GitHub
+
+The repository includes `.github/workflows/deploy-production.yml`. Every push to
+`main` (or a manual workflow dispatch) updates the production checkout and runs
+`scripts/services.sh update` on a self-hosted runner labeled `insightdoc-prod`.
+The deploy recreates backend, frontend, Celery workers, the workflow worker,
+Celery Beat, gateway, and nginx, then checks service health and worker readiness.
+
+One-time setup is required on the production host:
+
+1. In GitHub, open `Settings > Actions > Runners > New self-hosted runner` for
+   this repository and follow the Linux x64 instructions using the short-lived
+   registration token shown there.
+2. Configure the runner labels to include `insightdoc-prod`, install it as a
+   service, and set its working directory to this checkout.
+3. Ensure the runner user can run Docker and can read/write the repository.
+
+Do not place a GitHub personal access token, registration token, or application
+secret in the repository. The runner token is only used during one-time runner
+registration and GitHub rotates the job token automatically.
+
 ### Service Aliases
 
 The script accepts multiple aliases for convenience:

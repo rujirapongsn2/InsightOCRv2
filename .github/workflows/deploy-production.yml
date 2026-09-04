@@ -1,0 +1,35 @@
+name: Deploy production
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: insightdoc-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    # This runner must be installed on the production host and labeled
+    # insightdoc-prod. The runner executes the existing, audited deploy script.
+    runs-on: [self-hosted, linux, x64, insightdoc-prod]
+    timeout-minutes: 30
+    steps:
+      - name: Update and restart InsightDOC
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /home/ubuntu/InsightOCRv2
+          git status --short --branch
+          scripts/services.sh update
+
+      - name: Verify deployment
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /home/ubuntu/InsightOCRv2
+          test "$(git branch --show-current)" = "main"
+          test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
+          docker compose ps
+          docker compose exec -T celery_workflow_worker celery -A app.celery_app inspect ping --timeout=10
