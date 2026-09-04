@@ -1164,3 +1164,18 @@ Date: 2026-06-30
    - Automated verification:
      - Backend workflow Agent, validation, confirmation, and Skill policy tests.
      - Frontend `npm run build` including TypeScript validation.
+
+
+## Manual Verification - Agent Task Preset Help Table (LLM/Agent node)
+
+- Open a Workflow in the editor and select an `LLM / Agent` node.
+- Click the help button on the node config panel to expand the help panel.
+- Confirm a new section "งานของ Agent — เลือกให้ตรงกับงาน" renders a 4-row table:
+  วิเคราะห์เอกสาร / ประเมินความเสี่ยง / จัดทำข้อเสนอแนะ / สร้างรายงาน,
+  each with หน้าที่, งบประมาณ (รอบ · เวลา · tokens) and เหมาะกับ columns.
+- Confirm the budget figures match `AGENT_TASK_PRESETS` in
+  `backend/app/services/workflow_agent_contracts.py`
+  (analysis 1,600 tokens; risk_assessment + recommendations 1,200; report 8,000 tokens @ 300s).
+- Confirm the caution line explains: handoff tasks (วิเคราะห์/ประเมิน/ข้อเสนอแนะ) return text only,
+  and a "สร้างรายงาน" node is required at the end of an Agent chain to produce a downloadable file.
+- Automated check: frontend `npm run build` including TypeScript validation passes.

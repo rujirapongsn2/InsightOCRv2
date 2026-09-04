@@ -359,7 +359,7 @@ export function FixedPositionFieldsStep() {
                     <Page pageNumber={pageNumber} width={Math.round(BASE_PAGE_WIDTH * zoom)} renderTextLayer={false} renderAnnotationLayer={false} />
                   </Document>}
                   {fields.filter((field) => field.locator?.page === pageNumber).map((field) => field.locator && (
-                    <div key={field.id} className="pointer-events-none absolute border-2 border-blue-500 bg-blue-500/10" style={{ left: `${field.locator.x}%`, top: `${field.locator.y}%`, width: `${field.locator.width}%`, height: `${field.locator.height}%` }} />
+                    <div key={field.id} className="pointer-events-none absolute border-2 border-dashed border-blue-600 bg-blue-500/20 shadow-[0_0_0_1px_rgba(255,255,255,0.9)]" style={{ left: `${field.locator.x}%`, top: `${field.locator.y}%`, width: `${field.locator.width}%`, height: `${field.locator.height}%` }} />
                   ))}
                   {fields.filter((field) => field.type === "array" && field.locator?.page === pageNumber && field.array_config).map((field) => {
                     const locator = field.locator!
@@ -399,7 +399,7 @@ export function FixedPositionFieldsStep() {
                       </div>
                     )
                   })}
-                  {selection && <div className="pointer-events-none absolute border-2 border-dashed border-emerald-600 bg-emerald-400/15" style={{ left: `${selection.x}%`, top: `${selection.y}%`, width: `${selection.width}%`, height: `${selection.height}%` }} />}
+                  {selection && <div className="pointer-events-none absolute border-2 border-dashed border-emerald-600 bg-emerald-400/20 shadow-[0_0_0_1px_rgba(255,255,255,0.9)]" style={{ left: `${selection.x}%`, top: `${selection.y}%`, width: `${selection.width}%`, height: `${selection.height}%` }} />}
                 </div>
               </div>
               </div>
