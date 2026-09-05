@@ -1,6 +1,8 @@
+from datetime import datetime, timezone
 from typing import List, Optional
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status
+from openai import OpenAI
 from sqlalchemy.orm import Session
 
 from app.api import deps
@@ -17,6 +19,57 @@ from app.schemas.ai_settings import (
 from app.services.ai_suggestion_service import AISuggestionService
 
 router = APIRouter()
+
+
+def _validate_agent_provider(setting: AISettings) -> None:
+    if not setting.is_active or setting.provider_type != "openai_compatible" or not setting.supports_tool_calling:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Agent Provider must be active, OpenAI-compatible, and have verified native tool calling",
+        )
+
+
+def _verify_native_tool_calling(setting: AISettings) -> None:
+    client = OpenAI(api_key=setting.api_key, base_url=setting.api_url or None)
+    response = client.chat.completions.create(
+        model=setting.model or "gpt-4o-mini",
+        messages=[{"role": "user", "content": "Call the connection_check tool now."}],
+        tools=[{
+            "type": "function",
+            "function": {
+                "name": "connection_check",
+                "description": "Verifies native tool calling.",
+                "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+            },
+        }],
+        tool_choice={"type": "function", "function": {"name": "connection_check"}},
+    )
+    choices = getattr(response, "choices", None) or []
+    message = getattr(choices[0], "message", None) if choices else None
+    calls = getattr(message, "tool_calls", None) if message else None
+    name = getattr(getattr(calls[0], "function", None), "name", None) if calls else None
+    if name != "connection_check":
+        raise ValueError("Provider did not return the required native tool call")
+
+
+def _automatically_verify_agent_tools(setting: AISettings) -> None:
+    """Record Agent tool capability as part of saving a provider connection."""
+    setting.supports_tool_calling = False
+    setting.agent_tools_checked_at = datetime.now(timezone.utc)
+    setting.agent_tools_verification_error = None
+
+    if not setting.is_active or setting.provider_type != "openai_compatible":
+        return
+    if not setting.api_url or not setting.api_key:
+        setting.agent_tools_verification_error = "Provider URL and API key are required"
+        return
+
+    try:
+        _verify_native_tool_calling(setting)
+    except Exception as exc:  # A text-only LLM remains usable outside Agent mode.
+        setting.agent_tools_verification_error = str(exc)[:1000]
+        return
+    setting.supports_tool_calling = True
 
 
 @router.get("/", response_model=List[AISettingsPublic])
@@ -75,11 +128,13 @@ def create_ai_setting(
         db.query(AISettings).update({"is_default": False})
 
     # Create new setting
-    db_setting = AISettings(
-        **setting_in.model_dump(),
-        created_by=current_user.id
-    )
+    values = setting_in.model_dump()
+    values["supports_tool_calling"] = False
+    # Assignment requires successful verification, never a client-supplied flag.
+    values["is_agent_provider"] = False
+    db_setting = AISettings(**values, created_by=current_user.id)
     db.add(db_setting)
+    _automatically_verify_agent_tools(db_setting)
     db.commit()
     db.refresh(db_setting)
 
@@ -104,14 +159,30 @@ def update_ai_setting(
             detail="AI setting not found"
         )
 
+    update_data = setting_in.model_dump(exclude_unset=True)
+    # Capability evidence is issued by the test endpoint, never accepted from
+    # a general create/update payload.
+    update_data.pop("supports_tool_calling", None)
+    changes_provider_connection = any(
+        field in update_data for field in {"api_url", "api_key", "model", "provider_type"}
+    )
+    changes_active_state = update_data.get("is_active") is False
+    if db_setting.is_agent_provider and (changes_provider_connection or changes_active_state):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Unset this provider as Agent Provider before changing its connection or disabling it",
+        )
+
     # If setting this as default, unset other defaults
     if setting_in.is_default and setting_in.is_default != db_setting.is_default:
         db.query(AISettings).filter(AISettings.id != setting_id).update({"is_default": False})
 
     # Update fields
-    update_data = setting_in.model_dump(exclude_unset=True)
     for field, value in update_data.items():
         setattr(db_setting, field, value)
+
+    if changes_provider_connection:
+        _automatically_verify_agent_tools(db_setting)
 
     db.commit()
     db.refresh(db_setting)
@@ -180,11 +251,37 @@ def set_agent_provider(
     db_setting = db.query(AISettings).filter(AISettings.id == setting_id).first()
     if not db_setting:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="AI setting not found")
+    _validate_agent_provider(db_setting)
 
     db.query(AISettings).filter(AISettings.id != setting_id).update({"is_agent_provider": False})
     db_setting.is_agent_provider = True
     db.commit()
     db.refresh(db_setting)
+    return db_setting
+
+
+@router.post("/{setting_id}/verify-agent-tools", response_model=AISettingsSchema)
+def verify_agent_tools(
+    setting_id: UUID,
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_active_superuser),
+):
+    """Verify and record native tool calling for the stored provider config."""
+    db_setting = db.query(AISettings).filter(AISettings.id == setting_id).first()
+    if not db_setting:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="AI setting not found")
+    if not db_setting.is_active or db_setting.provider_type != "openai_compatible":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Only active OpenAI-compatible providers can be verified")
+    if not db_setting.api_url or not db_setting.api_key:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Provider URL and API key are required")
+    _automatically_verify_agent_tools(db_setting)
+    db.commit()
+    db.refresh(db_setting)
+    if not db_setting.supports_tool_calling:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Agent tools verification failed: {db_setting.agent_tools_verification_error or 'Provider does not support native tool calling'}",
+        )
     return db_setting
 
 

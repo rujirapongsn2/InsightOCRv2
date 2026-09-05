@@ -9,6 +9,9 @@ export interface AIProviderSetting {
   is_default: boolean
   model: string | null
   is_agent_provider: boolean
+  supports_tool_calling: boolean
+  agent_tools_checked_at?: string | null
+  agent_tools_verification_error?: string | null
   is_workflow_builder_provider: boolean
   provider_type: string
   description: string | null
@@ -92,6 +95,16 @@ export async function setAgentProvider(token: string, id: string): Promise<AIPro
   })
   const body = await res.json()
   if (!res.ok) throw new Error(body.detail || "Failed to set agent provider")
+  return body
+}
+
+export async function verifyAIProviderAgentTools(token: string, id: string): Promise<AIProviderSetting> {
+  const res = await fetch(`${getApiBaseUrl()}/ai-settings/${id}/verify-agent-tools`, {
+    method: "POST",
+    headers: authHeaders(token),
+  })
+  const body = await res.json()
+  if (!res.ok) throw new Error(body.detail || "Failed to verify Agent tools")
   return body
 }
 

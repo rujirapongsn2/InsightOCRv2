@@ -32,6 +32,7 @@ from app.services.workflow_engine import (
     TEMPLATE_RE,
     NodeExecutionError,
     _topological_order,
+    _workflow_provider_ref,
 )
 from app.services.workflow_agent_contracts import (
     AGENT_TASK_PRESETS,
@@ -39,6 +40,7 @@ from app.services.workflow_agent_contracts import (
     agent_task_preset,
     missing_output_tools,
 )
+from app.services.llm_provider_capabilities import integration_supports_tool_calling
 from app.agent.tools.skill_tools import _normalize_allowed_tools
 
 TRIGGER_TYPES = {"trigger_manual", "trigger_schedule", "trigger_webhook"}
@@ -209,38 +211,122 @@ def validate_workflow_definition(
                 if status != "active":
                     issues.append(_issue(nid, "error", "integration_id", "integration ที่เลือกถูกพักการใช้งานอยู่"))
 
-        # Referenced AI provider (llm node) must exist & be active.
-        if ntype == "llm" and config.get("ai_provider_id"):
-            ai = db.query(AISettings).filter(AISettings.id == config["ai_provider_id"]).first()
-            if not ai:
-                issues.append(_issue(nid, "warning", "ai_provider_id", "ไม่พบ AI provider ที่อ้างถึง"))
-            elif not ai.is_active:
-                issues.append(_issue(nid, "error", "ai_provider_id", "AI provider ที่เลือกถูกปิดใช้งาน"))
-            elif (config.get("mode") or "llm") == "agent" and (getattr(ai, "provider_type", None) or "completion_messages") != "openai_compatible":
-                issues.append(_issue(
-                    nid,
-                    "error",
-                    "ai_provider_id",
-                    "Agent mode ต้องใช้ AI provider แบบ OpenAI-compatible ที่รองรับ native tool calling",
-                ))
-
         if ntype == "llm" and (config.get("mode") or "llm") not in {"llm", "agent"}:
             issues.append(_issue(nid, "error", "mode", "โหมด AI ต้องเป็น llm หรือ agent"))
+
+        if ntype == "llm":
+            mode = config.get("mode") or "llm"
+            provider_ref = config.get("provider_ref")
+            ref_source: Optional[str] = None
+            try:
+                ref_source, ref_id = _workflow_provider_ref(provider_ref)
+            except NodeExecutionError as exc:
+                issues.append(_issue(nid, "error", "provider_ref", str(exc)))
+                ref_id = None
+
+            # A new provider_ref always wins, including `default`, which lets a
+            # user intentionally override legacy ai_provider_id/integration_id.
+            if provider_ref and ref_source == "ai" and ref_id:
+                ai = db.query(AISettings).filter(AISettings.id == ref_id).first()
+                if not ai:
+                    issues.append(_issue(nid, "warning", "provider_ref", "ไม่พบ AI provider ที่อ้างถึง"))
+                elif not ai.is_active:
+                    issues.append(_issue(nid, "error", "provider_ref", "AI provider ที่เลือกถูกปิดใช้งาน"))
+                elif mode == "agent":
+                    supports_tools = bool(getattr(ai, "supports_tool_calling", False))
+                    compatible = (getattr(ai, "provider_type", None) or "completion_messages") == "openai_compatible"
+                    if not compatible or not supports_tools:
+                        issues.append(_issue(
+                            nid,
+                            "error",
+                            "provider_ref",
+                            "Agent mode ต้องใช้ AI provider แบบ OpenAI-compatible ที่เปิดใช้ native tool calling",
+                        ))
+            elif provider_ref and ref_source == "integration" and ref_id:
+                integration = db.query(Integration).filter(Integration.id == ref_id).first()
+                if not integration:
+                    issues.append(_issue(nid, "warning", "provider_ref", "ไม่พบ LLM integration ที่อ้างถึง"))
+                else:
+                    integration_type = integration.type.value if hasattr(integration.type, "value") else str(integration.type)
+                    integration_status = integration.status.value if hasattr(integration.status, "value") else str(integration.status)
+                    if integration.user_id is not None and str(integration.user_id) != str(owner.id):
+                        issues.append(_issue(nid, "error", "provider_ref", "LLM integration นี้เป็นของผู้ใช้อื่น"))
+                    if integration_type not in {"llm", "softnix_genai"}:
+                        issues.append(_issue(nid, "error", "provider_ref", "ต้องเลือก Integration ชนิด LLM Provider หรือ Softnix GenAI"))
+                    if integration_status != "active":
+                        issues.append(_issue(nid, "error", "provider_ref", "LLM integration ที่เลือกถูกพักการใช้งานอยู่"))
+                    if mode == "agent" and not integration_supports_tool_calling(integration):
+                        issues.append(_issue(
+                            nid,
+                            "error",
+                            "provider_ref",
+                            "Integration นี้ยังไม่ยืนยันว่ารองรับ native tool calling สำหรับ Agent mode",
+                        ))
+            elif not provider_ref and config.get("ai_provider_id"):
+                # Compatibility for workflows saved before provider_ref existed.
+                ai = db.query(AISettings).filter(AISettings.id == config["ai_provider_id"]).first()
+                if not ai:
+                    issues.append(_issue(nid, "warning", "ai_provider_id", "ไม่พบ AI provider ที่อ้างถึง"))
+                elif not ai.is_active:
+                    issues.append(_issue(nid, "error", "ai_provider_id", "AI provider ที่เลือกถูกปิดใช้งาน"))
+                elif mode == "agent":
+                    supports_tools = bool(getattr(ai, "supports_tool_calling", getattr(ai, "is_agent_provider", False)))
+                    compatible = (getattr(ai, "provider_type", None) or "completion_messages") == "openai_compatible"
+                    if not compatible or not supports_tools:
+                        issues.append(_issue(
+                            nid,
+                            "error",
+                            "ai_provider_id",
+                            "Agent mode ต้องใช้ AI provider แบบ OpenAI-compatible ที่รองรับ native tool calling",
+                        ))
+            elif not provider_ref and config.get("integration_id"):
+                # Compatibility for workflows saved with the former hidden
+                # integration_id field.
+                integration = db.query(Integration).filter(Integration.id == config["integration_id"]).first()
+                if not integration:
+                    issues.append(_issue(nid, "warning", "integration_id", "ไม่พบ LLM integration ที่อ้างถึง"))
+                else:
+                    integration_type = integration.type.value if hasattr(integration.type, "value") else str(integration.type)
+                    integration_status = integration.status.value if hasattr(integration.status, "value") else str(integration.status)
+                    if integration.user_id is not None and str(integration.user_id) != str(owner.id):
+                        issues.append(_issue(nid, "error", "integration_id", "LLM integration นี้เป็นของผู้ใช้อื่น"))
+                    if integration_type not in {"llm", "softnix_genai"}:
+                        issues.append(_issue(nid, "error", "integration_id", "ต้องเลือก Integration ชนิด LLM Provider หรือ Softnix GenAI"))
+                    if integration_status != "active":
+                        issues.append(_issue(nid, "error", "integration_id", "LLM integration ที่เลือกถูกพักการใช้งานอยู่"))
+                    if mode == "agent" and not integration_supports_tool_calling(integration):
+                        issues.append(_issue(
+                            nid,
+                            "error",
+                            "integration_id",
+                            "Integration นี้ยังไม่ยืนยันว่ารองรับ native tool calling สำหรับ Agent mode",
+                        ))
 
         if ntype == "llm" and (config.get("mode") or "llm") == "agent":
             agent_task = str(config.get("agent_task") or "custom")
             preset = agent_task_preset(agent_task)
             if agent_task not in AGENT_TASK_PRESETS:
                 issues.append(_issue(nid, "error", "agent_task", "ไม่รู้จักงาน Agent ที่เลือก"))
-            if not config.get("ai_provider_id"):
+            use_central_agent_provider = (
+                config.get("provider_ref") == "default"
+                or (
+                    not config.get("provider_ref")
+                    and not config.get("ai_provider_id")
+                    and not config.get("integration_id")
+                )
+            )
+            if use_central_agent_provider:
                 configured_agent_provider = db.query(AISettings).filter(
                     AISettings.is_agent_provider == True,  # noqa: E712
                     AISettings.is_active == True,  # noqa: E712
                 ).first()
                 if (
                     configured_agent_provider
-                    and (getattr(configured_agent_provider, "provider_type", None) or "completion_messages")
-                    != "openai_compatible"
+                    and (
+                        (getattr(configured_agent_provider, "provider_type", None) or "completion_messages")
+                        != "openai_compatible"
+                        or not bool(getattr(configured_agent_provider, "supports_tool_calling", False))
+                    )
                 ):
                     issues.append(_issue(
                         nid,

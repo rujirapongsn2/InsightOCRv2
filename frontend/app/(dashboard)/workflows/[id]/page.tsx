@@ -1081,8 +1081,8 @@ function InsertVariableButton({ upstream, onInsert }: { upstream: UpstreamNode[]
 // ── Config panel field renderer ──────────────────────────────────────
 function ConfigField({
     field, value, onChange, jobs, schemas, upstream, integrations, aiProviders, agentSkills,
-    agentSkillsLoading, agentSkillsError, onRetryAgentSkills,
-}: { field: NodeTypeDef["config_fields"][0]; value: any; onChange: (v: any) => void; jobs: JobSummary[]; schemas: SchemaSummary[]; upstream: UpstreamNode[]; integrations: Integration[]; aiProviders: AIProviderSetting[]; agentSkills: WorkflowAgentSkill[]; agentSkillsLoading: boolean; agentSkillsError: string | null; onRetryAgentSkills: () => void }) {
+    agentSkillsLoading, agentSkillsError, onRetryAgentSkills, mode = "llm",
+}: { field: NodeTypeDef["config_fields"][0]; value: any; onChange: (v: any) => void; jobs: JobSummary[]; schemas: SchemaSummary[]; upstream: UpstreamNode[]; integrations: Integration[]; aiProviders: AIProviderSetting[]; agentSkills: WorkflowAgentSkill[]; agentSkillsLoading: boolean; agentSkillsError: string | null; onRetryAgentSkills: () => void; mode?: string }) {
     const base = "w-full border border-[#E2E8F0] rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-[#2786C2]/30"
     const inputRef = useRef<HTMLInputElement | HTMLTextAreaElement | null>(null)
     const supportsTemplate = ["text", "textarea", "code"].includes(field.type)
@@ -1174,6 +1174,56 @@ function ConfigField({
         } else {
             onChange(cur + token)
         }
+    }
+    if (field.type === "llm_provider_select") {
+        const agentMode = mode === "agent"
+        const selectedValue = value || "default"
+        const aiOptions = aiProviders.filter((provider) => (
+            provider.is_active
+            && (!agentMode || (
+                provider.provider_type === "openai_compatible"
+                && provider.supports_tool_calling
+            ))
+        ))
+        const integrationOptions = integrations.filter((integration) => (
+            integration.status === "active"
+            && (integration.type === "llm" || integration.type === "softnix_genai")
+            && (!agentMode || Boolean(integration.config.agentToolsVerification?.verifiedAt))
+        ))
+        const known = selectedValue === "default"
+            || aiOptions.some((provider) => `ai:${provider.id}` === selectedValue)
+            || integrationOptions.some((integration) => `integration:${integration.id}` === selectedValue)
+        return (
+            <div>
+                <select className={base} value={selectedValue} onChange={(event) => onChange(event.target.value)}>
+                    <option value="default">{agentMode ? "ใช้ Agent Provider กลางของระบบ" : "ใช้ Provider ค่าเริ่มต้นของระบบ"}</option>
+                    {aiOptions.length > 0 && (
+                        <optgroup label="AI Settings">
+                            {aiOptions.map((provider) => (
+                                <option key={provider.id} value={`ai:${provider.id}`}>
+                                    {provider.display_name || provider.name} · {provider.model || "default"}
+                                </option>
+                            ))}
+                        </optgroup>
+                    )}
+                    {integrationOptions.length > 0 && (
+                        <optgroup label="Integrations">
+                            {integrationOptions.map((integration) => (
+                                <option key={integration.id} value={`integration:${integration.id}`}>
+                                    {integration.name} · {integration.type === "softnix_genai" ? "Softnix GenAI" : "LLM Provider"}
+                                </option>
+                            ))}
+                        </optgroup>
+                    )}
+                    {!known && <option value={selectedValue}>{`${selectedValue} (ไม่พร้อมใช้งานในโหมดนี้)`}</option>}
+                </select>
+                {agentMode && aiOptions.length + integrationOptions.length === 0 && (
+                    <p className="mt-1 text-[10px] text-amber-600">
+                        ยังไม่มี provider ที่รองรับ Agent tools — เปิดใช้ native tool calling ใน Settings หรือ Integration ก่อน
+                    </p>
+                )}
+            </div>
+        )
     }
     if (field.type === "ai_provider_select") {
         const activeProviders = aiProviders.filter((p) => p.is_active && (
@@ -2194,7 +2244,11 @@ function Builder() {
                                     )}
                                     <ConfigField
                                         field={f}
-                                        value={(selectedNode.data as WfNodeData).config?.[f.name]}
+                                        value={f.name === "provider_ref"
+                                            ? selectedConfig.provider_ref
+                                                || (selectedConfig.ai_provider_id ? `ai:${selectedConfig.ai_provider_id}` : "")
+                                                || (selectedConfig.integration_id ? `integration:${selectedConfig.integration_id}` : "")
+                                            : (selectedNode.data as WfNodeData).config?.[f.name]}
                                         onChange={(v) => updateSelectedConfig(f.name, v)}
                                         jobs={jobs}
                                         schemas={schemas}
@@ -2205,6 +2259,7 @@ function Builder() {
                                         agentSkillsLoading={agentSkillsLoading}
                                         agentSkillsError={agentSkillsError}
                                         onRetryAgentSkills={loadAgentSkills}
+                                        mode={selectedConfig.mode || "llm"}
                                     />
                                     {f.hint && <p className="text-[10px] text-[#94A3B8] mt-1 leading-snug">{f.hint}</p>}
                                 </div>
@@ -2229,6 +2284,7 @@ function Builder() {
                                                     agentSkillsLoading={agentSkillsLoading}
                                                     agentSkillsError={agentSkillsError}
                                                     onRetryAgentSkills={loadAgentSkills}
+                                                    mode={selectedConfig.mode || "llm"}
                                                 />
                                                 {f.hint && <p className="mt-1 text-[10px] leading-snug text-[#94A3B8]">{f.hint}</p>}
                                             </div>

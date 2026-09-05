@@ -42,9 +42,12 @@ class AISettingsUpdate(BaseModel):
 # Schema for reading AI settings (response)
 class AISettings(AISettingsBase):
     id: UUID
+    supports_tool_calling: bool = False
     created_at: datetime
     updated_at: Optional[datetime]
     created_by: Optional[UUID]
+    agent_tools_checked_at: Optional[datetime] = None
+    agent_tools_verification_error: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -60,6 +63,9 @@ class AISettingsPublic(BaseModel):
     is_default: bool
     model: Optional[str]
     is_agent_provider: bool
+    supports_tool_calling: bool = False
+    agent_tools_checked_at: Optional[datetime] = None
+    agent_tools_verification_error: Optional[str] = None
     is_workflow_builder_provider: bool = False
     provider_type: str
     description: Optional[str]

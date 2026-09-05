@@ -21,6 +21,7 @@ export interface IntegrationConfig {
   baseUrl?: string
   instructions?: string
   reasoningEffort?: "low" | "medium" | "high"
+  agentToolsVerification?: { verifiedAt?: string; checkedAt?: string; error?: string }
   auth_mode?: "oauth" | "service_account" | "app"
   provider?: "google" | "microsoft"
   account_email?: string

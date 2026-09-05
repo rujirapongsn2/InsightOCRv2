@@ -48,6 +48,7 @@ type IntegrationConfig = {
     userPrompt?: string
     outputFormatPrompt?: string
     reasoningEffort?: "low" | "medium" | "high"
+    agentToolsVerification?: { verifiedAt?: string; checkedAt?: string; error?: string }
     client_email?: string
     private_key?: string
     token_uri?: string
@@ -837,9 +838,10 @@ export default function IntegrationsPage() {
                         </div>
                         <div className="space-y-3 pt-4 border-t">
                             <div className="text-sm font-semibold text-slate-700">Test Connection</div>
+                            <div className="flex flex-wrap gap-2">
                             <Button type="button" variant="outline"
                                 onClick={async () => {
-                                    if (!formState.apiKey || !formState.model) { alert("Please fill in API Key and Model first"); return }
+                                    if (!editingId || !formState.model) { alert("Save the integration before testing Agent tools"); return }
                                     setTestLoading(true); setTestResult(null)
                                     try {
                                         const response = await fetch(`${getApiBaseUrl()}/integrations/test-llm`, {
@@ -864,6 +866,8 @@ export default function IntegrationsPage() {
                                 }} disabled={isUser || testLoading}>
                                 {testLoading ? "Testing..." : "Test Connection"}
                             </Button>
+                            </div>
+                            <p className="text-xs text-slate-500">ระบบตรวจสอบ Agent tools อัตโนมัติเมื่อบันทึก API key, endpoint หรือ model</p>
                             {testResult && (
                                 <div className={`p-3 rounded-md text-sm font-mono whitespace-pre-wrap ${testResult.startsWith("✓") ? "bg-green-50 text-green-800 border border-green-200" : "bg-red-50 text-red-800 border border-red-200"}`}>
                                     {testResult}
@@ -1195,6 +1199,8 @@ export default function IntegrationsPage() {
                     <h3 className="text-[0.8125rem] font-bold uppercase tracking-[0.08em] text-slate-600">Connected ({integrations.length})</h3>
                     {integrations.map((integration) => {
                         const cat = CATALOG.find(c => c.type === integration.type)
+                        const agentTools = integration.config.agentToolsVerification
+                        const isLlmIntegration = integration.type === "llm" || integration.type === "softnix_genai"
                         return (
                             <div key={integration.id} className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
                                 <div className="flex items-center gap-4 p-4 md:p-5">
@@ -1210,6 +1216,14 @@ export default function IntegrationsPage() {
                                             <span className={`rounded-full px-2.5 py-1 text-[0.75rem] font-semibold leading-none ${integration.status === "active" ? "bg-green-100 text-green-700" : "bg-amber-100 text-amber-700"}`}>
                                                 {integration.status === "active" ? "Active" : "Paused"}
                                             </span>
+                                            {isLlmIntegration && (
+                                                <span
+                                                    title={agentTools?.error || (agentTools?.verifiedAt ? "พร้อมใช้กับ Workflow Agent" : "ระบบยังไม่ได้ยืนยัน Agent tools")}
+                                                    className={`rounded-full px-2.5 py-1 text-[0.75rem] font-semibold leading-none ${agentTools?.verifiedAt ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}
+                                                >
+                                                    {agentTools?.verifiedAt ? "Agent tools ready" : "Agent tools unavailable"}
+                                                </span>
+                                            )}
                                         </div>
                                         {integration.description && (
                                             <p className="mt-1 text-[0.8125rem] font-medium leading-5 text-slate-600 line-clamp-2">{integration.description}</p>

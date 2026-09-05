@@ -21,6 +21,14 @@ class AISettings(Base):
     # Agent-specific fields
     model = Column(String, default="gpt-4o-mini")
     is_agent_provider = Column(Boolean, default=False)  # Use as Agent's LLM backend
+    # A provider may support chat completions without supporting the native
+    # function/tool calls required by workflow Agent nodes.
+    supports_tool_calling = Column(Boolean, default=False)
+    # Result of the server-side capability check performed when a provider is
+    # saved.  Keeping the failure reason prevents administrators from having
+    # to guess why Agent mode is unavailable.
+    agent_tools_checked_at = Column(DateTime(timezone=True), nullable=True)
+    agent_tools_verification_error = Column(String, nullable=True)
     # Dedicated backend for the AI workflow builder. When unset, the builder
     # falls back to the agent provider / active default (same as the rest of the system).
     is_workflow_builder_provider = Column(Boolean, default=False)

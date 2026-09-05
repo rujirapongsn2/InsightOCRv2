@@ -243,8 +243,9 @@ export default function SettingsPage() {
     setAiProviderError(null)
     setAiProviderSuccess(null)
     try {
+      let saved: AIProviderSetting
       if (editingProvider) {
-        await updateAIProvider(tok, editingProvider.id, {
+        saved = await updateAIProvider(tok, editingProvider.id, {
           display_name: providerForm.display_name,
           api_url: providerForm.api_url,
           ...(providerForm.api_key ? { api_key: providerForm.api_key } : {}),
@@ -252,14 +253,18 @@ export default function SettingsPage() {
           provider_type: providerForm.provider_type,
           description: providerForm.description || undefined,
         })
-        setAiProviderSuccess("อัปเดต provider เรียบร้อยแล้ว")
+        setAiProviderSuccess(saved.supports_tool_calling
+          ? "อัปเดต provider และตรวจสอบ Agent tools สำเร็จแล้ว"
+          : `อัปเดต provider แล้ว แต่ยังใช้กับ Agent ไม่ได้${saved.agent_tools_verification_error ? `: ${saved.agent_tools_verification_error}` : ""}`)
       } else {
-        await createAIProvider(tok, {
+        saved = await createAIProvider(tok, {
           ...providerForm,
           is_agent_provider: false,
           is_active: true,
         })
-        setAiProviderSuccess("สร้าง provider เรียบร้อยแล้ว")
+        setAiProviderSuccess(saved.supports_tool_calling
+          ? "สร้าง provider และตรวจสอบ Agent tools สำเร็จแล้ว"
+          : `สร้าง provider แล้ว แต่ยังใช้กับ Agent ไม่ได้${saved.agent_tools_verification_error ? `: ${saved.agent_tools_verification_error}` : ""}`)
       }
       setShowProviderForm(false)
       fetchAiProviders()
@@ -982,7 +987,11 @@ export default function SettingsPage() {
                 disabled={aiProviderLoading || savingFeatureProvider !== null}
               >
                 <option value="">ใช้ค่าเริ่มต้นของระบบ</option>
-                {aiProviders.filter((provider) => provider.is_active).map((provider) => (
+                {aiProviders.filter((provider) => (
+                  provider.is_active
+                  && provider.provider_type === "openai_compatible"
+                  && provider.supports_tool_calling
+                )).map((provider) => (
                   <option key={provider.id} value={provider.id}>
                     {provider.model || provider.display_name} — {provider.display_name}
                   </option>
@@ -1007,6 +1016,12 @@ export default function SettingsPage() {
                     <span className="text-xs font-semibold bg-[#EBF4FB] text-[#2786C2] px-2 py-0.5 rounded-full">Workflow Builder</span>
                   )}
                   <span className="text-xs bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full">{p.provider_type}</span>
+                  {p.supports_tool_calling && (
+                    <span className="text-xs bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded-full">Agent tools</span>
+                  )}
+                  {p.provider_type === "openai_compatible" && !p.supports_tool_calling && (
+                    <span title={p.agent_tools_verification_error || "ระบบตรวจสอบแล้วว่า provider นี้ยังไม่รองรับ Agent tools"} className="text-xs bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full">Agent tools unavailable</span>
+                  )}
                   {!p.is_active && <span className="text-xs bg-red-100 text-red-600 px-2 py-0.5 rounded-full">ปิดใช้งาน</span>}
                 </div>
                 <p className="text-xs text-slate-500 mt-0.5 truncate max-w-xs">{p.api_url}</p>
@@ -1056,7 +1071,10 @@ export default function SettingsPage() {
                     title="Provider Type"
                     className="flex h-8 w-full rounded-md border border-slate-200 bg-white px-2 text-sm"
                     value={providerForm.provider_type}
-                    onChange={(e) => setProviderForm((f) => ({ ...f, provider_type: e.target.value }))}
+                    onChange={(e) => setProviderForm((f) => ({
+                      ...f,
+                      provider_type: e.target.value,
+                    }))}
                   >
                     <option value="openai_compatible">OpenAI Compatible</option>
                     <option value="completion_messages">Completion Messages</option>
@@ -1114,6 +1132,7 @@ export default function SettingsPage() {
                 </Button>
                 <Button size="sm" variant="outline" onClick={() => setShowProviderForm(false)}>ยกเลิก</Button>
               </div>
+              <p className="text-xs text-slate-500">ระบบตรวจสอบ Agent tools อัตโนมัติเมื่อบันทึกค่าเชื่อมต่อ</p>
             </div>
           )}
 

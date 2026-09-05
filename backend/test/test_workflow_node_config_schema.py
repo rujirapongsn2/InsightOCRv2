@@ -22,6 +22,11 @@ def test_skill_ids_stays_multi_select():
     assert field["type"] == "skill_multi_select"
 
 
+def test_llm_provider_selector_unifies_ai_settings_and_integrations():
+    field = _llm_field("provider_ref")
+    assert field["type"] == "llm_provider_select"
+
+
 def test_output_format_is_visible_for_legacy_custom_task_nodes():
     """Nodes saved before Agent task presets existed have no agent_task key
     and are treated as 'custom' server-side (still free to pick any

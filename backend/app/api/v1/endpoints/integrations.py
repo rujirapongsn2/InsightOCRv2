@@ -138,6 +138,61 @@ def _normalize_softnix_config(integration_type: Any, config: Optional[Dict[str, 
     return normalized
 
 
+def _prepare_agent_tools_verification(
+    integration_type: Any,
+    config: Dict[str, Any],
+    *,
+    previous_type: Any | None = None,
+    previous_config: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Keep a verification only when its tested provider configuration matches."""
+    prepared = dict(config)
+    # Capability evidence is written only by the server-side probe.
+    prepared.pop("supportsToolCalling", None)
+    prepared.pop("agentToolsVerification", None)
+
+    previous = dict(previous_config or {})
+    verification = previous.get("agentToolsVerification") or {}
+    fingerprint = verification.get("fingerprint") if isinstance(verification, dict) else None
+    if not fingerprint or previous_type is None:
+        return prepared
+    if fingerprint != integration_tool_calling_fingerprint(previous_type, previous):
+        return prepared
+    if fingerprint != integration_tool_calling_fingerprint(integration_type, prepared):
+        return prepared
+
+    prepared["agentToolsVerification"] = verification
+    return prepared
+
+
+def _automatically_verify_agent_tools(integration: Any) -> None:
+    """Verify a saved LLM connection without turning a setup failure into a failed save."""
+    if not _is_llm_integration(integration):
+        return
+
+    config = dict(getattr(integration, "config", None) or {})
+    verification: Dict[str, Any] = {
+        "checkedAt": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        api_key = _integration_api_key(integration)
+        if not api_key:
+            raise ValueError("Integration API Key is missing")
+        _verify_native_tool_calling(
+            api_key=api_key,
+            base_url=_llm_base_url_for_integration(integration),
+            model=str(config.get("model") or "gpt-4o-mini"),
+        )
+    except Exception as exc:  # A connection can still be valid for ordinary LLM nodes.
+        verification["error"] = str(exc)[:1000]
+    else:
+        verification["fingerprint"] = integration_tool_calling_fingerprint(integration.type, config)
+        verification["verifiedAt"] = verification["checkedAt"]
+
+    config["agentToolsVerification"] = verification
+    integration.config = config
+
+
 def _build_openai_client(api_key: str, base_url: Optional[str]) -> OpenAI:
     client_kwargs: Dict[str, Any] = {"api_key": api_key}
     if base_url:
@@ -187,6 +242,35 @@ def _call_chat_completions_api(
     return response.choices[0].message.content or ""
 
 
+def _verify_native_tool_calling(
+    api_key: str,
+    base_url: Optional[str],
+    model: str,
+) -> None:
+    """Verify the minimum OpenAI tool-calling contract used by Workflow Agent."""
+    normalized_base_url, _ = _normalize_llm_base_url(base_url)
+    client = _build_openai_client(api_key, normalized_base_url)
+    response = client.chat.completions.create(
+        model=model,
+        messages=[{"role": "user", "content": "Call the connection_check tool now."}],
+        tools=[{
+            "type": "function",
+            "function": {
+                "name": "connection_check",
+                "description": "Verifies that native tool calling is available.",
+                "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+            },
+        }],
+        tool_choice={"type": "function", "function": {"name": "connection_check"}},
+    )
+    choices = getattr(response, "choices", None) or []
+    message = getattr(choices[0], "message", None) if choices else None
+    tool_calls = getattr(message, "tool_calls", None) if message else None
+    tool_name = getattr(getattr(tool_calls[0], "function", None), "name", None) if tool_calls else None
+    if tool_name != "connection_check":
+        raise ValueError("Provider did not return a native tool call")
+
+
 def _call_llm_text(
     api_key: str,
     base_url: Optional[str],
@@ -216,6 +300,7 @@ def _call_llm_text(
 from sqlalchemy.orm import Session
 import httpx
 import json
+from datetime import datetime, timezone
 from app.api import deps
 from app.api.permissions import ensure_job_access, is_admin_user, normalize_role, can_manage_group_resource
 from app.models.job import Job
@@ -233,6 +318,7 @@ from app.crud.crud_integration_result import integration_result as crud_integrat
 from app.utils.activity_logger import log_activity, Actions
 from app.utils.redact import is_masked, mask_secret, redact_secrets, restore_masked_secrets
 from app.utils.secret_store import SecretStoreError, decrypt_secret, encrypt_secret
+from app.services.llm_provider_capabilities import integration_tool_calling_fingerprint
 
 router = APIRouter()
 
@@ -625,9 +711,9 @@ async def create_integration(
     if normalized != "manager" and not is_admin:
         raise HTTPException(status_code=403, detail="Only managers and admins can create integrations")
 
-    integration_data.config = _normalize_softnix_config(
+    integration_data.config = _prepare_agent_tools_verification(
         integration_data.type,
-        integration_data.config,
+        _normalize_softnix_config(integration_data.type, integration_data.config),
     )
 
     integration = crud_integration.create(
@@ -635,6 +721,9 @@ async def create_integration(
         integration=integration_data,
         user_id=current_user.id
     )
+    _automatically_verify_agent_tools(integration)
+    db.commit()
+    db.refresh(integration)
 
     # Log activity
     log_activity(
@@ -691,13 +780,23 @@ async def update_integration(
             integration_data.config, existing.config or {}
         )
 
-    effective_type = integration_data.type or _integration_type_value(existing)
+    previous_type = _integration_type_value(existing)
+    previous_config = dict(existing.config or {})
+    effective_type = integration_data.type or previous_type
+    connection_config_changed = False
     if integration_data.config is None and effective_type == "softnix_genai":
         integration_data.config = dict(existing.config or {})
-    if integration_data.config is not None:
-        integration_data.config = _normalize_softnix_config(
+    if integration_data.config is not None or effective_type != _integration_type_value(existing):
+        integration_data.config = _prepare_agent_tools_verification(
             effective_type,
-            integration_data.config,
+            _normalize_softnix_config(effective_type, integration_data.config or dict(existing.config or {})),
+            previous_type=previous_type,
+            previous_config=previous_config,
+        )
+        connection_config_changed = (
+            effective_type != previous_type
+            or integration_tool_calling_fingerprint(effective_type, integration_data.config)
+            != integration_tool_calling_fingerprint(previous_type, previous_config)
         )
 
     # Update integration
@@ -706,6 +805,10 @@ async def update_integration(
         integration_id=integration_id,
         integration=integration_data
     )
+    if _is_llm_integration(updated_integration) and connection_config_changed:
+        _automatically_verify_agent_tools(updated_integration)
+        db.commit()
+        db.refresh(updated_integration)
 
     # Log activity
     log_activity(
@@ -784,6 +887,11 @@ class TestLLMRequest(BaseModel):
 
 class TestLLMResponse(BaseModel):
     output: str
+
+
+class TestAgentToolsResponse(BaseModel):
+    supports_tool_calling: bool
+    message: str
 
 
 from typing import Optional, List, Dict, Any, Union
@@ -927,6 +1035,56 @@ async def test_llm(
             status_code=400,
             detail=f"LLM test failed: {str(e)}"
         )
+
+
+@router.post("/test-agent-tools", response_model=TestAgentToolsResponse)
+async def test_agent_tools(
+    request: TestLLMRequest,
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_user),
+):
+    """Test whether an LLM endpoint supports the tool call required by Agent nodes."""
+    try:
+        if not request.integrationId:
+            raise HTTPException(status_code=400, detail="Save the integration before testing Agent tools")
+        integration = crud_integration.get(db=db, integration_id=request.integrationId)
+        if not integration:
+            raise HTTPException(status_code=404, detail="Integration not found")
+        role = deps._normalize_role(str(current_user.role) if current_user.role else None)
+        is_admin = current_user.is_superuser or role == "admin"
+        if role != "manager" and not is_admin:
+            raise HTTPException(status_code=403, detail="Only managers and admins can verify Agent tools")
+        if not is_admin and integration.user_id != current_user.id and not can_manage_group_resource(current_user, integration.user):
+            raise HTTPException(status_code=403, detail="You can only verify your own integrations")
+        if not _is_llm_integration(integration):
+            raise HTTPException(status_code=400, detail="Integration is not an LLM type")
+        api_key = _integration_api_key(integration)
+        if not api_key:
+            raise HTTPException(status_code=400, detail="Integration API Key is missing")
+
+        _verify_native_tool_calling(
+            api_key=api_key,
+            base_url=_llm_base_url_for_integration(integration),
+            model=(integration.config or {}).get("model") or request.model,
+        )
+        config = dict(integration.config or {})
+        config["agentToolsVerification"] = {
+            "fingerprint": integration_tool_calling_fingerprint(integration.type, config),
+            "verifiedAt": datetime.now(timezone.utc).isoformat(),
+        }
+        integration.config = config
+        db.commit()
+        return TestAgentToolsResponse(
+            supports_tool_calling=True,
+            message="Provider supports native tool calling for Workflow Agent",
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Agent tools test failed: {exc}",
+        ) from exc
 
 
 @router.post("/send-llm", response_model=SendLLMResponse)

@@ -27,6 +27,7 @@ from pathlib import PurePosixPath
 from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import urlparse
 from mimetypes import guess_type
+from uuid import UUID
 
 import requests as http_requests
 from requests.adapters import HTTPAdapter
@@ -39,6 +40,7 @@ from app.models.job import Job
 from app.models.integration import Integration, IntegrationType, IntegrationStatus
 from app.models.ai_settings import AISettings
 from app.services.storage import get_storage_service
+from app.services.llm_provider_capabilities import integration_supports_tool_calling
 from app.utils.redact import redact_secrets
 from app.api.v1.endpoints.integrations import _integration_api_key, _llm_base_url_for_integration
 
@@ -158,10 +160,8 @@ NODE_TYPES: List[Dict[str, Any]] = [
              },
              "default": "analysis", "visible_when": {"field": "mode", "equals": "agent"},
              "hint": "ระบบกำหนดรูปแบบผลลัพธ์ เครื่องมือ และเวลารันให้เหมาะกับงานนี้"},
-            {"name": "ai_provider_id", "label": "AI Agent Provider", "type": "ai_provider_select", "required": False,
-             "agent_provider_only": True,
-             "hint": "เลือกเฉพาะ provider ที่รองรับ tool calling; เว้นว่าง = ใช้ค่า Agent Provider กลางระบบ",
-             "visible_when": {"field": "mode", "equals": "agent"}, "advanced": True},
+            {"name": "provider_ref", "label": "AI Provider", "type": "llm_provider_select", "required": False,
+             "hint": "LLM ใช้ได้กับทุก provider ที่เปิดใช้งาน; Agent แสดงเฉพาะ provider ที่รองรับ native tool calling"},
             {"name": "system_prompt", "label": "System prompt", "type": "textarea", "required": False,
              "placeholder": "คุณเป็นผู้ช่วยสรุปข้อมูลเอกสาร ตอบเป็นภาษาไทย กระชับ",
              "hint": "กำหนดบทบาท/สไตล์การตอบของ AI", "visible_when": {"field": "mode", "equals": "llm"}},
@@ -676,6 +676,7 @@ def _ai_setting_provider(setting: AISettings, model: Optional[str], source: str)
             "model": resolved_model,
             "source": source,
             "name": setting.display_name or setting.name,
+            "supports_tool_calling": bool(getattr(setting, "supports_tool_calling", False)),
         }
     return {
         "provider": "completion_messages",
@@ -684,6 +685,7 @@ def _ai_setting_provider(setting: AISettings, model: Optional[str], source: str)
         "model": resolved_model,
         "source": source,
         "name": setting.display_name or setting.name,
+        "supports_tool_calling": False,
     }
 
 
@@ -697,6 +699,32 @@ def _ensure_integration_owner(integration: Integration, owner_user_id: Optional[
         )
 
 
+def _integration_type_value(integration: Integration) -> str:
+    value = getattr(integration, "type", "")
+    return value.value if hasattr(value, "value") else str(value)
+
+
+def _workflow_provider_ref(provider_ref: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    """Parse the provider selected by a Workflow LLM / Agent node.
+
+    `default` deliberately overrides legacy fields so a user can return a
+    migrated node to the centrally configured provider.
+    """
+    raw = str(provider_ref or "").strip()
+    if not raw or raw == "default":
+        return None, None
+    if ":" not in raw:
+        raise NodeExecutionError("AI provider reference is invalid")
+    source, raw_id = raw.split(":", 1)
+    if source not in {"ai", "integration"}:
+        raise NodeExecutionError("AI provider reference source is invalid")
+    try:
+        provider_id = str(UUID(raw_id))
+    except (TypeError, ValueError) as exc:
+        raise NodeExecutionError("AI provider reference id is invalid") from exc
+    return source, provider_id
+
+
 def resolve_llm_provider(
     db: Session,
     integration_id: Optional[str] = None,
@@ -704,15 +732,19 @@ def resolve_llm_provider(
     log: Optional[Callable[[str], None]] = None,
     ai_provider_id: Optional[str] = None,
     owner_user_id: Optional[str] = None,
+    provider_ref: Optional[str] = None,
+    mode: str = "llm",
 ) -> Dict[str, Any]:
     """Resolve the provider for Workflow LLM nodes.
 
     Priority:
-    1. Explicit AI Settings provider selected on the node
-    2. Legacy explicit LLM Integration ID on the node
-    3. Setting AI > Agent Provider
-    4. System AGENT_PROVIDER_* env fallback
-    5. Default active AI Setting / OPENAI_API_KEY fallback
+    1. Explicit provider reference selected on the node
+    2. Legacy explicit AI Settings provider selected on the node
+    3. Legacy explicit LLM Integration ID on the node
+    3. Mode-specific system provider (Agent Provider for Agent mode; default
+       AI provider for LLM mode)
+    4. Relevant environment fallback
+    5. Remaining default provider / OPENAI_API_KEY fallback
     6. First active LLM Integration for backward compatibility
     """
 
@@ -721,6 +753,17 @@ def resolve_llm_provider(
             log(msg)
 
     requested_model = (model or "").strip() or None
+
+    source, selected_id = _workflow_provider_ref(provider_ref)
+    if source == "ai":
+        ai_provider_id = selected_id
+        integration_id = None
+    elif source == "integration":
+        integration_id = selected_id
+        ai_provider_id = None
+    elif str(provider_ref or "").strip() == "default":
+        ai_provider_id = None
+        integration_id = None
 
     if ai_provider_id:
         ai_setting = db.query(AISettings).filter(AISettings.id == ai_provider_id, AISettings.is_active == True).first()
@@ -737,6 +780,15 @@ def resolve_llm_provider(
         if not integration:
             raise NodeExecutionError(f"Integration not found: {integration_id}")
         _ensure_integration_owner(integration, owner_user_id)
+        if _integration_type_value(integration) not in {
+            IntegrationType.LLM.value,
+            IntegrationType.SOFTNIX_GENAI.value,
+        }:
+            raise NodeExecutionError("Selected integration is not an LLM provider")
+        status = getattr(integration, "status", "")
+        status_value = status.value if hasattr(status, "value") else str(status)
+        if status_value != IntegrationStatus.ACTIVE.value:
+            raise NodeExecutionError(f"LLM integration '{integration.name}' is not active")
         icfg = integration.config or {}
         api_key = _integration_api_key(integration)
         if not api_key:
@@ -748,31 +800,34 @@ def resolve_llm_provider(
             "model": requested_model or icfg.get("model") or "gpt-4o-mini",
             "source": "workflow_llm_integration",
             "name": integration.name,
+            "supports_tool_calling": integration_supports_tool_calling(integration),
         }
         _log(f"Using LLM integration '{integration.name}' (model={provider['model']})")
         return provider
 
-    agent_setting = (
-        db.query(AISettings)
-        .filter(AISettings.is_agent_provider == True, AISettings.is_active == True)
-        .first()
-    )
-    if agent_setting and agent_setting.api_url and agent_setting.api_key:
-        provider = _ai_setting_provider(agent_setting, requested_model, "ai_settings_agent_provider")
-        _log(f"Using AI Settings Agent Provider '{provider['name']}' ({provider['provider']}, model={provider['model']})")
-        return provider
+    if mode == "agent":
+        agent_setting = (
+            db.query(AISettings)
+            .filter(AISettings.is_agent_provider == True, AISettings.is_active == True)
+            .first()
+        )
+        if agent_setting and agent_setting.api_url and agent_setting.api_key:
+            provider = _ai_setting_provider(agent_setting, requested_model, "ai_settings_agent_provider")
+            _log(f"Using AI Settings Agent Provider '{provider['name']}' ({provider['provider']}, model={provider['model']})")
+            return provider
 
-    if settings.AGENT_PROVIDER_KEY:
-        provider = {
-            "provider": "openai_compatible",
-            "apiKey": settings.AGENT_PROVIDER_KEY,
-            "baseUrl": settings.AGENT_PROVIDER_URL,
-            "model": requested_model or settings.AGENT_MODEL or "gpt-4o-mini",
-            "source": "system_agent_provider",
-            "name": "System Agent Provider",
-        }
-        _log(f"Using system Agent Provider (model={provider['model']})")
-        return provider
+        if settings.AGENT_PROVIDER_KEY:
+            provider = {
+                "provider": "openai_compatible",
+                "apiKey": settings.AGENT_PROVIDER_KEY,
+                "baseUrl": settings.AGENT_PROVIDER_URL,
+                "model": requested_model or settings.AGENT_MODEL or "gpt-4o-mini",
+                "source": "system_agent_provider",
+                "name": "System Agent Provider",
+                "supports_tool_calling": True,
+            }
+            _log(f"Using system Agent Provider (model={provider['model']})")
+            return provider
 
     default_setting = (
         db.query(AISettings)
@@ -792,6 +847,7 @@ def resolve_llm_provider(
             "model": requested_model or "gpt-4o-mini",
             "source": "system_openai_api_key",
             "name": "OPENAI_API_KEY",
+            "supports_tool_calling": True,
         }
         _log(f"Using system OPENAI_API_KEY (model={provider['model']})")
         return provider
@@ -816,6 +872,7 @@ def resolve_llm_provider(
                 "model": requested_model or icfg.get("model") or "gpt-4o-mini",
                 "source": "fallback_llm_integration",
                 "name": fallback.name,
+                "supports_tool_calling": integration_supports_tool_calling(fallback),
             }
             _log(f"Using fallback LLM integration '{fallback.name}' (model={provider['model']})")
             return provider
@@ -913,8 +970,16 @@ def _exec_llm(db: Session, config: dict, context: dict, log: Callable[[str], Non
         log,
         config.get("ai_provider_id"),
         owner_user_id=context.get("_owner_user_id"),
+        provider_ref=config.get("provider_ref"),
+        mode=config.get("mode") or "llm",
     )
     if (config.get("mode") or "llm") == "agent":
+        # Resolved providers explicitly carry this flag. Keep direct callers
+        # that use the historical provider dict shape backward compatible.
+        if provider.get("supports_tool_calling", True) is False:
+            raise NodeExecutionError(
+                "Selected AI provider does not support native tool calling required by Agent mode"
+            )
         from uuid import UUID
 
         from app.services.workflow_agent import (

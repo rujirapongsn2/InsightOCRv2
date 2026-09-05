@@ -607,6 +607,12 @@ async def run_workflow_agent(
         raise WorkflowAgentConfigurationError(
             "Agent mode requires an OpenAI-compatible provider with native tool calling"
         )
+    # All providers resolved by the workflow engine carry this capability.
+    # The default keeps direct unit-test providers backward compatible.
+    if not provider.get("supports_tool_calling", True):
+        raise WorkflowAgentConfigurationError(
+            "Selected AI provider does not support native tool calling"
+        )
     skills = _selected_skills(db, user_id, skill_ids, skill_fingerprints)
     allowed_tools = _skill_tool_allowlist(
         skills, output_format=output_format, agent_task=agent_task
