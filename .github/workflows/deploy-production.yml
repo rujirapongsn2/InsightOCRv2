@@ -21,6 +21,8 @@ jobs:
         run: |
           set -euo pipefail
           cd /home/ubuntu/InsightOCRv2
+          git fetch origin --prune
+          git reset --hard origin/main
           git status --short --branch
           DEPLOY_SYNC_TO_ORIGIN=true DEPLOY_ALLOW_DIRTY_RESET=true scripts/services.sh update
 
