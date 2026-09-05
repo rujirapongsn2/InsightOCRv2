@@ -22,7 +22,7 @@ jobs:
           set -euo pipefail
           cd /home/ubuntu/InsightOCRv2
           git status --short --branch
-          scripts/services.sh update
+          DEPLOY_SYNC_TO_ORIGIN=true DEPLOY_ALLOW_DIRTY_RESET=true scripts/services.sh update
 
       - name: Verify deployment
         shell: bash

@@ -174,16 +174,52 @@ update_stack() {
     exit 1
   fi
 
-  local before_sha after_sha branch_name
+  local before_sha after_sha branch_name target_ref dirty_status
   before_sha="$(git rev-parse HEAD)"
   branch_name="$(git branch --show-current)"
   branch_name="${branch_name:-unknown}"
 
+  if [ "$branch_name" = "unknown" ]; then
+    echo "Cannot update a detached HEAD; check out the deployment branch first." >&2
+    exit 1
+  fi
+
+  target_ref="origin/${branch_name}"
+
   echo "Fetching latest code from origin..."
   git fetch origin --prune
 
-  echo "Pulling latest changes..."
-  git pull --rebase --autostash
+  if ! git show-ref --verify --quiet "refs/remotes/${target_ref}"; then
+    echo "Remote branch ${target_ref} was not found after fetch." >&2
+    exit 1
+  fi
+
+  dirty_status="$(git status --porcelain)"
+  if [ "${DEPLOY_SYNC_TO_ORIGIN:-false}" = "true" ]; then
+    if [ -n "$dirty_status" ]; then
+      if [ "${DEPLOY_ALLOW_DIRTY_RESET:-false}" != "true" ]; then
+        echo "Production worktree has local changes; refusing to deploy without an explicit reset policy:" >&2
+        printf '%s\n' "$dirty_status" >&2
+        echo "Set DEPLOY_ALLOW_DIRTY_RESET=true only for a deployment that must follow Git as the source of truth." >&2
+        exit 1
+      fi
+
+      echo "Discarding tracked production changes because Git is the deployment source of truth..."
+      printf '%s\n' "$dirty_status"
+    fi
+
+    echo "Synchronizing the worktree to ${target_ref}..."
+    git reset --hard "$target_ref"
+  else
+    if [ -n "$dirty_status" ]; then
+      echo "Local changes detected; refusing to update with an unresolved worktree:" >&2
+      printf '%s\n' "$dirty_status" >&2
+      exit 1
+    fi
+
+    echo "Fast-forwarding to ${target_ref}..."
+    git merge --ff-only "$target_ref"
+  fi
 
   after_sha="$(git rev-parse HEAD)"
   write_build_info "$after_sha" "$branch_name"
