@@ -37,6 +37,21 @@ interface CredentialRequest { pending_action_id: string; credential_kind: string
 
 const SECRET_FIELDS = new Set(["api_key", "private_key", "client_secret", "authHeader", "apiKey"])
 
+const TOOL_LABELS: Record<string, string> = {
+    list_jobs: "ค้นหาเอกสารของคุณ", list_node_types: "เลือกขั้นตอนที่เหมาะสม",
+    list_document_schemas: "ตรวจรูปแบบข้อมูล", list_integrations: "ตรวจบัญชีที่เชื่อมต่อ",
+    list_ai_providers: "ตรวจบริการ AI", list_workflow_skills: "เลือกความสามารถของผู้ช่วย",
+    inspect_job_data: "ตรวจข้อมูลตัวอย่าง", propose_workflow: "ออกแบบและตรวจขั้นตอน",
+    validate_workflow: "ตรวจความพร้อม", save_workflow: "บันทึก Workflow",
+    request_credential: "เชื่อมต่อบริการ",
+}
+
+const EXAMPLES = [
+    "สรุปเอกสารใน Job เป็นรายงานที่ดาวน์โหลดได้",
+    "เปรียบเทียบสัญญาและทำรายงานประเด็นที่ต้องตรวจสอบ",
+    "สรุปยอดจากใบเสร็จที่ตรวจแล้วทุกเช้า",
+]
+
 // ── Live preview (read-only React Flow) ──────────────────────────────
 function WorkflowPreview({ definition }: { definition: any }) {
     const { nodes, edges } = useMemo(() => {
@@ -177,8 +192,16 @@ function AiBuilderInner() {
     const [error, setError] = useState<string | null>(null)
     const [pendingAction, setPendingAction] = useState<PendingAction | null>(null)
     const [credentialReq, setCredentialReq] = useState<CredentialRequest | null>(null)
+    const [connectionNeeded, setConnectionNeeded] = useState<string | null>(null)
+    const [jobs, setJobs] = useState<{id: string; name: string}[]>([])
     const [previewDef, setPreviewDef] = useState<any>(null)
     const [savedWorkflowId, setSavedWorkflowId] = useState<string | null>(null)
+    const [previewName, setPreviewName] = useState("")
+    const [issues, setIssues] = useState<any[]>([])
+    const [validated, setValidated] = useState(false)
+    const [showDiagram, setShowDiagram] = useState(false)
+    const [confirming, setConfirming] = useState(false)
+    const sendingRef = useRef(false)
     const scrollRef = useRef<HTMLDivElement>(null)
 
     const headers = useCallback(() => ({
@@ -199,15 +222,15 @@ function AiBuilderInner() {
     }, [conversationId, token])
 
     const sendMessage = useCallback(async (text: string) => {
-        if (!text.trim() || streaming) return
-        const convId = await ensureConversation()
-        if (!convId) { setError("ไม่พบ token"); return }
-
-        setTranscript((prev) => [...prev, { kind: "msg", id: crypto.randomUUID(), role: "user", content: text }])
-        setInput("")
+        if (!text.trim() || sendingRef.current) return
+        sendingRef.current = true
         setStreaming(true); setStreamText(""); setError(null); setThinking(true)
 
         try {
+            const convId = await ensureConversation()
+            if (!convId) throw new Error("กรุณาเข้าสู่ระบบอีกครั้ง")
+            setTranscript((prev) => [...prev, { kind: "msg", id: crypto.randomUUID(), role: "user", content: text }])
+            setInput("")
             const res = await fetch(`${apiBase}/agent/conversations/${convId}/messages`, {
                 method: "POST", headers: headers(), body: JSON.stringify({ content: text }),
             })
@@ -220,6 +243,7 @@ function AiBuilderInner() {
             const decoder = new TextDecoder()
             let buffer = ""
             let finalText = ""
+            let finished = false
             while (true) {
                 const { done, value } = await reader.read()
                 if (done) break
@@ -239,10 +263,15 @@ function AiBuilderInner() {
                             break
                         case "tool_result": {
                             const result = evt.result
+                            if (evt.name === "list_jobs" && Array.isArray(result?.jobs)) setJobs(result.jobs)
                             setTranscript((prev) => prev.map((it) =>
                                 it.kind === "tool" && it.id === evt.id ? { ...it, result } : it))
                             if (evt.name === "propose_workflow" && result?.definition) {
                                 setPreviewDef(result.definition)
+                                setPreviewName(result.name || "Workflow")
+                                setIssues(result.issues || [])
+                                setValidated(result.ok === true)
+                                setSavedWorkflowId(null)
                             }
                             if (evt.name === "save_workflow" && result?.ok && result?.workflow_id) {
                                 setSavedWorkflowId(result.workflow_id)
@@ -255,16 +284,26 @@ function AiBuilderInner() {
                                     purpose: result.purpose || "",
                                 })
                             }
+                            if (result?.status === "awaiting_connection") {
+                                setConnectionNeeded(result.credential_kind === "gdrive" ? "Google Drive" : "OneDrive")
+                            }
                             break
                         }
                         case "confirmation_required":
                             setPendingAction(evt as unknown as PendingAction)
+                            if (evt.tool_name === "save_workflow" && evt.arguments?.definition) {
+                                setPreviewDef(evt.arguments.definition)
+                                setPreviewName(evt.arguments.name || "Workflow")
+                                setValidated(true)
+                                setIssues([])
+                            }
                             break
                         case "delta":
                             finalText += evt.text || ""
                             setStreamText(finalText)
                             break
                         case "done":
+                            finished = true
                             setStreaming(false); setThinking(false)
                             if (finalText) {
                                 setTranscript((prev) => [...prev, { kind: "msg", id: crypto.randomUUID(), role: "assistant", content: finalText }])
@@ -272,26 +311,39 @@ function AiBuilderInner() {
                             }
                             break
                         case "error":
+                            finished = true
                             setError(evt.message || "Agent error"); setStreaming(false); setThinking(false)
                             break
                     }
                 }
             }
+            if (!finished) throw new Error("การเชื่อมต่อขาดก่อนจบงาน กรุณาลองส่งข้อความต่ออีกครั้ง")
             setStreaming(false); setThinking(false)
         } catch (e: any) {
             setError(e?.message || "การเชื่อมต่อขาดหาย")
+        } finally {
+            sendingRef.current = false
             setStreaming(false); setThinking(false)
+            setPendingAction(null)
         }
     }, [streaming, ensureConversation, apiBase, headers])
 
     const confirmAction = async (approved: boolean) => {
-        if (!pendingAction || !token) return
-        await fetch(`${apiBase}/agent/confirm/${pendingAction.pending_action_id}`, {
+        if (!pendingAction || !token || confirming) return
+        setConfirming(true)
+        try {
+        const response = await fetch(`${apiBase}/agent/confirm/${pendingAction.pending_action_id}`, {
             method: "POST",
             headers: headers(),
             body: JSON.stringify({ approved, explicit_confirmation: true }),
         })
+        if (!response.ok) throw new Error("ยืนยันไม่สำเร็จ กรุณาลองอีกครั้ง")
         setPendingAction(null)
+        } catch (e: any) {
+            setError(e.message)
+        } finally {
+            setConfirming(false)
+        }
     }
 
     const onCredentialSaved = (info: { idKey: string; id: string; name: string }) => {
@@ -301,31 +353,31 @@ function AiBuilderInner() {
     }
 
     return (
-        <div className="flex flex-col h-[calc(100vh-4rem)]">
+        <div className="flex min-w-0 flex-col min-h-[calc(100vh-4rem)] lg:h-[calc(100vh-4rem)]">
             <div className="flex items-center gap-3 px-4 py-3 border-b border-[#E2E8F0]">
-                <button onClick={() => router.push("/workflows")} className="p-2 rounded-lg hover:bg-gray-50 text-[#778DA9]">
+                <button aria-label="กลับไป Workflow" onClick={() => router.push("/workflows")} className="p-2 rounded-lg hover:bg-gray-50 text-[#778DA9]">
                     <ArrowLeft className="h-4 w-4" />
                 </button>
                 <Sparkles className="h-5 w-5 text-[#2786C2]" />
                 <div>
                     <h1 className="text-base font-semibold text-[#0D1B2A]">สร้าง Workflow ด้วย AI</h1>
-                    <p className="text-xs text-[#778DA9]">บอกเป้าหมาย แล้ว AI จะออกแบบและตรวจสอบให้ก่อนบันทึก</p>
                 </div>
                 {savedWorkflowId && (
                     <button onClick={() => router.push(`/workflows/${savedWorkflowId}`)}
                         className="ml-auto flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-600 text-white text-sm hover:bg-emerald-700">
-                        <CheckCircle2 className="h-4 w-4" /> เปิดใน Builder
+                        <CheckCircle2 className="h-4 w-4" /> เปิด Workflow
                     </button>
                 )}
             </div>
 
-            <div className="flex flex-1 min-h-0">
+            <div className="flex flex-col lg:flex-row flex-1 min-h-0 min-w-0">
                 {/* Chat */}
-                <div className="flex flex-col w-[46%] min-w-[380px] border-r border-[#E2E8F0]">
+                <div className="flex flex-col w-full lg:w-1/2 min-w-0 min-h-[420px] border-r border-[#E2E8F0]">
                     <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 space-y-3">
                         {transcript.length === 0 && (
-                            <div className="text-sm text-[#778DA9] bg-[#F8FAFC] rounded-xl p-4">
-                                ลองพิมพ์เช่น: “ทุกเช้า 8 โมง ดึงเอกสารจาก Job ‘ใบเสร็จ’ ที่ตรวจแล้ว มาสรุปยอดรวมด้วย AI แล้วส่งผลเข้า Google Drive”
+                            <div className="text-sm text-[#5B6B7E] space-y-3">
+                                <p className="font-medium text-[#0D1B2A]">คุณต้องการให้งานอะไรทำโดยอัตโนมัติ?</p>
+                                {EXAMPLES.map(example => <button key={example} disabled={streaming} onClick={() => setInput(example)} className="block w-full text-left border border-[#E2E8F0] rounded-lg p-3 hover:bg-[#F8FAFC]">{example}</button>)}
                             </div>
                         )}
                         {transcript.map((it) => it.kind === "msg" ? (
@@ -338,7 +390,7 @@ function AiBuilderInner() {
                             <div key={it.id} className="flex items-start gap-2 text-xs text-[#5B6B7E]">
                                 <Wrench className="h-3.5 w-3.5 mt-0.5 text-[#2786C2] flex-shrink-0" />
                                 <div className="min-w-0">
-                                    <span className="font-medium text-[#0D1B2A]">{it.name}</span>
+                                    <span className="font-medium text-[#0D1B2A]">{TOOL_LABELS[it.name] || "ดำเนินการ"}</span>
                                     {it.result?.error && <span className="text-red-600"> — {String(it.result.error)}</span>}
                                     {it.result?.ok === false && it.result?.issues && (
                                         <span className="text-amber-600"> — {it.result.issues.filter((x: any) => x.level === "error").length} ปัญหา</span>
@@ -364,18 +416,64 @@ function AiBuilderInner() {
                     {credentialReq && (
                         <CredentialCard req={credentialReq} onSaved={onCredentialSaved} onCancel={() => setCredentialReq(null)} />
                     )}
-                    {pendingAction && (
+                    {connectionNeeded && <div className="mx-3 mb-3 border rounded-lg p-3 text-sm space-y-3">
+                        <p>เชื่อมต่อ {connectionNeeded}</p>
+                        <div className="flex gap-3 items-center">
+                            <a href="/integrations" target="_blank" rel="noopener noreferrer" className="text-[#2786C2] underline">เปิดบัญชีที่เชื่อมต่อ</a>
+                            <button disabled={streaming} onClick={() => { setConnectionNeeded(null); void sendMessage(`เชื่อมต่อ ${connectionNeeded} แล้ว ช่วยตรวจบัญชีอีกครั้งและสร้าง Workflow ต่อ`); }} className="border rounded-lg px-3 py-2 disabled:opacity-50">ตรวจอีกครั้ง</button>
+                        </div>
+                    </div>}
+                    {pendingAction?.tool_name === "save_workflow" ? (
+                        <div className="mx-3 mb-3 rounded-lg border border-[#CBD5E1] p-4 space-y-3">
+                            <p className="text-sm font-medium">บันทึก “{pendingAction.arguments?.name || previewName}”?</p>
+                            <p className="text-xs text-[#5B6B7E]">{pendingAction.arguments?.schedule_enabled ? `เปิดใช้งานตามเวลา ${pendingAction.arguments.schedule_cron}` : "เริ่มทำงานเมื่อคุณกด Run"}</p>
+                            <div className="flex gap-2">
+                                <button disabled={confirming} onClick={() => confirmAction(true)} className="rounded-lg px-3 py-2 text-sm bg-[#2786C2] text-white disabled:opacity-50">{confirming ? "กำลังยืนยัน" : "บันทึก Workflow"}</button>
+                                <button disabled={confirming} onClick={() => confirmAction(false)} className="rounded-lg px-3 py-2 text-sm border border-[#CBD5E1]">แก้ไขก่อน</button>
+                            </div>
+                        </div>
+                    ) : pendingAction && (
                         <ConfirmationDialog action={pendingAction}
                             onConfirm={() => confirmAction(true)} onReject={() => confirmAction(false)} />
                     )}
 
-                    <ChatInput value={input} onChange={setInput} onSend={() => sendMessage(input)}
-                        streaming={streaming} tips={<span className="text-[11px] text-[#9AA8BC]">Enter เพื่อส่ง • Shift+Enter ขึ้นบรรทัดใหม่</span>} />
+                    {!streaming && !previewDef && jobs.length > 0 && <div className="px-3 pb-2">
+                        <label htmlFor="builder-job" className="block text-xs mb-1">เอกสารต้นทาง</label>
+                        <select id="builder-job" value="" onChange={event => {
+                            const job = jobs.find(item => item.id === event.target.value)
+                            if (job) setInput(`ใช้ Job “${job.name}” (${job.id})`)
+                        }} className="w-full rounded-lg border border-[#CBD5E1] p-2 text-sm">
+                            <option value="">เลือก Job</option>
+                            {jobs.map(job => <option key={job.id} value={job.id}>{job.name}</option>)}
+                        </select>
+                    </div>}
+                    <ChatInput value={input} onChange={setInput} onSend={() => sendMessage(input)} streaming={streaming} placeholder="บอกงานที่ต้องการ หรือสิ่งที่อยากปรับ…" />
                 </div>
 
                 {/* Live preview */}
-                <div className="flex-1 bg-[#F8FAFC]">
-                    <WorkflowPreview definition={previewDef} />
+                <div className="flex-1 min-w-0 min-h-[360px] flex flex-col bg-[#F8FAFC]">
+                    <div className="p-4 border-b border-[#E2E8F0] flex items-center justify-between gap-3">
+                        <h2 className="text-sm font-semibold break-words">{previewName || "ขั้นตอนงาน"}</h2>
+                        <button aria-pressed={showDiagram} onClick={() => setShowDiagram(!showDiagram)} className="text-sm text-[#2786C2] shrink-0">{showDiagram ? "สรุปขั้นตอน" : "ดูแผนผัง"}</button>
+                    </div>
+                    {showDiagram ? <div className="flex-1 min-h-[360px]"><WorkflowPreview definition={previewDef} /></div> :
+                        <div className="p-4 overflow-y-auto space-y-4">
+                            {!previewDef && <p className="text-sm text-[#5B6B7E]">ยังไม่มีแบบร่าง</p>}
+                            {previewDef && <>
+                                <p role="status" className={`text-sm ${validated ? "text-emerald-700" : "text-amber-700"}`}>
+                                    {savedWorkflowId ? "บันทึกแล้ว · พร้อมเปิดทดสอบ" : validated ? "ตรวจการตั้งค่าผ่าน · ยังไม่ได้ทดสอบรัน" : "กำลังปรับแก้การตั้งค่า"}
+                                </p>
+                                <ol className="space-y-3">
+                                    {(previewDef.nodes || []).map((node: any, index: number) => <li key={node.id} className="flex gap-3 text-sm min-w-0">
+                                        <span className="text-[#2786C2] shrink-0">{index + 1}.</span>
+                                        <span className="break-words min-w-0">{node.data?.label || node.type}</span>
+                                    </li>)}
+                                </ol>
+                                {issues.length > 0 && <details className="text-sm text-[#5B6B7E]"><summary>ผลการตรวจ ({issues.length})</summary>
+                                    <ul className="mt-2 space-y-2">{issues.map((issue, index) => <li key={index} className="break-words">{issue.message}</li>)}</ul>
+                                </details>}
+                            </>}
+                        </div>}
                 </div>
             </div>
         </div>

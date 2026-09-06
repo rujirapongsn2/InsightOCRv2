@@ -10,9 +10,10 @@ interface ChatInputProps {
     disabled?: boolean
     streaming?: boolean
     tips?: ReactNode
+    placeholder?: string
 }
 
-export default function ChatInput({ value, onChange, onSend, disabled, streaming, tips }: ChatInputProps) {
+export default function ChatInput({ value, onChange, onSend, disabled, streaming, tips, placeholder = "Ask about your documents..." }: ChatInputProps) {
     const textareaRef = useRef<HTMLTextAreaElement>(null)
 
     useEffect(() => {
@@ -39,7 +40,8 @@ export default function ChatInput({ value, onChange, onSend, disabled, streaming
                     value={value}
                     onChange={(e) => onChange(e.target.value)}
                     onKeyDown={handleKeyDown}
-                    placeholder="Ask about your documents..."
+                    placeholder={placeholder}
+                    aria-label={placeholder}
                     disabled={disabled || streaming}
                     maxLength={10000}
                     rows={1}

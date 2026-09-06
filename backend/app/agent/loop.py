@@ -1939,18 +1939,41 @@ class AgentLoop:
         browser/proxy to drop it ("Load failed"). Yields keepalive strings; the
         awaited result is stored on self._awaited (re-raises if `coro` raised)."""
         task = asyncio.ensure_future(coro)
-        while True:
-            done, _ = await asyncio.wait({task}, timeout=interval)
-            if done:
-                break
-            yield ": keepalive\n\n"
-        self._awaited = task.result()
+        try:
+            while True:
+                done, _ = await asyncio.wait({task}, timeout=interval)
+                if done:
+                    break
+                yield ": keepalive\n\n"
+            self._awaited = task.result()
+        finally:
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
 
     async def _builder_execute_call(self, call_id: str, tool_name: str, tool_args: dict, iteration: int, model_name: str):
         """Execute one builder tool call (with confirmation gating), emitting SSE
         events. Returns (result, [event...]) is awkward for a generator, so this is
         a generator that yields SSE strings and stores the result on self._last_builder_result."""
         yield sse_event(SSEEventType.TOOL_CALL, {"id": call_id, "name": tool_name, "arguments": tool_args})
+        allowed = {s["function"]["name"] for s in tool_registry.get_openai_schemas(categories=["workflow", "web"])}
+        if tool_name not in allowed:
+            result = {"error": "This tool is not available in the workflow builder"}
+            yield sse_event(SSEEventType.TOOL_RESULT, {"id": call_id, "name": tool_name, "result": result})
+            crud_msg.add(self.db, conversation_id=self.conversation_id, role="tool",
+                         tool_call_id=call_id, tool_name=tool_name, tool_result=result, iteration=iteration)
+            self._last_builder_result = result
+            return
+        if tool_name == "save_workflow":
+            from app.agent.tools.workflow_tools import prepare_workflow_save
+            prepared = await prepare_workflow_save(tool_args, self.context)
+            if not prepared.get("ok"):
+                yield sse_event(SSEEventType.TOOL_RESULT, {"id": call_id, "name": tool_name, "result": prepared})
+                crud_msg.add(self.db, conversation_id=self.conversation_id, role="tool",
+                             tool_call_id=call_id, tool_name=tool_name, tool_result=prepared, iteration=iteration)
+                self._last_builder_result = prepared
+                return
+            tool_args = prepared["arguments"]
         if requires_confirmation(tool_name, tool_args):
             pending = crud_pending.create(
                 self.db, conversation_id=self.conversation_id, user_id=self.user_id,
@@ -2029,7 +2052,7 @@ class AgentLoop:
 
             if native_calls:
                 calls = []
-                for tc in native_calls[:MAX_TOOLS_PER_TURN]:
+                for tc in native_calls:
                     try:
                         args = json.loads(tc.function.arguments or "{}")
                     except Exception:
@@ -2089,6 +2112,8 @@ class AgentLoop:
                 history_lines.append(f"USER: {m.get('content') or ''}")
             elif role == "assistant" and m.get("content"):
                 history_lines.append(f"ASSISTANT: {m.get('content')}")
+            elif role == "tool":
+                history_lines.append(f"TOOL: {m.get('content') or ''}")
         history_text = "\n".join(history_lines[-20:]) or "(none)"
 
         action_rules = {"type": "tool_call", "tool": "list_node_types", "arguments": {}}
@@ -2122,7 +2147,11 @@ objects in the same reply.
                 prompt += "\n## Recent Tool Results\n" + tool_content_for_llm(tool_results[-6:])
 
             try:
-                answer = await self._builder_model_text(prompt, system_prompt, tool_results)
+                async for ka in self._await_with_keepalive(
+                    self._builder_model_text(prompt, system_prompt, tool_results)
+                ):
+                    yield ka
+                answer = self._awaited
             except Exception as e:
                 yield sse_event(SSEEventType.ERROR, {"message": f"AI provider error: {str(e)}"})
                 return
@@ -2167,30 +2196,9 @@ objects in the same reply.
                              tool_calls=[{"id": call_id, "type": "function",
                                           "function": {"name": tool_name, "arguments": json.dumps(tool_args, ensure_ascii=False)}}],
                              iteration=iteration, model_used=model_name)
-                yield sse_event(SSEEventType.TOOL_CALL, {"id": call_id, "name": tool_name, "arguments": tool_args})
-
-                if requires_confirmation(tool_name, tool_args):
-                    pending = crud_pending.create(
-                        self.db, conversation_id=self.conversation_id, user_id=self.user_id,
-                        tool_name=tool_name, tool_arguments=tool_args,
-                        description=describe_action(tool_name, tool_args),
-                    )
-                    yield sse_event(SSEEventType.CONFIRMATION_REQUIRED, {
-                        "pending_action_id": str(pending.id), "tool_call_id": call_id,
-                        "tool_name": tool_name, "description": pending.description, "arguments": tool_args,
-                    })
-                    approved = await self._wait_for_confirmation(pending.id)
-                    if not approved:
-                        result = {"error": "User rejected action", "tool_name": tool_name}
-                        yield sse_event(SSEEventType.TOOL_REJECTED, {"id": call_id, "name": tool_name})
-                    else:
-                        result = await tool_registry.execute(tool_name, tool_args, self.context)
-                else:
-                    result = await tool_registry.execute(tool_name, tool_args, self.context)
-
-                yield sse_event(SSEEventType.TOOL_RESULT, {"id": call_id, "name": tool_name, "result": result})
-                crud_msg.add(self.db, conversation_id=self.conversation_id, role="tool",
-                             tool_call_id=call_id, tool_name=tool_name, tool_result=result, iteration=iteration)
+                async for event in self._builder_execute_call(call_id, tool_name, tool_args, iteration, model_name):
+                    yield event
+                result = self._last_builder_result
                 tool_results.append({"tool": tool_name, "arguments": tool_args, "result": result})
 
         final_text = "ยังออกแบบ workflow ไม่เสร็จภายในจำนวนรอบที่กำหนด ลองระบุเป้าหมายให้ชัดเจนขึ้นได้ไหมครับ"

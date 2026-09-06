@@ -1179,3 +1179,25 @@ Date: 2026-06-30
 - Confirm the caution line explains: handoff tasks (วิเคราะห์/ประเมิน/ข้อเสนอแนะ) return text only,
   and a "สร้างรายงาน" node is required at the end of an Agent chain to produce a downloadable file.
 - Automated check: frontend `npm run build` including TypeScript validation passes.
+
+## AI Workflow Builder - 2026-09-06
+
+- Open `/workflows/new/ai`, choose an example, and send a business request.
+- When several Jobs match, select the source Job by name. The agent chooses node
+  configuration and inspects available fields; users do not enter templates.
+- Check the business-step preview and optional diagram before saving.
+- Invalid drafts show validation feedback and cannot reach save confirmation.
+- Confirm a valid workflow, open it, and run it separately. Static validation
+  must not be described as a successful execution.
+- Missing Google Drive/OneDrive connections open Integrations in another tab;
+  return and choose Check again. No service-account secrets are collected.
+- Verification: 21 backend tests passed using the mounted source in an isolated
+  container; frontend production build and TypeScript passed. Playwright with
+  mocked API/SSE verified example input, saved-result navigation, preview,
+  diagram nodes, and no page overflow at 1440px and 390px. Screenshots were
+  visually inspected. These mocked UI checks do not establish model quality.
+- Rebuilt the local backend/frontend containers; nginx configuration validation
+  passed and `/workflows/new/ai` returned HTTP 200 through port 3000.
+- A live-provider create/save/run smoke test was not executed: automatic approval
+  review rejected sending context to the configured external provider using an
+  admin account. Live model behavior still requires authorized testing.

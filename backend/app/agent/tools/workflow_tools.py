@@ -61,7 +61,13 @@ async def _list_document_schemas_handler(args: dict, context) -> dict:
 async def _list_node_types_handler(args: dict, context) -> dict:
     # Trimmed catalog: only what the model needs to assemble valid nodes.
     out = []
+    requested = args.get("types") or []
     for nt in NODE_TYPES:
+        if requested and nt["type"] not in requested:
+            continue
+        if not requested:
+            out.append({k: nt[k] for k in ("type", "category", "label", "description")})
+            continue
         out.append({
             "type": nt["type"],
             "category": nt["category"],
@@ -73,7 +79,13 @@ async def _list_node_types_handler(args: dict, context) -> dict:
             ],
             "output_fields": [f.get("name") for f in nt.get("output_fields", [])],
         })
-    return {"count": len(out), "node_types": out}
+    return {"count": len(out), "node_types": out,
+            "hint": "Call again with types=[...] for the configuration and outputs of only the nodes you need."}
+
+
+async def _list_workflow_skills_handler(args: dict, context) -> dict:
+    from app.agent.tools.skill_tools import _list_skills_handler
+    return await _list_skills_handler({}, context)
 
 
 async def _list_integrations_handler(args: dict, context) -> dict:
@@ -165,13 +177,14 @@ async def _propose_workflow_handler(args: dict, context) -> dict:
     definition = args.get("definition") or {"nodes": [], "edges": []}
     nodes = definition.get("nodes") or []
     # Returned in the tool_result → the frontend live-preview renders this DAG.
+    validation = await _validate_workflow_handler({"definition": definition}, context)
     return {
-        "ok": True,
+        **validation,
         "name": name,
         "description": description,
         "definition": definition,
         "node_count": len(nodes),
-        "message": "แสดงตัวอย่าง workflow ในพรีวิวแล้ว — เรียก validate_workflow ก่อน save",
+        "message": "Draft checked. Fix every error before saving; validation is not an execution test.",
     }
 
 
@@ -190,6 +203,29 @@ async def _validate_workflow_handler(args: dict, context) -> dict:
     return {"ok": not errors, "error_count": len(errors), "issues": issues}
 
 
+async def prepare_workflow_save(args: dict, context) -> dict:
+    """Resolve the exact draft before confirmation, then check it again at save."""
+    resolved = dict(args)
+    if not resolved.get("definition"):
+        proposed = _latest_proposed_definition(context)
+        if proposed:
+            resolved = {**proposed, **{k: v for k, v in resolved.items() if v is not None}}
+            resolved["definition"] = proposed["definition"]
+    if not resolved.get("name"):
+        return {"ok": False, "error": "กรุณาระบุชื่อ Workflow"}
+    checked = await _validate_workflow_handler(resolved, context)
+    if not checked.get("ok"):
+        return checked
+    cron = resolved.get("schedule_cron")
+    if resolved.get("schedule_enabled") and not cron:
+        return {"ok": False, "error": "Schedule requires schedule_cron"}
+    if cron:
+        from croniter import croniter
+        if not croniter.is_valid(cron):
+            return {"ok": False, "error": "Invalid schedule_cron"}
+    return {"ok": True, "arguments": resolved}
+
+
 async def _request_credential_handler(args: dict, context) -> dict:
     """Ask the UI to open a credential card. The key is entered there and saved
     directly to the DB — it never returns through this tool or the chat prompt.
@@ -198,6 +234,12 @@ async def _request_credential_handler(args: dict, context) -> dict:
     cred_kind = args.get("kind") or "llm"  # llm | gdrive | onedrive | api
     purpose = args.get("purpose") or ""
     node_ref = args.get("node_ref")
+    if cred_kind in {"gdrive", "onedrive"}:
+        return {
+            "status": "awaiting_connection", "credential_kind": cred_kind,
+            "purpose": purpose, "settings_path": "/integrations",
+            "message": "Ask the user to connect their account in Integrations, then stop. On their return, call list_integrations again. Do not ask for client secrets or service-account keys.",
+        }
     # Non-secret field spec the card should collect (labels only, no values).
     field_spec = {
         "llm": ["display_name", "api_url", "api_key", "model"],
@@ -253,6 +295,10 @@ def _latest_proposed_definition(context) -> Optional[dict]:
 
 
 async def _save_workflow_handler(args: dict, context) -> dict:
+    prepared = await prepare_workflow_save(args, context)
+    if not prepared.get("ok"):
+        return prepared
+    args = prepared["arguments"]
     db = context.db
     owner = _owner(context)
     if not owner:
@@ -318,7 +364,9 @@ def _register():
     reg(name="list_document_schemas", description="แสดง Document Schemas ทั้งหมด (id, ชื่อ, ชนิด, ชื่อฟิลด์)",
         parameters_schema=_JSON_OBJ, handler=_list_document_schemas_handler)
     reg(name="list_node_types", description="แสดง catalog ของชนิดโหนด workflow ทั้งหมดพร้อม config fields ที่จำเป็น",
-        parameters_schema=_JSON_OBJ, handler=_list_node_types_handler)
+        parameters_schema={"type": "object", "properties": {"types": {"type": "array", "items": {"type": "string"}}}}, handler=_list_node_types_handler)
+    reg(name="list_workflow_skills", description="List available Skills with real IDs for Agent nodes; never invent skill IDs.",
+        parameters_schema=_JSON_OBJ, handler=_list_workflow_skills_handler)
     reg(name="list_integrations", description="แสดง integration ของผู้ใช้ (llm/gdrive/onedrive/api) โดยไม่มีความลับ",
         parameters_schema={"type": "object", "properties": {"type_filter": {"type": "string", "enum": ["api", "workflow", "llm", "gdrive", "onedrive"]}}, "required": []},
         handler=_list_integrations_handler)
