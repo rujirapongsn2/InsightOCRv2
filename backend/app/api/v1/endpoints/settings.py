@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Optional
 from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -20,6 +21,7 @@ from app.schemas.setting import (
 )
 from app.services.tls import warn_ssl_verification_disabled
 from app.services.ocr_fallback import fallback_configuration_error, resolve_fallback_api_key
+from app.services.ocr_configuration_test import run_ocr_configuration_test
 from app.utils.activity_logger import log_activity, Actions
 from app.utils.redact import is_masked, mask_secret
 from app.utils.secret_store import SecretStoreError, encrypt_secret
@@ -363,6 +365,50 @@ def update_settings(
 
 class OCRFallbackTestRequest(BaseModel):
     api_key: Optional[str] = None
+
+
+class OCRConfigurationTestRequest(BaseModel):
+    ocr_endpoint: Optional[str] = None
+    api_token: Optional[str] = None
+    ocr_engine: Optional[str] = None
+    model: Optional[str] = None
+    ocr_fallback_enabled: Optional[bool] = None
+    ocr_fallback_api_key: Optional[str] = None
+
+
+@router.post("/ocr/test")
+def test_complete_ocr_configuration(
+    *,
+    payload: OCRConfigurationTestRequest,
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_active_superuser),
+) -> Any:
+    """Run file-based checks against the same OCR adapters used by Jobs."""
+    saved = db.query(Setting).first()
+
+    def selected(value: Any, saved_value: Any = None) -> Any:
+        if value is None or is_masked(value):
+            return saved_value
+        return value
+
+    effective = SimpleNamespace(
+        ocr_endpoint=selected(payload.ocr_endpoint, getattr(saved, "ocr_endpoint", None)),
+        api_endpoint=getattr(saved, "api_endpoint", None),
+        api_token=selected(payload.api_token, getattr(saved, "api_token", None)),
+        ocr_engine=selected(payload.ocr_engine, getattr(saved, "ocr_engine", "default")),
+        model=selected(payload.model, getattr(saved, "model", "default")),
+        verify_ssl=bool(getattr(saved, "verify_ssl", False)),
+        ocr_fallback_enabled=(
+            payload.ocr_fallback_enabled
+            if payload.ocr_fallback_enabled is not None
+            else bool(getattr(saved, "ocr_fallback_enabled", False))
+        ),
+        ocr_fallback_api_key=selected(
+            payload.ocr_fallback_api_key,
+            getattr(saved, "ocr_fallback_api_key", None),
+        ),
+    )
+    return run_ocr_configuration_test(effective)
 
 
 @router.post("/ocr-fallback/test")

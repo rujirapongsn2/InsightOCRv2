@@ -400,6 +400,30 @@ def _compact_wrapup_messages(messages: list[dict], user_message: str, evidence_n
     ]
 
 
+async def _recover_empty_answer(
+    client,
+    model: str,
+    messages: list[dict],
+    user_message: str,
+    evidence_notes: list[str],
+    *,
+    max_tokens: int | None = None,
+    max_attempts: int | None = None,
+) -> str:
+    """Retry an empty provider answer with a compact, tool-free transcript."""
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "messages": _compact_wrapup_messages(messages, user_message, evidence_notes),
+        "temperature": LLM_TEMPERATURE,
+        "stream": False,
+        "max_attempts": max_attempts or LLM_MAX_ATTEMPTS,
+    }
+    if max_tokens:
+        kwargs["max_tokens"] = max_tokens
+    response = await _chat_with_retry(client, **kwargs)
+    return str(response.choices[0].message.content or "").strip()
+
+
 def _evidence_note(tool_name: str, result: Any) -> str | None:
     """Extract a bounded, human-readable evidence note for final fallback."""
     if not isinstance(result, dict):
@@ -407,7 +431,7 @@ def _evidence_note(tool_name: str, result: Any) -> str | None:
     if tool_name == "list_documents":
         documents = result.get("documents") or []
         names = [str(item.get("filename")) for item in documents if isinstance(item, dict) and item.get("filename")]
-        return f"list_documents: {', '.join(names[:20])}" if names else None
+        return f"Available source documents: {', '.join(names[:20])}" if names else None
     if tool_name == "search_documents":
         documents = result.get("documents") or []
         rows = []
@@ -419,12 +443,14 @@ def _evidence_note(tool_name: str, result: Any) -> str | None:
             if snippets:
                 row += f": {' | '.join(str(s) for s in snippets[:2])[:600]}"
             rows.append(row)
-        return f"search_documents ({result.get('query', '')}): {'; '.join(rows)}" if rows else None
+        return f"Relevant source passages for {result.get('query', '')}: {'; '.join(rows)}" if rows else None
     if tool_name == "get_document_detail":
         filename = result.get("filename") or result.get("id") or "document"
         text = str(result.get("ocr_text") or "").strip()
         extracted = result.get("reviewed_data") or result.get("extracted_data")
-        parts = [f"get_document_detail ({filename})"]
+        parts = [f"Source document: {filename}"]
+        if result.get("text_range"):
+            parts.append(f"Source coverage metadata: {result['text_range']}; continuation={result.get('next_offset')}")
         if text:
             parts.append(text[:2500])
         if extracted:
@@ -869,24 +895,30 @@ class AgentLoop:
         return False if self.autonomous else requires_confirmation(tool_name, tool_args)
 
     async def run(self, user_message: str) -> AsyncGenerator[str, None]:
-        deadline = asyncio.get_event_loop().time() + AGENT_MAX_RUNTIME_S
+        iterator = self._run_inner(user_message)
+        deadline = asyncio.get_running_loop().time() + AGENT_MAX_RUNTIME_S
         try:
-            async for event in self._run_inner(user_message):
+            while True:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    raise asyncio.TimeoutError
+                try:
+                    event = await asyncio.wait_for(anext(iterator), timeout=remaining)
+                except StopAsyncIteration:
+                    break
                 yield event
-                if asyncio.get_event_loop().time() > deadline:
-                    logger.warning(
-                        "Agent run exceeded %ss cap — stopping", AGENT_MAX_RUNTIME_S
-                    )
-                    yield sse_event(SSEEventType.ERROR, {
-                        "message": f"หยุดการทำงาน: เกินเวลาสูงสุด {AGENT_MAX_RUNTIME_S // 60} นาทีต่อการรันหนึ่งครั้ง"
-                    })
-                    return
+        except asyncio.TimeoutError:
+            yield sse_event(SSEEventType.ERROR, {
+                "message": f"Agent exceeded the runtime limit of {AGENT_MAX_RUNTIME_S} seconds. The task is incomplete.",
+            })
         except Exception as e:
             logger.error("AgentLoop.run crashed (unhandled): %s", e, exc_info=True)
             try:
                 yield sse_event(SSEEventType.ERROR, {"message": f"ระบบพบข้อผิดพลาดที่ไม่คาดคิด: {str(e)}"})
             except Exception:
                 pass
+        finally:
+            await iterator.aclose()
 
     async def _run_inner(self, user_message: str) -> AsyncGenerator[str, None]:
         crud_msg.add(self.db, conversation_id=self.conversation_id, role="user", content=user_message, iteration=0)
@@ -940,7 +972,7 @@ class AgentLoop:
         evidence_found = False
         no_progress_streak = 0
         last_assistant_text = ""
-        seen_search_queries: set[str] = set()
+        seen_search_queries: set[tuple[str, int]] = set()
         seen_tool_signatures: set[str] = set()
         legal_search_calls = 0
         force_tool_free_next = False
@@ -977,7 +1009,15 @@ class AgentLoop:
         plan_msg = None
         reflected = False
         if _is_complex_request(user_message) and not focused_legal_qa and not self.skip_planning:
-            plan_steps = await self._build_plan(client, model, user_message, history)
+            # Send an immediate event, then keep the stream alive while the
+            # optional planning call is in flight.
+            yield sse_event(SSEEventType.THINKING, {"iteration": 0})
+            self._awaited = None
+            async for keepalive in self._await_with_keepalive(
+                self._build_plan(client, model, user_message, history)
+            ):
+                yield keepalive
+            plan_steps = self._awaited or []
             if plan_steps:
                 yield sse_event(SSEEventType.PLAN, {"steps": plan_steps})
                 # Persist as a UI-only "plan" message so the checklist survives in
@@ -1026,10 +1066,12 @@ class AgentLoop:
                 }
                 if self.max_output_tokens:
                     request_kwargs["max_tokens"] = self.max_output_tokens
-                response = await _chat_with_retry(
-                    client,
-                    **request_kwargs,
-                )
+                self._awaited = None
+                async for keepalive in self._await_with_keepalive(
+                    _chat_with_retry(client, **request_kwargs)
+                ):
+                    yield keepalive
+                response = self._awaited
             except Exception as e:
                 yield sse_event(SSEEventType.ERROR, {"message": f"LLM error: {str(e)}"})
                 return
@@ -1220,7 +1262,7 @@ class AgentLoop:
                         elif tc.id in policy_blocked_call_ids:
                             tasks.append(_blocked_skill_policy_result(name))
                         elif focused_legal_qa and name == "search_documents":
-                            search_key = document_tools.normalize_search_text(args.get("query", ""))
+                            search_key = (document_tools.normalize_search_text(args.get("query", "")), args.get("offset", 0))
                             if search_key in seen_search_queries:
                                 tasks.append(_focused_duplicate_search_result(search_key))
                             else:
@@ -1382,7 +1424,41 @@ class AgentLoop:
                     return
 
             else:
-                final_text = msg.content or ""
+                final_text = str(msg.content or "").strip()
+                empty_answer_failure = False
+                if not final_text:
+                    logger.warning(
+                        "Provider returned an empty final answer after tools=%s; retrying with compact evidence",
+                        sorted(current_turn_tools),
+                    )
+                    try:
+                        self._awaited = None
+                        async for keepalive in self._await_with_keepalive(
+                            _recover_empty_answer(
+                                client,
+                                model,
+                                messages,
+                                user_message,
+                                evidence_notes,
+                                max_tokens=self.max_output_tokens,
+                                max_attempts=self.max_request_attempts,
+                            )
+                        ):
+                            yield keepalive
+                        recovered_text = str(self._awaited or "").strip()
+                    except Exception as exc:
+                        logger.warning("Compact recovery for empty provider answer failed: %s", exc)
+                        recovered_text = ""
+
+                    if recovered_text and not _looks_like_raw_tool_payload(recovered_text):
+                        final_text = recovered_text
+                    else:
+                        empty_answer_failure = True
+                        final_text = _max_iterations_fallback_text(user_message, evidence_notes)
+                        critical_tool_failures.append({
+                            "tool": "provider_response",
+                            "error": "AI provider returned an empty answer after document evidence was retrieved",
+                        })
                 if _looks_like_raw_tool_payload(final_text):
                     if latest_report_success:
                         final_text = _short_report_final_text(latest_report_success, user_message)
@@ -1454,12 +1530,18 @@ class AgentLoop:
                 # keep working (once) instead of returning an incomplete answer.
                 if (
                     plan_steps and not reflected and current_turn_tools
-                    and not unresolved_tool_errors and iteration < self.max_iterations
+                    and not unresolved_tool_errors and not empty_answer_failure
+                    and iteration < self.max_iterations
                 ):
                     reflected = True
-                    reflection = await self._reflect(
-                        client, model, user_message, plan_steps, final_text, current_turn_tools
-                    )
+                    self._awaited = None
+                    async for keepalive in self._await_with_keepalive(
+                        self._reflect(
+                            client, model, user_message, plan_steps, final_text, current_turn_tools
+                        )
+                    ):
+                        yield keepalive
+                    reflection = self._awaited
                     if not reflection["complete"] and reflection["missing"]:
                         yield sse_event(SSEEventType.REFLECTION, {
                             "complete": False, "missing": reflection["missing"],
@@ -1507,11 +1589,14 @@ class AgentLoop:
         # transcript can exceed provider context limits after repeated calls.
         final_text = ""
         try:
-            response = await _chat_with_retry(
+            self._awaited = None
+            async for keepalive in self._await_with_keepalive(_chat_with_retry(
                 client, model=model,
                 messages=_compact_wrapup_messages(messages, user_message, evidence_notes),
                 temperature=LLM_TEMPERATURE, stream=False,
-            )
+            )):
+                yield keepalive
+            response = self._awaited
             final_text = (response.choices[0].message.content or "").strip()
         except Exception:
             pass
@@ -2258,7 +2343,12 @@ __TOOL_CATALOG__
                 prompt = iteration_base_prompt
 
             try:
-                answer = await self._call_completion_provider(prompt, system_prompt, tool_results)
+                self._awaited = None
+                async for keepalive in self._await_with_keepalive(
+                    self._call_completion_provider(prompt, system_prompt, tool_results)
+                ):
+                    yield keepalive
+                answer = self._awaited
             except Exception as e:
                 yield sse_event(SSEEventType.ERROR, {"message": f"AI provider error: {str(e)}"})
                 return

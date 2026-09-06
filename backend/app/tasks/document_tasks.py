@@ -897,44 +897,10 @@ def extract_status(payload: dict[str, Any]) -> str:
 
 
 def extract_ai_text(result_payload: dict[str, Any]) -> str:
-    def append_unique(parts: list[str], value: Any) -> None:
-        if isinstance(value, str):
-            text = value.strip()
-            if text and text not in parts:
-                parts.append(text)
+    from app.services.ocr_result import extract_ocr_text
+    return extract_ocr_text(result_payload)
 
-    ai_processing = result_payload.get("ai_processing")
-    if isinstance(ai_processing, str):
-        return ai_processing.strip()
 
-    combined_parts: list[str] = []
-    if isinstance(ai_processing, dict):
-        for key in ("content", "text", "output", "result"):
-            append_unique(combined_parts, ai_processing.get(key))
-
-    pages = result_payload.get("results", {}).get("pages")
-    if not isinstance(pages, list):
-        pages = result_payload.get("pages") if isinstance(result_payload.get("pages"), list) else []
-
-    for page in pages:
-        if not isinstance(page, dict):
-            continue
-
-        page_ai = page.get("ai_processing")
-        page_parts: list[str] = []
-        if isinstance(page_ai, dict):
-            for key in ("content", "text", "output", "result"):
-                append_unique(page_parts, page_ai.get(key))
-        elif isinstance(page_ai, str) and page_ai.strip():
-            append_unique(page_parts, page_ai)
-
-        fallback_ocr_text = page.get("ocr_text")
-        append_unique(page_parts, fallback_ocr_text)
-
-        for part in page_parts:
-            append_unique(combined_parts, part)
-
-    return "\n\n".join(combined_parts).strip()
 
 
 def extract_structured_data(result_payload: dict[str, Any]) -> Any:
@@ -1301,6 +1267,10 @@ def process_document_task(
                 "structure_model": "",
             }
             upload_filename = document.filename or os.path.basename(local_file_path)
+            from urllib.parse import urlsplit
+            if urlsplit(ocr_endpoint).path.rstrip('/').endswith('/v3/ai-process-file'):
+                data['disable_structure'] = 'true'
+            data.pop('image_size', None)
             content_type = document.mime_type or "application/octet-stream"
 
             submit_payload: dict[str, Any] | None = None
@@ -1483,6 +1453,8 @@ def process_document_task(
                 result_response.raise_for_status()
                 final_result = result_response.json()
 
+            from app.services.ocr_result import validate_ocr_result
+            validate_ocr_result(final_result)
             ai_extract_text = extract_ai_text(final_result)
             pages = final_result.get("results", {}).get("pages")
             if not isinstance(pages, list):

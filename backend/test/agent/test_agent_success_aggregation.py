@@ -16,6 +16,7 @@ from app.agent.loop import (
     _chat_with_retry,
     _is_context_length_error,
     _is_report_success,
+    _recover_empty_answer,
     _tool_failed,
 )
 
@@ -110,6 +111,28 @@ def test_aggregate_success_no_reflection_is_tolerated():
     )
     assert ok is True
     assert steps == []
+
+
+@pytest.mark.asyncio
+async def test_empty_answer_recovery_uses_compact_tool_free_evidence():
+    client = MagicMock()
+    response = MagicMock()
+    response.choices = [MagicMock(message=MagicMock(content="มาตรา 28 กำหนดหลักการโอนข้อมูลไปต่างประเทศ"))]
+
+    with patch("app.agent.loop._chat_with_retry", new=AsyncMock(return_value=response)) as chat:
+        text = await _recover_empty_answer(
+            client,
+            "test-model",
+            [{"role": "assistant", "content": "", "tool_calls": [{"id": "call-1"}]}],
+            "มาตรา 28 มีใจความสำคัญคืออะไร",
+            ["Source document: pdpa.pdf\nมาตรา 28 การส่งหรือโอนข้อมูลไปต่างประเทศ"],
+        )
+
+    assert text == "มาตรา 28 กำหนดหลักการโอนข้อมูลไปต่างประเทศ"
+    kwargs = chat.await_args.kwargs
+    assert "tools" not in kwargs
+    assert kwargs["messages"][1]["content"] == "มาตรา 28 มีใจความสำคัญคืออะไร"
+    assert "pdpa.pdf" in kwargs["messages"][0]["content"]
 
 
 @pytest.mark.asyncio

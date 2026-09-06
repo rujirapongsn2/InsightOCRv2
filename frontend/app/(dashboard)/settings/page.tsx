@@ -5,7 +5,7 @@ import { useAuth } from "@/components/auth-provider"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { AlertCircle, Bot, Check, CheckCircle2, ChevronDown, Cloud, Copy, Eye, EyeOff, FileText, KeyRound, Loader2, Package, Pencil, Plus, Settings, ShieldCheck, Trash2 } from "lucide-react"
+import { AlertCircle, Bot, Check, CheckCircle2, ChevronDown, Cloud, Copy, Eye, EyeOff, FileText, KeyRound, Loader2, Package, Pencil, Play, Plus, Settings, ShieldCheck, Trash2 } from "lucide-react"
 import { getApiBaseUrl, getPublicApiBaseUrl } from "@/lib/api"
 import { ApiAccessTokens } from "@/components/settings/ApiAccessTokens"
 import { ApiWorkflowDocs } from "@/components/profile/ApiWorkflowDocs"
@@ -13,6 +13,7 @@ import { AgentSkillDownloads } from "@/components/profile/AgentSkillDownloads"
 import { McpClientGuide } from "@/components/profile/McpClientGuide"
 import {
   type AIProviderSetting,
+  type AIProviderTestResult,
   createAIProvider,
   deleteAIProvider,
   getAIProviderWithKey,
@@ -20,11 +21,35 @@ import {
   setAgentProvider,
   unsetAgentProvider,
   setWorkflowBuilderProvider,
+  testAIProvider,
   unsetWorkflowBuilderProvider,
   updateAIProvider,
 } from "@/lib/ai-settings-api"
 
 type SettingsTab = "ocr" | "oauth" | "google_oauth" | "tokens" | "mcp" | "api" | "skills"
+
+const providerTestStepLabels = {
+  connection: "การเชื่อมต่อ",
+  model_response: "การตอบจากโมเดล",
+  schema_extraction: "การสกัดข้อมูล",
+  tool_calling: "Agent tools",
+} as const
+
+type OcrTestCheck = {
+  id: "softnix_ai_process_file" | "ocr_fallback"
+  label: string
+  status: "passed" | "failed" | "skipped"
+  latency_ms: number
+  message: string
+  text_length: number
+  key_source?: string
+}
+
+type OcrTestReport = {
+  overall_status: "passed" | "partial" | "failed"
+  marker: string
+  checks: OcrTestCheck[]
+}
 
 export default function SettingsPage() {
   const { user } = useAuth()
@@ -48,7 +73,7 @@ export default function SettingsPage() {
   const [ocrFallbackSource, setOcrFallbackSource] = useState("none")
   const [ocrFallbackApiKey, setOcrFallbackApiKey] = useState("")
   const [showOcrFallbackKey, setShowOcrFallbackKey] = useState(false)
-  const [ocrFallbackTesting, setOcrFallbackTesting] = useState(false)
+  const [ocrTestReport, setOcrTestReport] = useState<OcrTestReport | null>(null)
   const [appCommitSha, setAppCommitSha] = useState("")
   const [result, setResult] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -68,6 +93,8 @@ export default function SettingsPage() {
   const [showProviderKey, setShowProviderKey] = useState(false)
   const [savingProvider, setSavingProvider] = useState(false)
   const [savingFeatureProvider, setSavingFeatureProvider] = useState<string | null>(null)
+  const [testingProviderId, setTestingProviderId] = useState<string | null>(null)
+  const [providerTestResults, setProviderTestResults] = useState<Record<string, AIProviderTestResult>>({})
   const [activeTab, setActiveTab] = useState<SettingsTab>("ocr")
   const [publicApiBaseUrl, setPublicApiBaseUrl] = useState("/api/v1")
   const [tokenExample, setTokenExample] = useState("YOUR_API_ACCESS_TOKEN")
@@ -289,6 +316,26 @@ export default function SettingsPage() {
     }
   }
 
+  const handleTestProvider = async (provider: AIProviderSetting) => {
+    const tok = typeof window !== "undefined" ? localStorage.getItem("token") : null
+    if (!tok) return
+    setTestingProviderId(provider.id)
+    setAiProviderError(null)
+    setAiProviderSuccess(null)
+    try {
+      const result = await testAIProvider(tok, provider.id)
+      setProviderTestResults((current) => ({ ...current, [provider.id]: result }))
+      setAiProviderSuccess(result.success
+        ? `${provider.display_name}: การทดสอบ Provider ผ่านแล้ว${result.agent_ready ? " และพร้อมใช้กับ AI Agent" : ""}`
+        : `${provider.display_name}: การทดสอบ Provider ไม่ผ่าน`)
+      await fetchAiProviders()
+    } catch (e: unknown) {
+      setAiProviderError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setTestingProviderId(null)
+    }
+  }
+
   const handleFeatureProviderChange = async (feature: "agent" | "workflow_builder", providerId: string) => {
     const tok = typeof window !== "undefined" ? localStorage.getItem("token") : null
     if (!tok) return
@@ -327,6 +374,7 @@ export default function SettingsPage() {
   }
 
   const handleSaveBackend = async () => {
+    setOcrTestReport(null)
     setResult(null)
     setError(null)
     try {
@@ -378,52 +426,33 @@ export default function SettingsPage() {
     setOcrFallbackEnabled(enabled)
   }
 
-  const handleTestOcrFallback = async () => {
-    setOcrFallbackTesting(true)
-    setResult(null)
-    setError(null)
-    try {
-      const authToken = typeof window !== "undefined" ? localStorage.getItem("token") : null
-      const res = await fetch(`${getApiBaseUrl()}/settings/ocr-fallback/test`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
-        },
-        body: JSON.stringify({ api_key: ocrFallbackApiKey }),
-      })
-      const data = await res.json()
-      if (res.ok) {
-        setResult(`Fallback connection successful (${data.status_code}).`)
-      } else {
-        setError(data.detail || "Fallback API key was rejected.")
-      }
-    } catch (err: unknown) {
-      setError(`Error: ${err instanceof Error ? err.message : String(err)}`)
-    } finally {
-      setOcrFallbackTesting(false)
-    }
-  }
-
   const handleTest = async () => {
     setLoading(true)
     setResult(null)
     setError(null)
+    setOcrTestReport(null)
     try {
       const authToken = typeof window !== "undefined" ? localStorage.getItem("token") : null
-      const res = await fetch(`${getApiBaseUrl()}/settings/test`, {
+      const res = await fetch(`${getApiBaseUrl()}/settings/ocr/test`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           ...(authToken ? { Authorization: `Bearer ${authToken}` } : {})
         },
-        body: JSON.stringify({ url: testEndpoint, token })
+        body: JSON.stringify({
+          ocr_endpoint: ocrEndpoint,
+          api_token: token,
+          ocr_engine: ocrEngine,
+          model,
+          ocr_fallback_enabled: ocrFallbackEnabled,
+          ocr_fallback_api_key: ocrFallbackApiKey,
+        })
       })
       const data = await res.json()
       if (res.ok) {
-        setResult(`Success (${data.status_code}): ${data.body}`)
+        setOcrTestReport(data as OcrTestReport)
       } else {
-        setError(data.detail || `Failed (${data.status_code || res.status})`)
+        setError(data.detail || `OCR verification failed (${res.status})`)
       }
     } catch (err: unknown) {
       setError(`Error: ${err instanceof Error ? err.message : String(err)}`)
@@ -772,19 +801,6 @@ export default function SettingsPage() {
           </div>
 
           <div className="space-y-2">
-            <label className="text-sm font-medium">Test Connection Endpoint</label>
-            <Input
-              value={testEndpoint}
-              onChange={(e) => setTestEndpoint(e.target.value)}
-              placeholder="https://111.223.37.41:9001/me"
-              disabled={isLoadingConfig}
-            />
-            <p className="text-xs text-slate-500">
-              Used to verify API authentication (GET request)
-            </p>
-          </div>
-
-          <div className="space-y-2">
             <label className="text-sm font-medium">Softnix OCR API Token</label>
             <div className="relative">
               <Input
@@ -815,9 +831,39 @@ export default function SettingsPage() {
             </Button>
             <Button type="button" onClick={handleTest} disabled={loading || isLoadingConfig}>
               {loading && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
-              Test Connection
+              Test OCR end-to-end
             </Button>
           </div>
+
+          {ocrTestReport && (
+            <div className="space-y-2 rounded-md border border-slate-200 bg-slate-50 p-3" role="status">
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-sm font-semibold text-slate-800">OCR verification</span>
+                <span className={`rounded-full px-2 py-1 text-xs font-medium ${ocrTestReport.overall_status === "passed" ? "bg-emerald-100 text-emerald-700" : ocrTestReport.overall_status === "partial" ? "bg-amber-100 text-amber-700" : "bg-red-100 text-red-700"}`}>
+                  {ocrTestReport.overall_status === "passed" ? "Ready" : ocrTestReport.overall_status === "partial" ? "Partial" : "Failed"}
+                </span>
+              </div>
+              {ocrTestReport.checks.map((check) => (
+                <div key={check.id} className="flex items-start gap-2 rounded-md bg-white px-3 py-2 text-sm">
+                  {check.status === "passed" ? (
+                    <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600" />
+                  ) : check.status === "skipped" ? (
+                    <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
+                  ) : (
+                    <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-red-600" />
+                  )}
+                  <div className="min-w-0">
+                    <div className="font-medium text-slate-800">
+                      {check.label}
+                      {check.latency_ms > 0 && <span className="ml-2 font-normal text-slate-500">{(check.latency_ms / 1000).toFixed(1)}s</span>}
+                    </div>
+                    <p className={check.status === "failed" ? "text-red-700" : check.status === "skipped" ? "text-amber-700" : "text-slate-600"}>{check.message}</p>
+                  </div>
+                </div>
+              ))}
+              <p className="text-xs text-slate-500">ไฟล์ทดสอบถูกสร้างชั่วคราวและลบอัตโนมัติ ไม่มีข้อมูลเอกสารถูกบันทึกใน Jobs</p>
+            </div>
+          )}
 
           {result && (
             <div className="flex items-start gap-2 text-sm text-green-700 bg-green-50 p-3 rounded-md">
@@ -911,10 +957,6 @@ export default function SettingsPage() {
             <Button type="button" onClick={handleSaveBackend} disabled={isLoadingConfig}>
               Save OCR Fallback Settings
             </Button>
-            <Button type="button" variant="outline" onClick={handleTestOcrFallback} disabled={isLoadingConfig || ocrFallbackTesting}>
-              {ocrFallbackTesting && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
-              Test Key
-            </Button>
           </div>
         </CardContent>
       </Card>
@@ -1004,9 +1046,11 @@ export default function SettingsPage() {
           {!aiProviderLoading && aiProviders.length === 0 && !showProviderForm && (
             <p className="text-sm text-slate-500 py-2">ยังไม่มี AI Provider — กด &quot;เพิ่ม Provider&quot; เพื่อเริ่มต้น</p>
           )}
-          {aiProviders.map((p) => (
-            <div key={p.id} className={`flex items-center justify-between p-3 rounded-lg border ${p.is_agent_provider ? "border-indigo-300 bg-indigo-50" : "border-slate-200 bg-white"}`}>
-              <div className="min-w-0">
+          {aiProviders.map((p) => {
+            const testResult = providerTestResults[p.id]
+            return (
+            <div key={p.id} className={`flex items-start justify-between p-3 rounded-lg border ${p.is_agent_provider ? "border-indigo-300 bg-indigo-50" : "border-slate-200 bg-white"}`}>
+              <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2 flex-wrap">
                   <span className="font-medium text-sm">{p.display_name}</span>
                   {p.is_agent_provider && (
@@ -1026,8 +1070,38 @@ export default function SettingsPage() {
                 </div>
                 <p className="text-xs text-slate-500 mt-0.5 truncate max-w-xs">{p.api_url}</p>
                 <p className="text-xs text-slate-400">model: {p.model || "gpt-4o-mini"}</p>
+                {testResult && (
+                  <details className="mt-2 max-w-xl rounded border border-slate-200 bg-slate-50 px-2 py-1.5 text-xs" open={!testResult.success}>
+                    <summary className={`cursor-pointer font-medium ${testResult.success ? "text-emerald-700" : "text-red-700"}`}>
+                      {testResult.success ? "ทดสอบล่าสุดผ่าน" : "ทดสอบล่าสุดไม่ผ่าน"}
+                      {testResult.agent_ready ? " · พร้อมใช้กับ AI Agent" : ""}
+                    </summary>
+                    <div className="mt-1.5 space-y-1 text-slate-600" aria-live="polite">
+                      {testResult.steps.map((step) => (
+                        <div key={step.key} className="flex gap-2">
+                          <span className={step.status === "passed" ? "text-emerald-700" : step.status === "failed" ? "text-red-700" : "text-amber-700"}>
+                            {step.status === "passed" ? "ผ่าน" : step.status === "failed" ? "ไม่ผ่าน" : step.status === "unavailable" ? "ไม่รองรับ" : "ข้าม"}
+                          </span>
+                          <span className="font-medium text-slate-700">{providerTestStepLabels[step.key]}</span>
+                          <span className="min-w-0">{step.detail}{step.latency_ms ? ` (${step.latency_ms} ms)` : ""}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </details>
+                )}
               </div>
               <div className="flex items-center gap-1 shrink-0 ml-2">
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-7 w-7 p-0 text-indigo-600 hover:text-indigo-700 hover:bg-indigo-50"
+                  onClick={() => handleTestProvider(p)}
+                  disabled={!p.is_active || testingProviderId === p.id}
+                  aria-label={`ทดสอบ ${p.display_name}`}
+                  title={p.is_active ? `ทดสอบ ${p.display_name}` : "เปิดใช้งาน Provider ก่อนทดสอบ"}
+                >
+                  {testingProviderId === p.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
+                </Button>
                 <Button size="sm" variant="ghost" className="h-7 w-7 p-0" onClick={() => openEditForm(p)} aria-label={`แก้ไข ${p.display_name}`} title={`แก้ไข ${p.display_name}`}>
                   <Pencil className="h-3.5 w-3.5" />
                 </Button>
@@ -1036,7 +1110,8 @@ export default function SettingsPage() {
                 </Button>
               </div>
             </div>
-          ))}
+            )
+          })}
 
           {/* Create / Edit form */}
           {showProviderForm && (

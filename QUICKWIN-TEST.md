@@ -1,5 +1,26 @@
 # QUICKWIN TEST
 
+## Softnix OCR v3 compatibility (2026-09-06)
+
+- Audit and endpoint matrix: `docs/softnix-ocr-v3-integration.md`.
+- Verify OCR-only v3 submissions send `disable_structure=true` and await the
+  documented status/result lifecycle.
+- Confirm Jobs and Retry OCR select successful Markdown once per page, retain
+  repeated content on different pages, and reject reported incomplete results.
+- With Structured Output endpoint unset, confirm v3 OCR settings resolve to
+  `/structured-output`, not `/v3/structured-output`.
+- Live synthetic image test passed: Softnix OCR 6.589s, fallback 2.913s;
+  both returned the expected marker. No customer documents were submitted.
+
+## Manual Verification - Softnix OCR Configuration
+
+1. Sign in as an administrator and open `Settings > OCR`.
+2. Configure the Softnix OCR endpoint/token and, when required, enable OCR fallback with its key.
+3. Click `Test OCR end-to-end`.
+4. Confirm the Softnix check reports `Ready` only after `/v3/ai-process-file` reads the generated marker document.
+5. Confirm the fallback check also passes when enabled, or reports `Skipped` with the missing configuration when disabled.
+6. Confirm no test document or Job is retained after the check.
+
 Date: 2026-08-26
 
 ## Manual Verification - Google OAuth Settings Defaults
@@ -1201,3 +1222,73 @@ Date: 2026-06-30
 - A live-provider create/save/run smoke test was not executed: automatic approval
   review rejected sending context to the configured external provider using an
   admin account. Live model behavior still requires authorized testing.
+# Agent DOC reliability verification (2026-09-06)
+
+- Ran `pytest -q -p no:cacheprovider --disable-warnings test/agent test/test_workflow_agent.py`
+  in an isolated backend-image container with repository source mounted read-only
+  and network disabled: 248 passed.
+- Tests cover long document continuation, structured data continuation, wrapped
+  search terms, reviewed values, history repair, silent runtime timeout, artifact
+  storage read-back, PDF conversion failures and Workflow Agent compatibility.
+- Live provider and visual report checks are listed in
+  `docs/agent-doc-reliability.md`; they have not been performed for this patch.
+
+# AI Provider live test (2026-09-06)
+
+- As an administrator, open Settings > AI Provider and save an active provider.
+- Click the play icon on its row. Confirm the compact result reports a passed
+  connection, model response, and InsightDOC schema extraction check.
+- For an OpenAI-compatible provider that supports native function calls, confirm
+  the Agent tools result passes and the provider becomes selectable for AI Agent.
+- For a text-only or completion-messages provider, confirm the core test can pass
+  while Agent tools is marked unavailable; it must not be selectable for AI Agent.
+- Use an invalid key or model name and confirm the result remains on the provider
+  row with an actionable failure message and no secret value is displayed.
+- Automated verification: backend provider-test and suggestion-service tests pass;
+  frontend `npm run build` including TypeScript validation passes.
+
+# Agent DOC provider fallback and stream resilience (2026-09-06)
+
+- Leave the dedicated AI Agent provider unset and configure an active default
+  OpenAI-compatible provider.
+- In a Job, open AI Agent and ask a simple question about its documents. Confirm
+  the response uses the default provider successfully rather than sending a
+  completion-messages payload to it.
+- Ask a request that takes longer than 12 seconds. Confirm the stream remains
+  active while the Agent is planning or awaiting the provider.
+- Temporarily configure an invalid Provider response and confirm the Agent panel
+  displays the backend's exact error instead of replacing it with a generic
+  connection-lost message.
+- Automated verification: `251` Agent, workflow-agent, and provider-resolution
+  tests passed; frontend `npm run build` passed.
+
+# Agent DOC intent-focused answers (2026-09-06)
+
+- Open a Job containing at least two reviewed documents and ask for insights or a comparison.
+- Confirm the answer begins with the requested business conclusion and does not narrate
+  OCR, extraction, reviewed status, internal field names, offsets, or Jobs Process.
+- Confirm accepted values are favored, structured values are used for exact numeric
+  comparisons, and unclear source text is described only as a reading uncertainty.
+- Confirm every material finding cites its source filename and visible section or field.
+- Confirm important findings may use compact colored labels: สำคัญ, ควรตรวจสอบ,
+  สอดคล้อง, and ข้อมูลประกอบ; ordinary sentences should remain unlabelled.
+
+# Agent DOC live plan and Unicode artifact download (2026-09-06)
+
+- Ask Agent DOC to perform a multi-step task and create a PDF with a Thai filename.
+- While the task is running, confirm exactly one live plan card is visible even after
+  background conversation refreshes.
+- When the task completes, confirm that same plan remains once as persisted history.
+- Confirm an assistant response containing `outputs/รายงานวิเคราะห์ความเสี่ยงสัญญา.pdf`
+  displays a download button and downloads the verified artifact.
+- Confirm English filenames and nested paths under `outputs/` still display download buttons.
+
+# Agent DOC empty provider response recovery (2026-09-06)
+
+- Ask a focused document question that causes one successful search tool call.
+- Confirm the run never ends with an empty assistant bubble or a successful status with
+  no answer.
+- If the provider returns empty content after the tool result, confirm Agent DOC retries
+  once with compact evidence and displays the recovered answer with source filenames.
+- If compact recovery is also empty, confirm the run reports failure and displays a
+  non-empty evidence/diagnostic response instead of false success.

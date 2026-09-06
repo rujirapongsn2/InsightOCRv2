@@ -193,9 +193,11 @@ def _extract_rows_for_xlsx(path: str, data: bytes) -> tuple[list[list[str]], str
             from pypdf import PdfReader
             reader = PdfReader(io.BytesIO(data))
             text = "\n".join(page.extract_text() or "" for page in reader.pages)
+            if not text.strip():
+                raise ValueError("PDF has no extractable text; OCR is required before conversion")
             return _rows_from_text(text), "Converted PDF text to rows"
         except Exception as e:
-            return [["PDF conversion error"], [str(e)]], "PDF text extraction failed"
+            raise ValueError(f"PDF text extraction failed: {e}") from e
     return _rows_from_text(data.decode("utf-8", errors="replace")), "Converted file text to rows"
 
 
@@ -467,11 +469,10 @@ async def _write_file_handler(args: dict, context) -> dict:
     if not content and not content_base64:
         return {"error": "content or content_base64 is required"}
 
-    # Scope writes to outputs/ by default for safety
-    path = _workflow_output_path(context, path)
-
     try:
         path = _normalize_job_path(str(context.job_id), path)
+        # Normalize before prefixing so another Job's path cannot be disguised.
+        path = _workflow_output_path(context, _coerce_outputs_path(path))
         scoped = _resolve_path(str(context.job_id), path)
     except ValueError as e:
         return {"error": str(e)}

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
 import re
 import unicodedata
 
@@ -27,12 +28,22 @@ def _search_snippets(text: str | None, normalized_query: str, limit: int = 3) ->
         return []
     compact_query = _compact_search_text(normalized_query)
     snippets: list[str] = []
-    for raw_line in str(text).splitlines():
-        line = " ".join(raw_line.split()).strip()
-        if line and compact_query in _compact_search_text(line):
-            snippets.append(line[:600])
-            if len(snippets) >= limit:
-                break
+    normalized_chars = []
+    positions = []
+    for position, char in enumerate(str(text)):
+        for normalized_char in _compact_search_text(char):
+            normalized_chars.append(normalized_char)
+            positions.append(position)
+    compact_text = "".join(normalized_chars)
+    cursor = 0
+    while len(snippets) < limit:
+        match = compact_text.find(compact_query, cursor)
+        if match < 0:
+            break
+        start = positions[match]
+        end = positions[match + len(compact_query) - 1] + 1
+        snippets.append(" ".join(text[max(0, start - 150):end + 350].split()))
+        cursor = match + len(compact_query)
     return snippets
 
 
@@ -47,6 +58,7 @@ async def _list_documents_handler(args: dict, context) -> dict:
          "page_count": d.page_count, "extraction_confidence": d.extraction_confidence,
          "has_extracted_data": d.extracted_data is not None,
          "has_reviewed_data": d.reviewed_data is not None,
+         "has_ocr_text": bool(d.ocr_text), "ocr_text_chars": len(d.ocr_text or ""),
          "review_decision": d.review_decision}
         for d in docs
     ]
@@ -59,14 +71,41 @@ async def _get_document_detail_handler(args: dict, context) -> dict:
     ).first()
     if not doc:
         return {"error": f"Document {args['doc_id']} not found"}
-    return {
+    text = doc.ocr_text or ""
+    offset = min(len(text), max(0, int(args.get("offset", 0))))
+    limit = min(6000, max(1, int(args.get("limit", 4000))))
+    end = min(len(text), offset + limit)
+    # Put coverage before data so model-facing truncation cannot hide it.
+    result = {
         "id": str(doc.id), "filename": doc.filename, "status": doc.status,
         "page_count": doc.page_count,
-        "ocr_text": doc.ocr_text[:5000] if doc.ocr_text else None,
-        "extracted_data": doc.extracted_data, "reviewed_data": doc.reviewed_data,
+        "text_range": {"start": offset, "end": end, "total_chars": len(text)},
+        "next_offset": end if end < len(text) else None,
+        "text_complete": offset == 0 and end == len(text),
+        "ocr_text": text[offset:end] if text else None,
         "extraction_confidence": doc.extraction_confidence,
         "review_decision": doc.review_decision,
     }
+    data = doc.reviewed_data if doc.reviewed_data is not None else doc.extracted_data
+    source = "reviewed_data" if doc.reviewed_data is not None else "extracted_data"
+    result["preferred_data_source"] = source
+    # Large structured payloads have a separate cursor; never silently drop rows.
+    serialized = json.dumps(data, ensure_ascii=False, default=str)
+    data_offset = max(0, int(args.get("data_offset", 0)))
+    if len(serialized) <= 3000:
+        result[source] = data
+        other_source = "extracted_data" if source == "reviewed_data" else "reviewed_data"
+        other_data = getattr(doc, other_source)
+        if len(json.dumps(other_data, ensure_ascii=False, default=str)) <= 1000:
+            result[other_source] = other_data
+        result["next_data_offset"] = None
+    else:
+        data_offset = min(len(serialized), data_offset)
+        data_end = min(len(serialized), data_offset + 3000)
+        result["structured_data_json_excerpt"] = serialized[data_offset:data_end]
+        result["structured_data_range"] = {"start": data_offset, "end": data_end, "total_chars": len(serialized)}
+        result["next_data_offset"] = data_end if data_end < len(serialized) else None
+    return result
 
 
 async def _search_documents_handler(args: dict, context) -> dict:
@@ -84,6 +123,10 @@ async def _search_documents_handler(args: dict, context) -> dict:
             and d.extracted_data
             and compact_query in _compact_search_text(d.extracted_data)
         )
+        reviewed_match = bool(
+            compact_query and isinstance(d.reviewed_data, (dict, list, str))
+            and compact_query in _compact_search_text(d.reviewed_data)
+        )
         ocr_match = bool(snippets)
         if filename_match:
             score = 3
@@ -91,6 +134,9 @@ async def _search_documents_handler(args: dict, context) -> dict:
         if extracted_match:
             score = max(score, 2)
             matched_sources.append("extracted_data")
+        if reviewed_match:
+            score = max(score, 2)
+            matched_sources.append("reviewed_data")
         if ocr_match:
             score = max(score, 1)
             matched_sources.append("ocr_text")
@@ -100,7 +146,9 @@ async def _search_documents_handler(args: dict, context) -> dict:
                 "matched_sources": matched_sources, "snippets": snippets,
             })
     results.sort(key=lambda x: x["score"], reverse=True)
-    return {"query": query, "count": len(results), "documents": results[:10]}
+    offset = max(0, int(args.get("offset", 0)))
+    end = min(len(results), offset + 10)
+    return {"query": query, "count": len(results), "next_offset": end if end < len(results) else None, "documents": results[offset:end]}
 
 
 async def _compare_documents_handler(args: dict, context) -> dict:
@@ -118,17 +166,24 @@ async def _compare_documents_handler(args: dict, context) -> dict:
             return {f"[{i}]": v for i, v in enumerate(data)}
         return {"value": data} if data is not None else {}
 
-    d1 = _normalize(doc1.reviewed_data or doc1.extracted_data or {})
-    d2 = _normalize(doc2.reviewed_data or doc2.extracted_data or {})
+    d1 = _normalize(doc1.reviewed_data if doc1.reviewed_data is not None else doc1.extracted_data)
+    d2 = _normalize(doc2.reviewed_data if doc2.reviewed_data is not None else doc2.extracted_data)
     diff = {}
-    for k in set(d1.keys()) | set(d2.keys()):
+    for k in sorted(set(d1.keys()) | set(d2.keys())):
         if k not in d1:
             diff[k] = {"doc1": None, "doc2": d2[k], "status": "added"}
         elif k not in d2:
             diff[k] = {"doc1": d1[k], "doc2": None, "status": "removed"}
         elif d1[k] != d2[k]:
             diff[k] = {"doc1": d1[k], "doc2": d2[k], "status": "changed"}
-    return {"doc1": doc1.filename, "doc2": doc2.filename, "differences": diff}
+    return {
+        "doc1": doc1.filename, "doc2": doc2.filename,
+        "comparison_scope": "structured_fields_only",
+        "structured_data_available": {"doc1": bool(d1), "doc2": bool(d2)},
+        "ocr_text_equal": (doc1.ocr_text == doc2.ocr_text) if doc1.ocr_text and doc2.ocr_text else None,
+        "guidance": "An empty field diff does not establish document equivalence. Read both documents with get_document_detail and follow next_offset to compare clauses and cite character ranges.",
+        "differences": diff,
+    }
 
 
 async def _update_document_field_handler(args: dict, context) -> dict:
@@ -254,15 +309,20 @@ tool_registry.register(ToolDef(
 
 tool_registry.register(ToolDef(
     name="get_document_detail", category="document",
-    description="Get full details of a document including OCR text and extracted/reviewed data.",
-    parameters_schema={"type": "object", "properties": {"doc_id": {"type": "string", "description": "Document UUID"}}, "required": ["doc_id"]},
+    description="Read a document with explicit coverage and continuation cursors. Follow next_offset for remaining OCR text and next_data_offset for large structured JSON. Prefer reviewed data; cite filename and text_range. Never treat a partial read as the full document.",
+    parameters_schema={"type": "object", "properties": {
+        "doc_id": {"type": "string", "description": "Document UUID"},
+        "offset": {"type": "integer", "minimum": 0, "default": 0},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 6000, "default": 4000},
+        "data_offset": {"type": "integer", "minimum": 0, "default": 0},
+    }, "required": ["doc_id"]},
     handler=_get_document_detail_handler,
 ))
 
 tool_registry.register(ToolDef(
     name="search_documents", category="document",
     description="Search documents by keyword in filename, OCR text, or extracted data. Use one focused query per concept; do not repeat equivalent searches when a useful result is already available.",
-    parameters_schema={"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
+    parameters_schema={"type": "object", "properties": {"query": {"type": "string"}, "offset": {"type": "integer", "minimum": 0, "default": 0}}, "required": ["query"]},
     handler=_search_documents_handler,
 ))
 

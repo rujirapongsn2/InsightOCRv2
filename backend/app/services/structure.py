@@ -1,6 +1,7 @@
 import requests
 import json
 import logging
+from urllib.parse import urlsplit
 from sqlalchemy.orm import Session
 from app.models.setting import Setting
 from app.services.tls import get_verify_ssl
@@ -36,8 +37,11 @@ def extract_structure(context: str, schema_json: str, db: Session, prompt: str =
     api_key = setting.api_token
     verify_ssl = get_verify_ssl(setting, "structured extraction provider requests")
     structure_api_url = setting.structured_output_endpoint
-    if not structure_api_url and setting.api_endpoint:
-        structure_api_url = setting.api_endpoint.replace('/ai-process-file', '/structured-output')
+    if not structure_api_url:
+        endpoint = getattr(setting, 'ocr_endpoint', None) or setting.api_endpoint
+        if endpoint:
+            parsed = urlsplit(endpoint)
+            structure_api_url = f'{parsed.scheme}://{parsed.netloc}/structured-output'
     if not structure_api_url:
         raise ValueError("Structured Output Endpoint and API Token are required. Please configure them in Settings.")
 

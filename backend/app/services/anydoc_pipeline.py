@@ -215,35 +215,10 @@ def _cleanup_rendered_page(image_path: str) -> None:
 
 
 def _extract_text(result: dict[str, Any]) -> str:
-    parts: list[str] = []
+    from app.services.ocr_result import extract_ocr_text
+    return extract_ocr_text(result)
 
-    def append(value: Any) -> None:
-        if isinstance(value, str) and value.strip() and value.strip() not in parts:
-            parts.append(value.strip())
 
-    append(result.get("ocr_text"))
-    ai_processing = result.get("ai_processing")
-    if isinstance(ai_processing, dict):
-        for key in ("content", "text", "output", "result"):
-            append(ai_processing.get(key))
-    elif isinstance(ai_processing, str):
-        append(ai_processing)
-
-    pages = result.get("results", {}).get("pages") if isinstance(result.get("results"), dict) else None
-    if not isinstance(pages, list):
-        pages = result.get("pages")
-    if isinstance(pages, list):
-        for page in pages:
-            if not isinstance(page, dict):
-                continue
-            append(page.get("ocr_text"))
-            page_ai = page.get("ai_processing")
-            if isinstance(page_ai, dict):
-                for key in ("content", "text", "output", "result"):
-                    append(page_ai.get(key))
-            elif isinstance(page_ai, str):
-                append(page_ai)
-    return "\n\n".join(parts).strip()
 
 
 def _merge_page_texts(

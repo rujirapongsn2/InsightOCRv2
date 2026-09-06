@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Literal, Optional
 from uuid import UUID
 from datetime import datetime
 from pydantic import BaseModel, Field
@@ -74,6 +74,28 @@ class AISettingsPublic(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class AIProviderTestStep(BaseModel):
+    """A single observable check performed against a saved AI provider."""
+
+    key: Literal["connection", "model_response", "schema_extraction", "tool_calling"]
+    status: Literal["passed", "failed", "unavailable", "skipped"]
+    detail: str
+    latency_ms: Optional[int] = None
+
+
+class AIProviderTestResult(BaseModel):
+    """Result of a live AI provider test initiated by an administrator."""
+
+    provider_id: UUID
+    provider: str
+    provider_type: str
+    model: Optional[str]
+    success: bool
+    agent_ready: bool
+    checked_at: datetime
+    steps: list[AIProviderTestStep]
 
 
 # Schema for field suggestion request

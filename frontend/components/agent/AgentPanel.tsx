@@ -294,7 +294,7 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
             let buffer = ""
             let finalText = ""
             const newEvents: AgentEvent[] = []
-            let receivedDone = false
+            let receivedTerminalEvent = false
 
             while (true) {
                 const { done, value } = await reader.read()
@@ -346,7 +346,7 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
                                 setStreamText(finalText)
                                 break
                             case "done":
-                                receivedDone = true
+                                receivedTerminalEvent = true
                                 setStreaming(false)
                                 setThinkingIteration(null)
                                 if (finalText) {
@@ -366,6 +366,7 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
                                 reloadActiveMessages().then(() => setEvents([]))
                                 break
                             case "error":
+                                receivedTerminalEvent = true
                                 setError(evt.message || "Agent error")
                                 setStreaming(false)
                                 break
@@ -375,7 +376,7 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
             }
             // Stream closed without a "done" event — backend likely threw an
             // unhandled exception and dropped the connection.
-            if (!receivedDone) {
+            if (!receivedTerminalEvent) {
                 setStreaming(false)
                 setThinkingIteration(null)
                 setError("การเชื่อมต่อขาดหาย — กรุณาลองส่งคำถามใหม่อีกครั้ง")
@@ -473,6 +474,7 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
 
     const renderPersistedMessage = (msg: Message) => {
         if (msg.role === "tool") return null
+        if (msg.role === "assistant" && !msg.content?.trim() && !(msg.tool_calls?.length)) return null
         if (msg.role === "plan") {
             const tr = msg.tool_result || {}
             return renderPlanCard(tr.steps || [], tr.reflection || null, false, msg.id)
@@ -505,6 +507,19 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
             />
         )
     }
+
+    const latestUserMessageIndex = messages.reduce(
+        (latest, message, index) => message.role === "user" ? index : latest,
+        -1,
+    )
+    const currentRunPersistedPlanIndex = streaming && planSteps.length > 0
+        ? messages.reduce(
+            (latest, message, index) => (
+                message.role === "plan" && index > latestUserMessageIndex ? index : latest
+            ),
+            -1,
+        )
+        : -1
 
     const showStartComposer = !loading && messages.length === 0 && !streaming
     const suggestionPrompts = [
@@ -835,7 +850,9 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
                         </div>
                     </div>
                 )}
-                {messages.map(msg => renderPersistedMessage(msg))}
+                {messages.map((msg, index) => (
+                    index === currentRunPersistedPlanIndex ? null : renderPersistedMessage(msg)
+                ))}
                 {streaming && planSteps.length > 0 && renderPlanCard(planSteps, reflection, true, "live-plan")}
                 {events.filter(e => e.type === "tool_call").length > 0 && (
                     <AgentToolCalls

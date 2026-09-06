@@ -140,17 +140,11 @@ def _build_agent_llm_config(db: Session, conv) -> dict:
             "source": "ai_settings_agent_provider",
         }
 
-    # Backward-compatible fallback for environments that only configured the
-    # older schema-suggestion provider. This is less capable than the dedicated
-    # Agent provider because it may not support native tool calling.
+    # Fall back to the active default while preserving its actual provider
+    # contract. A default OpenAI-compatible provider must never be sent the
+    # legacy completion-messages payload.
     setting = _get_default_agent_ai_settings(db)
-    return {
-        "provider": "completion_messages",
-        "apiUrl": setting.api_url,
-        "apiKey": setting.api_key,
-        "model": getattr(setting, "model", None) or setting.name,
-        "source": "fallback_ai_settings",
-    }
+    return _ai_settings_to_config(setting, "fallback_ai_settings")
 
 
 @router.post("/conversations", status_code=201)

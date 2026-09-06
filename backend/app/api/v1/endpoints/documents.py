@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 from typing import List, Any, Optional, Literal
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
+from starlette.concurrency import run_in_threadpool
 from app.models.user import User
 from sqlalchemy.orm import Session, defer
 from app.api import deps
@@ -634,23 +635,13 @@ async def extract_ocr_for_suggestion(
         # Get local path for OCR processing (downloads if remote)
         with storage.get_local_path(file_key) as local_file_path:
             # Process OCR
-            ocr_result = process_ocr(local_file_path, db, filename=file.filename, mime_type=file.content_type)
+            ocr_result = await run_in_threadpool(
+                process_ocr, local_file_path, db,
+                filename=file.filename, mime_type=file.content_type,
+            )
 
-            # Extract text content
-            ocr_content = ""
-            if ocr_result.get('status') == 'success':
-                pages = ocr_result.get('results', {}).get('pages', [])
-                for page in pages:
-                    page_num = page.get('page_number')
-                    ocr_content += f"--- Page {page_num} ---\n"
-                    
-                    # Try AI processing first
-                    ai_processing = page.get('ai_processing', {})
-                    if ai_processing.get('success') and ai_processing.get('content'):
-                        ocr_content += ai_processing.get('content', '') + "\n\n"
-                    # Fallback to raw OCR text if AI processing failed or empty
-                    elif page.get('ocr_text'):
-                        ocr_content += page.get('ocr_text', '') + "\n\n"
+            from app.services.ocr_result import extract_ocr_text
+            ocr_content = extract_ocr_text(ocr_result)
 
             if not ocr_content:
                 raise HTTPException(

@@ -57,7 +57,9 @@ safeRenderer.image = ({ href, title, text }) => {
 }
 
 
-const OUTPUT_FILE_RE = /(?:jobs\/[0-9a-f-]+\/)?outputs\/[A-Za-z0-9][A-Za-z0-9._ -]*\.(?:docx|xlsx|pptx|pdf|csv|json|html|zip)/gi
+// Stop at Markdown/HTML delimiters, but allow Unicode names, spaces, and
+// workflow subdirectories inside outputs/.
+const OUTPUT_FILE_RE = /(?:jobs\/[0-9a-f-]+\/)?outputs\/[^\n\r\t`<>"|?*]+?\.(?:docx|xlsx|pptx|pdf|csv|json|html|zip)/giu
 const GENERATED_FILE_RE = /\b[A-Za-z0-9][A-Za-z0-9._ -]*\.(?:docx|xlsx|pptx|csv|json|html|zip)\b/gi
 
 function extractDownloadableFiles(text: string | null): string[] {
@@ -80,11 +82,28 @@ function renderMarkdown(text: string): string {
     if (!text) return ""
     try {
         const html = marked.parse(text, { renderer: safeRenderer }) as string
-        return html
+        return enhanceSemanticLabels(html)
     } catch {
         // Fallback: basic escaping + newlines
         return escapeHtml(text).replace(/\n/g, "<br/>")
     }
+}
+
+const SEMANTIC_LABEL_CLASS: Record<string, string> = {
+    "สำคัญ": "critical",
+    "ควรตรวจสอบ": "warning",
+    "สอดคล้อง": "success",
+    "ข้อมูลประกอบ": "info",
+}
+
+function enhanceSemanticLabels(html: string): string {
+    return html.replace(
+        /<strong>\[(สำคัญ|ควรตรวจสอบ|สอดคล้อง|ข้อมูลประกอบ)\]<\/strong>/g,
+        (_match, label: string) => {
+            const severity = SEMANTIC_LABEL_CLASS[label]
+            return `<span class="agent-severity agent-severity-${severity}">${label}</span>`
+        },
+    )
 }
 
 interface AgentMessageProps {

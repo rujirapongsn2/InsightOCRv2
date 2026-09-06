@@ -127,6 +127,45 @@ p, span, li, td, th, label, a {
   border-radius: 0 4px 4px 0;
 }
 
+.agent-markdown .agent-severity {
+  display: inline-flex;
+  align-items: center;
+  min-height: 1.375rem;
+  margin-right: 0.25rem;
+  padding: 0.125rem 0.5rem;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  line-height: 1;
+  vertical-align: 0.0625rem;
+  white-space: nowrap;
+}
+
+.agent-markdown .agent-severity-critical {
+  color: #991B1B;
+  background: #FEF2F2;
+  border-color: #FECACA;
+}
+
+.agent-markdown .agent-severity-warning {
+  color: #92400E;
+  background: #FFFBEB;
+  border-color: #FDE68A;
+}
+
+.agent-markdown .agent-severity-success {
+  color: #166534;
+  background: #F0FDF4;
+  border-color: #BBF7D0;
+}
+
+.agent-markdown .agent-severity-info {
+  color: #1E40AF;
+  background: #EFF6FF;
+  border-color: #BFDBFE;
+}
+
 .agent-markdown table {
   width: 100%;
   border-collapse: collapse;

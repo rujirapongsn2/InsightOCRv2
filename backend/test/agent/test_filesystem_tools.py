@@ -7,6 +7,9 @@ import uuid
 import base64
 import io
 import zipfile
+import tempfile
+from contextlib import contextmanager
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -26,6 +29,25 @@ from app.agent.tools.filesystem_tools import (
 )
 
 pytestmark = pytest.mark.asyncio
+
+
+def _persist_uploads(mock_storage):
+    files = {}
+    storage = mock_storage.return_value
+
+    def upload(file_obj, path, **kwargs):
+        files[path] = file_obj.read()
+
+    @contextmanager
+    def local_path(path):
+        with tempfile.TemporaryDirectory() as directory:
+            local = Path(directory) / "artifact"
+            local.write_bytes(files[path])
+            yield str(local)
+
+    storage.upload_file.side_effect = upload
+    storage.exists.side_effect = lambda path: path in files
+    storage.get_local_path.side_effect = local_path
 
 
 def _make_context(user_id=None, job_id=None):
@@ -145,6 +167,7 @@ class TestWriteFile:
     async def test_write_auto_scopes_to_outputs(self):
         ctx = _make_context()
         with patch("app.agent.tools.filesystem_tools.get_storage_service") as mock_storage:
+            _persist_uploads(mock_storage)
             result = await _write_file_handler({"path": "report.txt", "content": "data"}, ctx)
         assert result["ok"] is True
         assert result["path"] == "outputs/report.txt"
@@ -154,6 +177,7 @@ class TestWriteFile:
     async def test_write_text_scoped_input_returns_relative_path(self):
         ctx = _make_context()
         with patch("app.agent.tools.filesystem_tools.get_storage_service") as mock_storage:
+            _persist_uploads(mock_storage)
             result = await _write_file_handler(
                 {"path": f"jobs/{ctx.job_id}/outputs/risk_comparison_table.md", "content": "table"},
                 ctx,
@@ -165,6 +189,7 @@ class TestWriteFile:
     async def test_write_explicit_subdirectory(self):
         ctx = _make_context()
         with patch("app.agent.tools.filesystem_tools.get_storage_service") as mock_storage:
+            _persist_uploads(mock_storage)
             result = await _write_file_handler(
                 {"path": "outputs/summary/report.json", "content": '{"ok": true}'},
                 ctx,
@@ -181,6 +206,7 @@ class TestWriteFile:
         for ext in [".txt", ".csv", ".json", ".md", ".html", ".py", ".report"]:
             ctx = _make_context()
             with patch("app.agent.tools.filesystem_tools.get_storage_service") as mock_storage:
+                _persist_uploads(mock_storage)
                 result = await _write_file_handler(
                     {"path": f"outputs/file{ext}", "content": "data"},
                     ctx,
@@ -202,6 +228,7 @@ class TestWriteFile:
         ctx = _make_context()
         encoded = base64.b64encode(_minimal_xlsx_bytes()).decode("ascii")
         with patch("app.agent.tools.filesystem_tools.get_storage_service") as mock_storage:
+            _persist_uploads(mock_storage)
             result = await _write_file_handler({"path": "outputs/good.xlsx", "content_base64": encoded}, ctx)
         assert result["ok"] is True
         assert result["mime_type"] == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -352,7 +379,7 @@ class TestDeleteFile:
     async def test_delete_success(self):
         ctx = _make_context()
         with patch("app.agent.tools.filesystem_tools.get_storage_service") as mock_storage:
-            mock_storage.return_value.exists.return_value = True
+            mock_storage.return_value.exists.side_effect = [True, False]
             result = await _delete_file_handler({"path": "outputs/old.txt"}, ctx)
         assert result["ok"] is True
 

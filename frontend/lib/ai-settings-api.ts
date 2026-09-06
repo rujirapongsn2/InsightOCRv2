@@ -19,6 +19,26 @@ export interface AIProviderSetting {
   updated_at: string | null
 }
 
+export type AIProviderTestStatus = "passed" | "failed" | "unavailable" | "skipped"
+
+export interface AIProviderTestStep {
+  key: "connection" | "model_response" | "schema_extraction" | "tool_calling"
+  status: AIProviderTestStatus
+  detail: string
+  latency_ms?: number | null
+}
+
+export interface AIProviderTestResult {
+  provider_id: string
+  provider: string
+  provider_type: string
+  model: string | null
+  success: boolean
+  agent_ready: boolean
+  checked_at: string
+  steps: AIProviderTestStep[]
+}
+
 export interface AIProviderCreate {
   name: string
   display_name: string
@@ -105,6 +125,16 @@ export async function verifyAIProviderAgentTools(token: string, id: string): Pro
   })
   const body = await res.json()
   if (!res.ok) throw new Error(body.detail || "Failed to verify Agent tools")
+  return body
+}
+
+export async function testAIProvider(token: string, id: string): Promise<AIProviderTestResult> {
+  const res = await fetch(`${getApiBaseUrl()}/ai-settings/${id}/test`, {
+    method: "POST",
+    headers: authHeaders(token),
+  })
+  const body = await res.json().catch(() => ({}))
+  if (!res.ok) throw new Error(body.detail || "Failed to test provider")
   return body
 }
 
