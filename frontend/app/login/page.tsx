@@ -1,12 +1,29 @@
 "use client"
 
 import { useState } from "react"
+import Image from "next/image"
 import { Logo } from "@/components/logo"
 import { useAuth } from "@/components/auth-provider"
 import { getApiBaseUrl } from "@/lib/api"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { AlertCircle, ShieldCheck, Cpu, Zap } from "lucide-react"
+
+function SolutionBySoftnix() {
+    return (
+        <div className="flex items-center gap-2" aria-label="Solution by Softnix">
+            <span className="text-[11px] font-medium tracking-wide text-[#9BA8B4]">Solution by</span>
+            <Image
+                src="/logo.png"
+                alt="Softnix"
+                width={88}
+                height={50}
+                className="h-8 w-[72px] object-contain object-center"
+                priority
+            />
+        </div>
+    )
+}
 
 export default function LoginPage() {
     const { login } = useAuth()
@@ -57,7 +74,10 @@ export default function LoginPage() {
             {/* ── Left panel — Brand hero ──────────────────────────── */}
             <div className="hidden lg:flex lg:w-1/2 xl:w-3/5 flex-col justify-between p-12 bg-white border-r border-[#E2E8F0]">
                 {/* Top wordmark */}
-                <Logo className="text-4xl" />
+                <div className="space-y-2">
+                    <Logo className="text-4xl" />
+                    <SolutionBySoftnix />
+                </div>
 
                 {/* Center copy */}
                 <div className="space-y-8 max-w-lg">
@@ -106,8 +126,9 @@ export default function LoginPage() {
                 <div className="w-full max-w-sm space-y-8">
 
                     {/* Mobile-only logo */}
-                    <div className="lg:hidden">
+                    <div className="lg:hidden space-y-2">
                         <Logo className="text-3xl" />
+                        <SolutionBySoftnix />
                     </div>
 
                     <div className="space-y-1">
