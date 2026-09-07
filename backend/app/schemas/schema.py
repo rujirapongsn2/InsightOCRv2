@@ -150,6 +150,7 @@ class DocumentSchema(DocumentSchemaBase):
     created_by: Optional[UUID] = None
     created_by_email: Optional[str] = None
     created_by_name: Optional[str] = None
+    can_manage: bool = False
     created_at: datetime
     updated_at: Optional[datetime] = None
 

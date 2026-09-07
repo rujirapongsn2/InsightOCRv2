@@ -2,9 +2,10 @@ import logging
 import os
 import tempfile
 import json
-from typing import List, Any
+from typing import List, Any, Literal
 from urllib.parse import urlparse, urlencode
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, status
+from uuid import UUID
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Response, status
 from pydantic import BaseModel
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -35,6 +36,9 @@ from app.utils.activity_logger import log_activity, Actions
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+SCHEMA_PACKAGE_FORMAT = "insightdoc.schema-package"
+SCHEMA_PACKAGE_VERSION = 1
 
 
 def _validate_suggestion_upload(file: UploadFile) -> None:
@@ -105,18 +109,24 @@ def _normalize_role(role: str | None) -> str:
     return "manager" if role == "documents_admin" else role
 
 def _ensure_can_manage(schema: DocumentSchema, current_user: User) -> None:
-    normalized = _normalize_role(current_user.role)
-    is_admin = current_user.is_superuser or normalized == "admin"
-    if is_admin:
-        return
-    if normalized == "manager" and schema.created_by == current_user.id:
-        return
-    if can_manage_group_resource(current_user, schema.creator):
+    if _can_manage_schema(schema, current_user):
         return
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
         detail="Insufficient permissions to manage this schema.",
     )
+
+
+def _can_manage_schema(schema: DocumentSchema, current_user: User) -> bool:
+    normalized = _normalize_role(current_user.role)
+    is_admin = current_user.is_superuser or normalized == "admin"
+    if is_admin:
+        return True
+    if normalized == "manager" and schema.created_by == current_user.id:
+        return True
+    if can_manage_group_resource(current_user, schema.creator):
+        return True
+    return False
 
 
 def _ensure_can_create_schema(current_user: User) -> None:
@@ -181,6 +191,7 @@ def read_schemas(
         if schema.creator:
             schema.created_by_email = schema.creator.email
             schema.created_by_name = schema.creator.full_name
+        schema.can_manage = _can_manage_schema(schema, current_user)
 
     return schemas
 
@@ -406,6 +417,180 @@ def _field_type_to_json_schema(field_type: str | None) -> str:
 
 class ImportSchemaRequest(BaseModel):
     json_schema: str  # Raw JSON text from user
+
+
+class SchemaExportRequest(BaseModel):
+    schema_ids: List[UUID]
+
+
+def _schema_id_keys(schema_ids: list[UUID]) -> list[str]:
+    """Normalize UUID request values to the string keys used by the lookup map."""
+    return [str(schema_id) for schema_id in schema_ids]
+
+
+def _extract_import_records(payload: Any) -> list[Any]:
+    """Validate the package envelope and return its schema records."""
+    if not isinstance(payload, dict):
+        raise ValueError("Schema package must be a JSON object")
+    if payload.get("format") is not None:
+        if payload.get("format") != SCHEMA_PACKAGE_FORMAT:
+            raise ValueError("Unsupported schema package format")
+        if payload.get("version") != SCHEMA_PACKAGE_VERSION:
+            raise ValueError("Unsupported schema package version")
+        records = payload.get("schemas")
+    elif payload.get("name") and "schemas" not in payload:
+        # Keep accepting a single schema JSON for backwards compatibility.
+        records = [payload]
+    else:
+        raise ValueError("Package must contain a supported format and schemas array")
+    if not isinstance(records, list) or not records:
+        raise ValueError("Package must contain a non-empty schemas array")
+    return records
+
+
+def _schema_export_record(schema: DocumentSchema) -> dict[str, Any]:
+    """Return only portable schema configuration, never database ownership IDs."""
+    return {
+        "name": schema.name,
+        "description": schema.description,
+        "document_type": schema.document_type,
+        "ocr_engine": schema.ocr_engine,
+        "extraction_profile": schema.extraction_profile or "anydoc_hybrid",
+        "fields": schema.fields or [],
+    }
+
+
+def _unique_import_name(db: Session, name: str, reserved: set[str]) -> str:
+    """Avoid silently overwriting a schema already present in the target system."""
+    base = name.strip()
+    candidate = base
+    suffix = 2
+    while candidate in reserved or db.query(DocumentSchema.id).filter(DocumentSchema.name == candidate).first():
+        candidate = f"{base} (Imported {suffix})"
+        suffix += 1
+    reserved.add(candidate)
+    return candidate
+
+
+def _normalize_import_schema(raw: Any) -> dict[str, Any]:
+    """Validate a portable schema while retaining supported UI metadata in fields."""
+    if not isinstance(raw, dict):
+        raise ValueError("Each imported schema must be an object")
+
+    # Validate all server-owned schema constraints, including locator and array config.
+    candidate = DocumentSchemaCreate.model_validate({
+        "name": raw.get("name"),
+        "description": raw.get("description"),
+        "document_type": raw.get("document_type"),
+        "ocr_engine": raw.get("ocr_engine") or "tesseract",
+        "extraction_profile": raw.get("extraction_profile") or "anydoc_hybrid",
+        "fields": raw.get("fields") or [],
+    })
+    fields = []
+    for raw_field, validated_field in zip(raw.get("fields") or [], candidate.fields):
+        # `id` is a local UI key and must not travel between environments.
+        field = {key: value for key, value in raw_field.items() if key != "id"}
+        field.update(validated_field.model_dump(exclude_none=True))
+        fields.append(field)
+    name = candidate.name.strip()
+    if not name:
+        raise ValueError("Schema name cannot be empty")
+    return {
+        "name": name,
+        "description": candidate.description,
+        "document_type": candidate.document_type,
+        "ocr_engine": candidate.ocr_engine or "tesseract",
+        "extraction_profile": candidate.extraction_profile,
+        "fields": fields,
+    }
+
+
+@router.post("/export")
+def export_schemas(
+    payload: SchemaExportRequest,
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_active_user),
+) -> Response:
+    """Download one portable JSON package containing the selected schemas."""
+    if not payload.schema_ids:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Select at least one schema")
+
+    schemas = db.query(DocumentSchema).filter(DocumentSchema.id.in_(payload.schema_ids)).all()
+    found = {str(schema.id): schema for schema in schemas}
+    requested_ids = _schema_id_keys(payload.schema_ids)
+    missing = [schema_id for schema_id in requested_ids if schema_id not in found]
+    if missing:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="One or more schemas were not found")
+    for schema in schemas:
+        _ensure_can_manage(schema, current_user)
+
+    package = {
+        "format": SCHEMA_PACKAGE_FORMAT,
+        "version": SCHEMA_PACKAGE_VERSION,
+        "schemas": [_schema_export_record(found[schema_id]) for schema_id in requested_ids],
+    }
+    content = json.dumps(package, ensure_ascii=False, indent=2)
+    return Response(
+        content=content,
+        media_type="application/json",
+        headers={"Content-Disposition": "attachment; filename=insightdoc-schemas.json"},
+    )
+
+
+@router.post("/import", status_code=status.HTTP_201_CREATED)
+async def import_schema_package(
+    file: UploadFile = File(...),
+    on_conflict: Literal["suffix", "skip", "error"] = Form("suffix"),
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_active_user),
+) -> dict[str, Any]:
+    """Import a portable JSON package as new schemas owned by the current user."""
+    _ensure_can_create_schema(current_user)
+    if not file.filename or not file.filename.lower().endswith(".json"):
+        raise HTTPException(status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail="Import a .json schema package")
+
+    raw_bytes = await file.read()
+    if len(raw_bytes) > 5 * 1024 * 1024:
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="Schema package is too large")
+    try:
+        payload = json.loads(raw_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid schema package JSON: {exc}") from exc
+
+    try:
+        records = _extract_import_records(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    if len(records) > 100:
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="A package may contain at most 100 schemas")
+
+    normalized: list[dict[str, Any]] = []
+    try:
+        normalized = [_normalize_import_schema(record) for record in records]
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"Invalid schema: {exc}") from exc
+
+    existing_names = {name for (name,) in db.query(DocumentSchema.name).all()}
+    incoming_names = [record["name"] for record in normalized]
+    duplicate_names = sorted({name for name in incoming_names if incoming_names.count(name) > 1 or name in existing_names})
+    if on_conflict == "error" and duplicate_names:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail={"message": "Schema names already exist", "names": duplicate_names})
+
+    imported = []
+    skipped = []
+    reserved = set(existing_names)
+    for record in normalized:
+        original_name = record["name"]
+        if original_name in reserved and on_conflict == "skip":
+            skipped.append(original_name)
+            continue
+        name = _unique_import_name(db, original_name, reserved) if on_conflict == "suffix" else original_name
+        db_schema = DocumentSchema(**{**record, "name": name, "created_by": current_user.id})
+        db.add(db_schema)
+        reserved.add(name)
+        imported.append({"name": name, "source_name": original_name})
+    db.commit()
+    return {"imported": imported, "skipped": skipped, "count": len(imported)}
 
 
 def _repair_truncated_json(text: str) -> str | None:

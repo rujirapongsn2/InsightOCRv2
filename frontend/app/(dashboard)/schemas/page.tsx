@@ -1,13 +1,14 @@
 "use client"
 
-import { useEffect, useMemo, useState } from "react"
-import { Plus, FileText, Receipt, FileSignature, File, Search, ScrollText, X, Trash2, Loader2, ListFilter, ArrowDownAZ } from "lucide-react"
+import { useEffect, useMemo, useRef, useState } from "react"
+import { Plus, FileText, Receipt, FileSignature, File, Search, ScrollText, X, Trash2, Loader2, ListFilter, ArrowDownAZ, Download, Upload, CheckSquare, Square } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { useAuth } from "@/components/auth-provider"
 import { getApiBaseUrl } from "@/lib/api"
 import { SchemaWizardProvider } from "@/contexts/SchemaWizardContext"
 import { SchemaWizard } from "@/components/schema/SchemaWizard"
+import { Modal } from "@/components/ui/modal"
 
 interface Schema {
     id: string
@@ -16,6 +17,7 @@ interface Schema {
     description: string
     fields: SchemaField[]
     created_by?: string
+    can_manage?: boolean
     created_at?: string
     updated_at?: string
     extraction_profile?: "legacy" | "anydoc_hybrid"
@@ -300,6 +302,25 @@ export default function SchemasPage() {
     const [sortBy, setSortBy] = useState<SchemaSort>("updated_desc")
     const [showCreateModal, setShowCreateModal] = useState(false)
     const [editSchemaId, setEditSchemaId] = useState<string | null>(null)
+    const [selectedSchemaIds, setSelectedSchemaIds] = useState<string[]>([])
+    const [showImportModal, setShowImportModal] = useState(false)
+    const [importFile, setImportFile] = useState<File | null>(null)
+    const [importConflict, setImportConflict] = useState<"suffix" | "skip" | "error">("suffix")
+    const [importing, setImporting] = useState(false)
+    const [exporting, setExporting] = useState(false)
+    const [notice, setNotice] = useState<string | null>(null)
+    const importInputRef = useRef<HTMLInputElement>(null)
+
+    const resetImportFile = () => {
+        setImportFile(null)
+        if (importInputRef.current) importInputRef.current.value = ""
+    }
+
+    const closeImportModal = () => {
+        if (importing) return
+        setShowImportModal(false)
+        resetImportFile()
+    }
 
     const normalizedRole = useMemo(() => {
         if (!user?.role) return "user"
@@ -342,13 +363,92 @@ export default function SchemasPage() {
         setPipelineFilter("all")
     }
 
+    const canManageSchema = (schema: Schema) =>
+        schema.can_manage ?? (normalizedRole === "admin" || (normalizedRole === "manager" && schema.created_by === user?.id))
+
+    const manageableFilteredIds = filteredSchemas.filter(canManageSchema).map((schema) => schema.id)
+    const allManageableSelected = manageableFilteredIds.length > 0 && manageableFilteredIds.every((id) => selectedSchemaIds.includes(id))
+
+    const toggleSchemaSelection = (schemaId: string) => {
+        setSelectedSchemaIds((current) => current.includes(schemaId)
+            ? current.filter((id) => id !== schemaId)
+            : [...current, schemaId])
+    }
+
+    const toggleAllVisible = () => {
+        setSelectedSchemaIds((current) => allManageableSelected
+            ? current.filter((id) => !manageableFilteredIds.includes(id))
+            : Array.from(new Set([...current, ...manageableFilteredIds])))
+    }
+
+    const handleExportSelected = async () => {
+        if (!selectedSchemaIds.length || exporting) return
+        setExporting(true)
+        setNotice(null)
+        try {
+            const token = localStorage.getItem("token")
+            const response = await fetch(`${getApiBaseUrl()}/schemas/export`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+                body: JSON.stringify({ schema_ids: selectedSchemaIds }),
+            })
+            if (!response.ok) {
+                const payload = await response.json().catch(() => null)
+                throw new Error(payload?.detail || "Failed to export schemas")
+            }
+            const blob = await response.blob()
+            const url = URL.createObjectURL(blob)
+            const link = document.createElement("a")
+            link.href = url
+            link.download = "insightdoc-schemas.json"
+            document.body.appendChild(link)
+            link.click()
+            link.remove()
+            setTimeout(() => URL.revokeObjectURL(url), 1000)
+            setNotice(`${selectedSchemaIds.length} schema${selectedSchemaIds.length === 1 ? "" : "s"} exported`)
+        } catch (error) {
+            setNotice(error instanceof Error ? error.message : "Failed to export schemas")
+        } finally { setExporting(false) }
+    }
+
+    const handleImport = async () => {
+        if (!importFile || importing) return
+        setImporting(true)
+        setNotice(null)
+        try {
+            const token = localStorage.getItem("token")
+            const form = new FormData()
+            form.append("file", importFile)
+            form.append("on_conflict", importConflict)
+            const response = await fetch(`${getApiBaseUrl()}/schemas/import`, {
+                method: "POST",
+                headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+                body: form,
+            })
+            const payload = await response.json().catch(() => null)
+            if (!response.ok) throw new Error(payload?.detail?.message || payload?.detail || "Failed to import schemas")
+            setShowImportModal(false)
+            resetImportFile()
+            setSelectedSchemaIds([])
+            await fetchSchemas()
+            setNotice(`${payload.count} schema${payload.count === 1 ? "" : "s"} imported`)
+        } catch (error) {
+            setNotice(error instanceof Error ? error.message : "Failed to import schemas")
+        } finally { setImporting(false) }
+    }
+
     const fetchSchemas = async () => {
         try {
             const token = typeof window !== "undefined" ? localStorage.getItem("token") : null
             const res = await fetch(`${getApiBaseUrl()}/schemas/`, {
                 headers: token ? { Authorization: `Bearer ${token}` } : undefined,
             })
-            if (res.ok) setSchemas(await res.json())
+            if (res.ok) {
+                const nextSchemas: Schema[] = await res.json()
+                setSchemas(nextSchemas)
+                const availableIds = new Set(nextSchemas.map((schema) => schema.id))
+                setSelectedSchemaIds((current) => current.filter((id) => availableIds.has(id)))
+            }
         } catch (error) {
             console.error("Failed to fetch schemas", error)
         } finally {
@@ -389,6 +489,43 @@ export default function SchemasPage() {
                     onSaved={() => { setEditSchemaId(null); fetchSchemas() }}
                 />
             )}
+            <Modal isOpen={showImportModal} onClose={closeImportModal} title="Import Schemas">
+                <div className="space-y-4">
+                    <input
+                        ref={importInputRef}
+                        type="file"
+                        accept=".json,application/json"
+                        className="hidden"
+                        onChange={(event) => setImportFile(event.target.files?.[0] || null)}
+                    />
+                    <button
+                        type="button"
+                        onClick={() => importInputRef.current?.click()}
+                        className="flex w-full items-center gap-3 rounded-md border border-dashed border-slate-300 px-4 py-5 text-left hover:border-[#2786C2] hover:bg-slate-50"
+                    >
+                        <FileText className="h-5 w-5 text-slate-500" />
+                        <span className="min-w-0">
+                            <span className="block text-sm font-medium text-slate-800">{importFile?.name || "Choose a schema package"}</span>
+                            <span className="block text-xs text-slate-500">InsightDOC JSON package, up to 5 MB</span>
+                        </span>
+                    </button>
+                    <label className="block space-y-1.5 text-sm font-medium text-slate-700">
+                        If a schema name already exists
+                        <select value={importConflict} onChange={(event) => setImportConflict(event.target.value as typeof importConflict)} className="h-10 w-full rounded-md border border-slate-300 bg-white px-3 text-sm font-normal">
+                            <option value="suffix">Create a copy with an imported suffix</option>
+                            <option value="skip">Skip the existing schema</option>
+                            <option value="error">Stop and show the conflicts</option>
+                        </select>
+                    </label>
+                    <div className="flex justify-end gap-2 border-t pt-4">
+                        <Button variant="outline" onClick={closeImportModal} disabled={importing}>Cancel</Button>
+                        <Button onClick={handleImport} disabled={!importFile || importing}>
+                            {importing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
+                            {importing ? "Importing..." : "Import"}
+                        </Button>
+                    </div>
+                </div>
+            </Modal>
 
             {/* Header */}
             <div className="flex items-center justify-between">
@@ -396,11 +533,26 @@ export default function SchemasPage() {
                     <h2 className="text-2xl font-bold tracking-tight">Document Schemas</h2>
                     <p className="text-slate-500">Manage extraction schemas for your documents.</p>
                 </div>
-                <Button onClick={() => setShowCreateModal(true)}>
-                    <Plus className="mr-2 h-4 w-4" />
-                    Create Schema
-                </Button>
+                <div className="flex flex-wrap justify-end gap-2">
+                    <Button variant="outline" onClick={() => setShowImportModal(true)}>
+                        <Upload className="h-4 w-4" /> Import
+                    </Button>
+                    <Button variant="outline" onClick={handleExportSelected} disabled={!selectedSchemaIds.length || exporting}>
+                        {exporting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+                        {exporting ? "Exporting..." : `Export${selectedSchemaIds.length ? ` (${selectedSchemaIds.length})` : ""}`}
+                    </Button>
+                    <Button onClick={() => setShowCreateModal(true)}>
+                        <Plus className="h-4 w-4" /> Create Schema
+                    </Button>
+                </div>
             </div>
+
+            {notice && (
+                <div role="status" className="flex items-center justify-between rounded-md border border-blue-100 bg-blue-50 px-3 py-2 text-sm text-blue-800">
+                    <span>{notice}</span>
+                    <button type="button" aria-label="Dismiss notification" onClick={() => setNotice(null)}><X className="h-4 w-4" /></button>
+                </div>
+            )}
 
             {/* Search and filters */}
             {schemas.length > 0 && (
@@ -461,6 +613,12 @@ export default function SchemasPage() {
                                 Clear filters
                             </Button>
                         )}
+                        {manageableFilteredIds.length > 0 && (
+                            <Button type="button" variant="ghost" size="sm" onClick={toggleAllVisible}>
+                                {allManageableSelected ? <CheckSquare className="h-4 w-4" /> : <Square className="h-4 w-4" />}
+                                {allManageableSelected ? "Clear selection" : "Select visible"}
+                            </Button>
+                        )}
                     </div>
                 </div>
             )}
@@ -491,17 +649,24 @@ export default function SchemasPage() {
             ) : (
                 <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
                     {filteredSchemas.map((schema: Schema) => {
-                        const canManage = normalizedRole === "admin" || (normalizedRole === "manager" && schema.created_by === user?.id)
+                        const canManage = canManageSchema(schema)
                         const { Icon, color, badgeColor } = getDocumentTypeIcon(schema.document_type)
                         return (
                             <div key={schema.id} className="group relative rounded-lg border bg-white p-4 shadow-sm hover:shadow-md hover:border-slate-300 transition-all">
-                                <div className="flex items-start justify-between mb-3">
-                                    <div className={`h-10 w-10 rounded-lg ${color} flex items-center justify-center`}>
-                                        <Icon className="h-5 w-5" />
-                                    </div>
-                                    <span className={`text-xs font-medium px-2 py-0.5 rounded ${badgeColor}`}>
-                                        {schema.document_type}
-                                    </span>
+                                    <div className="flex items-start justify-between mb-3">
+                                        <div className={`h-10 w-10 rounded-lg ${color} flex items-center justify-center`}>
+                                            <Icon className="h-5 w-5" />
+                                        </div>
+                                        <div className="flex items-center gap-2">
+                                            {canManageSchema(schema) && (
+                                                <button type="button" aria-label={`${selectedSchemaIds.includes(schema.id) ? "Deselect" : "Select"} ${schema.name}`} onClick={() => toggleSchemaSelection(schema.id)} className="rounded p-1 text-slate-500 hover:bg-slate-100 hover:text-[#2786C2]">
+                                                    {selectedSchemaIds.includes(schema.id) ? <CheckSquare className="h-4 w-4 text-[#2786C2]" /> : <Square className="h-4 w-4" />}
+                                                </button>
+                                            )}
+                                            <span className={`text-xs font-medium px-2 py-0.5 rounded ${badgeColor}`}>
+                                                {schema.document_type}
+                                            </span>
+                                        </div>
                                 </div>
                                 <h3 className="font-semibold text-base mb-1 line-clamp-1">{schema.name}</h3>
                                 <p className="text-xs text-slate-500 mb-3 line-clamp-2 min-h-[2.5rem]">
