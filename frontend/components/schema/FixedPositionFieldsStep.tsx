@@ -17,7 +17,7 @@ const genId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
 const BASE_PAGE_WIDTH = 760
 
 type Selection = { x: number; y: number; width: number; height: number } | null
-type PreviewValue = string | Array<Record<string, unknown>>
+type PreviewValue = string | number | boolean | null | Array<Record<string, unknown>>
 
 const defaultArrayConfig = (): ArrayConfig => ({
   item_type: "object",
@@ -271,6 +271,9 @@ export function FixedPositionFieldsStep() {
       if (!response.ok) throw new Error(data.detail || "Unable to read fixed-position fields")
       setPreviewValues(data.values || {})
       setRawPreviewValues(data.raw_values || {})
+      if (data.errors && Object.keys(data.errors).length) {
+        setError(`Fields requiring review: ${Object.keys(data.errors).join(", ")}`)
+      }
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "Unable to read fixed-position fields")
     } finally {
@@ -484,7 +487,7 @@ export function FixedPositionFieldsStep() {
                         {rawPreviewValue !== previewValue && (
                           <p className="break-words text-slate-500"><span className="font-medium">Raw:</span> {String(rawPreviewValue || "No text in this box")}</p>
                         )}
-                        <p className="break-words text-emerald-700"><span className="font-medium">Extracted:</span> {String(previewValue || "No text in this box")}</p>
+                        <p className="break-words text-emerald-700"><span className="font-medium">Extracted:</span> {String(previewValue ?? "No text in this box")}</p>
                       </>}
                     </div>
                   )}

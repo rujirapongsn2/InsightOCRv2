@@ -3,6 +3,7 @@ Celery background tasks for document processing.
 Handles OCR and structure extraction asynchronously.
 """
 import json
+import hashlib
 import logging
 import os
 import time
@@ -39,6 +40,97 @@ from typing import Any, List, Optional, Dict
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
+
+
+@celery_app.task(name="app.tasks.document_tasks.test_mapping_providers_task", soft_time_limit=300, time_limit=330)
+def test_mapping_providers_task(user_id: str, run_id: str):
+    from types import SimpleNamespace
+    from app.services.field_mapping import map_fields
+    client = redis_lib.from_url(settings.REDIS_URL)
+    key = f"mapping_test:{user_id}:{run_id}"
+    checks = []
+    try:
+        client.set(key, json.dumps({"status": "running"}), ex=1800)
+        with SessionLocal() as db:
+            sample = SimpleNamespace(name="mapping_probe", fields=[
+                {"name": "reference", "type": "text", "required": True},
+                {"name": "total", "type": "currency", "required": True},
+            ])
+            for engine in ("softnix", "llm"):
+                values, report = map_fields("Reference: MAP-42\nTotal: 25", sample, db, engine=engine)
+                checks.append({"engine": engine, "passed": values == {"reference": "MAP-42", "total": 25},
+                               "attempts": report["attempts"], "elapsed_seconds": report["elapsed_seconds"]})
+                client.set(key, json.dumps({"status": "running", "checks": checks}), ex=1800)
+        client.set(key, json.dumps({"status": "completed", "checks": checks}), ex=1800)
+    except Exception as exc:
+        client.set(key, json.dumps({"status": "failed", "checks": checks, "category": type(exc).__name__}), ex=1800)
+    finally:
+        client.close()
+
+
+@celery_app.task(name="app.tasks.document_tasks.remap_document_task", soft_time_limit=360, time_limit=390)
+def remap_document_task(document_id: str, token: str, engine: str, field_names: list[str] | None = None):
+    """Recompute mapping proposals without modifying OCR or human-reviewed data."""
+    from app.services.field_mapping import map_fields, attach_page_evidence
+    with SessionLocal() as db:
+        document = db.query(Document).filter(Document.id == document_id).first()
+        if not document or document.task_id != token or document.status != "queued":
+            return
+        claimed = db.query(Document).filter(
+            Document.id == document_id, Document.task_id == token, Document.status == "queued"
+        ).update({"status": "processing"}, synchronize_session=False)
+        db.commit()
+        if not claimed:
+            return
+        db.refresh(document)
+        metadata = dict(document.extraction_metadata or {})
+        prior_status = metadata.get("mapping_retry", {}).get("prior_status", "extraction_completed")
+        try:
+            schema = db.query(SchemaModel).filter(SchemaModel.id == document.schema_id).first()
+            if schema is None:
+                raise ValueError("Schema no longer exists")
+            with get_storage_service().get_local_path(document.file_path) as file_path:
+                values, report = map_fields(document.ocr_text or "", schema, db, file_path,
+                                            engine=engine, field_names=field_names)
+            attach_page_evidence(report, document.ocr_pages)
+            db.refresh(document)
+            if document.task_id != token:
+                return
+            if report.get("source_hash") != hashlib.sha256((document.ocr_text or "").encode()).hexdigest():
+                raise ValueError("Document text changed during mapping")
+            db.refresh(schema)
+            if document.schema_id != schema.id or report.get("schema_hash") != hashlib.sha256(json.dumps(schema.fields, sort_keys=True).encode()).hexdigest():
+                raise ValueError("Schema changed during mapping")
+            names = {field["name"] for field in schema.fields}
+            previous = {name: value for name, value in (document.extracted_data or {}).items() if name in names}
+            for name in report.get("missing_fields", report["unresolved_fields"]):
+                if name in previous and name not in values:
+                    report["fields"].setdefault(name, {})["retained_previous_value"] = True
+            previous.update(values)
+            document.extracted_data = previous
+            old_report = metadata.get("mapping")
+            if field_names and isinstance(old_report, dict):
+                unresolved = [name for name in old_report.get("unresolved_fields", []) if name not in field_names]
+                unresolved.extend(report["unresolved_fields"])
+                report["fields"] = {**old_report.get("fields", {}), **report["fields"]}
+                report["unresolved_fields"] = unresolved
+                report["review_fields"] = [name for name, item in report["fields"].items() if item.get("status") == "needs_review"]
+                report["status"] = ("partial" if previous else "failed") if unresolved else "completed"
+            metadata["mapping"] = report
+            metadata["field_evidence"] = report["fields"]
+            document.processing_error = ("Unresolved mapping fields: " + ", ".join(report["unresolved_fields"])) if report["unresolved_fields"] else None
+            metadata["mapping_retry"] = {"status": "completed"}
+        except Exception as exc:
+            db.rollback()
+            db.refresh(document)
+            if document.task_id != token:
+                return
+            metadata["mapping_retry"] = {"status": "failed", "category": type(exc).__name__}
+            document.processing_error = "Mapping retry failed; previous values were preserved"
+        document.extraction_metadata = metadata
+        if document.status in {"processing", "queued"}:
+            document.status = prior_status
+        db.commit()
 
 
 def table_to_key_values(content: str) -> List[str]:
@@ -801,67 +893,25 @@ def apply_schema_mapping(
     extraction_metadata: dict[str, Any],
     file_path: str | None = None,
 ) -> str | None:
-    """Apply selected Schema mapping after any successful text extraction route."""
+    from app.services.field_mapping import map_fields, attach_page_evidence
+
     if not schema:
         document.extracted_data = None
         extraction_metadata["mapping"] = "not_requested"
         return None
-
     try:
-        has_locator_fields = any(
-            isinstance(field, dict) and isinstance(field.get("locator"), dict)
-            for field in (schema.fields or [])
-        )
-        if has_locator_fields:
-            if not file_path:
-                raise BboxLocatorError("The source document is unavailable for fixed-position fields")
-            mapped, evidence, provider = map_schema_fields_with_locators(
-                document.ocr_text or "", schema, db, file_path
-            )
-            document.extracted_data = mapped
-            extraction_metadata["field_evidence"] = evidence
-        else:
-            document.extracted_data = map_anydoc_schema_fields(document.ocr_text or "", schema, db)
-            provider = "structured_output"
-        extraction_metadata["mapping"] = {
-            "status": "completed",
-            "schema": schema.name,
-            "provider": provider,
-        }
-        return None
-    except PartialSchemaMappingError as exc:
-        document.extracted_data = exc.mapped
-        extraction_metadata["field_evidence"] = exc.evidence
-        mapping_error = str(exc)
-        extraction_metadata["mapping"] = {
-            "status": "partial",
-            "schema": schema.name,
-            "provider": "bbox",
-            "reason": mapping_error,
-        }
-        logger.warning(
-            "Structured mapping partially failed for %s with schema %s: %s",
-            document.filename,
-            schema.name,
-            mapping_error,
-        )
-        return mapping_error
-    except Exception as exc:
+        values, report = map_fields(document.ocr_text or "", schema, db, file_path)
+    except (ValueError, TypeError) as exc:
         document.extracted_data = None
-        mapping_error = str(exc)
-        extraction_metadata["mapping"] = {
-            "status": "failed",
-            "schema": schema.name,
-            "provider": "structured_output",
-            "reason": mapping_error,
-        }
-        logger.warning(
-            "Structured mapping failed for %s with schema %s: %s",
-            document.filename,
-            schema.name,
-            mapping_error,
-        )
-        return mapping_error
+        extraction_metadata["mapping"] = {"status": "failed", "provider": "hybrid", "reason": str(exc)}
+        return str(exc)
+    document.extracted_data = values or None
+    attach_page_evidence(report, getattr(document, "ocr_pages", None))
+    extraction_metadata["mapping"] = report
+    extraction_metadata["field_evidence"] = report["fields"]
+    if report["unresolved_fields"]:
+        return "Unresolved fields: " + ", ".join(report["unresolved_fields"])
+    return None
 
 
 def extract_job_id(payload: dict[str, Any]) -> str | None:

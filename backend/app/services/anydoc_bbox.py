@@ -226,7 +226,16 @@ def build_bbox_layout(file_path: str, page_numbers: Iterable[int]) -> dict[int, 
     if any(page > page_count for page in requested_pages):
         raise BboxLocatorError("A fixed-position field refers to a page outside this PDF")
 
-    text_layout = _read_pdf_text_layer(file_path)
+    try:
+        text_layout = _read_pdf_text_layer(file_path)
+    except BboxLocatorError:
+        # Some embedded fonts produce invalid XML even though the rendered
+        # page is readable. Recover coordinates from the page image.
+        text_layout = {}
+    for page_number, words in list(text_layout.items()):
+        text = " ".join(word["text"] for word in words)
+        if "\ufffd" in text or any(ord(char) < 32 and char not in "\n\r\t" for char in text):
+            text_layout[page_number] = []
     ocr_page_numbers = [
         page_number
         for page_number in requested_pages

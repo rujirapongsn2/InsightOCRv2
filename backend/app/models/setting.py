@@ -13,6 +13,9 @@ class Setting(Base):
     # Separate endpoints for different purposes
     ocr_endpoint = Column(String, default="https://111.223.37.41:9001/v3/ai-process-file")
     structured_output_endpoint = Column(String, default="https://111.223.37.41:9001/structured-output")
+    mapping_engine = Column(String, default="auto", nullable=False, server_default="auto")
+    mapping_fallback_provider_id = Column(String, nullable=True)
+    mapping_fallback_enabled = Column(Boolean, default=True, nullable=False, server_default="true")
     schema_suggestion_endpoint = Column(String, default="https://111.223.37.41:9001/suggest-schema")
     test_endpoint = Column(String, default="https://111.223.37.41:9001/me")
 

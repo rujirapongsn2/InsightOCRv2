@@ -8,6 +8,7 @@ import { Input } from "@/components/ui/input"
 import { AlertCircle, Bot, Check, CheckCircle2, ChevronDown, Cloud, Copy, Eye, EyeOff, FileText, KeyRound, Loader2, Package, Pencil, Play, Plus, Settings, ShieldCheck, Trash2 } from "lucide-react"
 import { getApiBaseUrl, getPublicApiBaseUrl } from "@/lib/api"
 import { ApiAccessTokens } from "@/components/settings/ApiAccessTokens"
+import { MappingSettings } from "@/components/settings/MappingSettings"
 import { ApiWorkflowDocs } from "@/components/profile/ApiWorkflowDocs"
 import { AgentSkillDownloads } from "@/components/profile/AgentSkillDownloads"
 import { McpClientGuide } from "@/components/profile/McpClientGuide"
@@ -800,6 +801,7 @@ export default function SettingsPage() {
             </p>
           </div>
 
+          <MappingSettings providers={aiProviders} />
           <div className="space-y-2">
             <label className="text-sm font-medium">Softnix OCR API Token</label>
             <div className="relative">

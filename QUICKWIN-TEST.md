@@ -1283,6 +1283,23 @@ Date: 2026-06-30
   displays a download button and downloads the verified artifact.
 - Confirm English filenames and nested paths under `outputs/` still display download buttons.
 
+# Field mapping verification (2026-09-07)
+
+- Backend tests exercise partial fallback, conflicting values, invalid numbers,
+  arithmetic checks, source matching, sample coercion, concurrent retry claims,
+  access control and preservation of reviewed values.
+- Browser verification uses mocked API responses with a real sample PDF on
+  desktop and mobile: retry produces a proposal, reviewed editor values remain
+  unchanged, and the source bounding box is highlighted.
+- Settings > Field Mapping saves the routing policy and starts background
+  synthetic provider tests. Live provider readiness is environment-specific.
+- Selected backend regression suite: 62 passed. Focused mapping/retry suite
+  after page-evidence changes: 22 passed. Frontend production build passed.
+- Deployed migration `0020_mapping_policy`. Live synthetic probe through the
+  document worker passed both providers: Softnix 16.700s, configured LLM 19.222s.
+  The probe used only `Reference: MAP-42` and `Total: 25`, not customer documents.
+- See `docs/field-mapping.md` for API rules, timeouts and remaining limitations.
+
 # Agent DOC empty provider response recovery (2026-09-06)
 
 - Ask a focused document question that causes one successful search tool call.

@@ -1,7 +1,8 @@
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Optional
+from typing import Any, Optional, Literal
+from uuid import UUID, uuid4
 from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, HttpUrl
@@ -28,6 +29,70 @@ from app.utils.secret_store import SecretStoreError, encrypt_secret
 
 router = APIRouter()
 BUILD_INFO_PATH = Path(__file__).resolve().parents[4] / ".build-info.json"
+
+
+class MappingPolicy(BaseModel):
+    engine: Literal["auto", "softnix", "llm", "fixed"] = "auto"
+    fallback_provider_id: UUID | None = None
+    fallback_enabled: bool = True
+
+
+@router.get("/mapping/config")
+def read_mapping_policy(db: Session = Depends(deps.get_db),
+                        current_user: User = Depends(deps.get_current_active_superuser)):
+    setting = db.query(Setting).first()
+    return {"engine": getattr(setting, "mapping_engine", "auto"),
+            "fallback_provider_id": getattr(setting, "mapping_fallback_provider_id", None),
+            "fallback_enabled": getattr(setting, "mapping_fallback_enabled", True)}
+
+
+@router.put("/mapping/config")
+def save_mapping_policy(payload: MappingPolicy, db: Session = Depends(deps.get_db),
+                        current_user: User = Depends(deps.get_current_active_superuser)):
+    from app.models.ai_settings import AISettings
+    if payload.fallback_provider_id:
+        provider = db.query(AISettings).filter(AISettings.id == payload.fallback_provider_id,
+            AISettings.is_active.is_(True), AISettings.provider_type == "openai_compatible").first()
+        if provider is None:
+            raise HTTPException(422, "Choose an active OpenAI-compatible mapping provider")
+    setting = db.query(Setting).first()
+    if setting is None:
+        raise HTTPException(422, "Save OCR configuration first")
+    setting.mapping_engine = payload.engine
+    setting.mapping_fallback_provider_id = str(payload.fallback_provider_id) if payload.fallback_provider_id else None
+    setting.mapping_fallback_enabled = payload.fallback_enabled
+    db.commit()
+    return payload
+
+
+@router.post("/mapping/test", status_code=202)
+def start_mapping_test(current_user: User = Depends(deps.get_current_active_superuser)):
+    import redis
+    from app.tasks.document_tasks import test_mapping_providers_task
+    run_id = str(uuid4())
+    key = f"mapping_test:{current_user.id}:{run_id}"
+    client = redis.from_url(settings.REDIS_URL)
+    try:
+        client.set(key, json.dumps({"status": "queued"}), ex=1800)
+        test_mapping_providers_task.delay(str(current_user.id), run_id)
+    except Exception:
+        raise HTTPException(503, "Mapping test queue unavailable")
+    finally:
+        client.close()
+    return {"run_id": run_id}
+
+
+@router.get("/mapping/test/{run_id}")
+def read_mapping_test(run_id: UUID, current_user: User = Depends(deps.get_current_active_superuser)):
+    import redis
+    client = redis.from_url(settings.REDIS_URL)
+    try:
+        result = client.get(f"mapping_test:{current_user.id}:{run_id}")
+    finally:
+        client.close()
+    if result is None:
+        raise HTTPException(404, "Mapping test expired or not found")
+    return json.loads(result)
 
 
 def _setting_response(setting: Setting) -> SettingSchema:

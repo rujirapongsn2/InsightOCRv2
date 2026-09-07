@@ -398,6 +398,7 @@ def test_fixed_position_dates_support_thai_buddhist_era(value, expected):
 
 
 def test_partial_mapping_keeps_fixed_position_values(monkeypatch):
+    from app.services import field_mapping
     schema = SimpleNamespace(
         name="mixed_form",
         fields=[
@@ -407,16 +408,16 @@ def test_partial_mapping_keeps_fixed_position_values(monkeypatch):
     )
     document = SimpleNamespace(filename="fixed.pdf", ocr_text="document text", extracted_data=None)
     monkeypatch.setattr(
-        document_tasks,
+        field_mapping,
         "extract_fixed_position_fields",
         lambda *_args, **_kwargs: ({"document_number": "PND-1"}, {"document_number": {"page": 1}}),
     )
-    monkeypatch.setattr(document_tasks, "extract_structure", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(field_mapping, "extract_structure", lambda *_args, **_kwargs: None)
 
     metadata = {}
     error = document_tasks.apply_schema_mapping(document, schema, object(), metadata, "/tmp/fixed-form.pdf")
 
-    assert error == "Structured output must be a JSON object"
+    assert error == "Unresolved fields: notes"
     assert document.extracted_data == {"document_number": "PND-1"}
     assert metadata["mapping"]["status"] == "partial"
     assert metadata["field_evidence"]["document_number"]["page"] == 1

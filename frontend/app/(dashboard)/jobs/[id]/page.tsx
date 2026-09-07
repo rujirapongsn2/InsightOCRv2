@@ -12,6 +12,7 @@ import { getApiBaseUrl } from "@/lib/api"
 import { useAuth } from "@/components/auth-provider"
 import LlmResultRenderer from "@/components/LlmResultRenderer"
 import AgentPanel from "@/components/agent/AgentPanel"
+import { MappingPanel, type MappingReport } from "@/components/document/MappingPanel"
 import { generateExportHtml, generateExportText } from "@/lib/exportReportHtml"
 
 const PDFViewer = dynamic(
@@ -150,6 +151,7 @@ export default function JobDetailPage() {
     const [retryEngine, setRetryEngine] = useState<OcrEngine>("tesseract_ocr")
     const [documentRetryEngines, setDocumentRetryEngines] = useState<Record<string, OcrEngine>>({})
     const [retryingDocId, setRetryingDocId] = useState<string | null>(null)
+    const [mappingHighlight, setMappingHighlight] = useState<{ page?: number; bbox?: { x: number; y: number; width: number; height: number } } | null>(null)
     const fileInputRef = useRef<HTMLInputElement>(null)
     const pollingIntervalsRef = useRef<Map<string, AbortController>>(new Map())
     const [showIntegrationModal, setShowIntegrationModal] = useState(false)
@@ -749,10 +751,11 @@ export default function JobDetailPage() {
     }
 
     const handleReview = (doc: Document) => {
+        setMappingHighlight(null)
         setReviewDoc(doc)
         setRejectConfirm(false)
         setEditedOcrText(doc.ocr_text || "")
-        const structuredData = doc.reviewed_data || doc.extracted_data
+        const structuredData = doc.reviewed_data || doc.extracted_data || {}
         setEditedStructuredData(
             structuredData && typeof structuredData === "object"
                 ? structuredData
@@ -1536,6 +1539,7 @@ export default function JobDetailPage() {
                                         return (
                                             <PDFViewer
                                                 fileUrl={pdfFileUrl}
+                                                highlight={mappingHighlight}
                                             />
                                         )
                                     }
@@ -1620,7 +1624,7 @@ export default function JobDetailPage() {
                                 </div>
 
                                 {reviewDoc.schema_id && (
-                                    <div className="flex min-h-0 flex-1 flex-col rounded-lg border bg-white p-4">
+                                    <div className="flex min-h-0 flex-1 flex-col overflow-y-auto rounded-lg border bg-white p-4">
                                         <div className="mb-3 flex items-center justify-between gap-3">
                                             <label className="text-sm font-semibold text-slate-700">Structured Data</label>
                                             <div className="inline-flex rounded-md border border-slate-200 bg-slate-50 p-0.5" role="tablist" aria-label="Structured Data view">
@@ -1644,6 +1648,16 @@ export default function JobDetailPage() {
                                                 </button>
                                             </div>
                                         </div>
+                                        <MappingPanel key={reviewDoc.id} documentId={reviewDoc.id}
+                                            report={typeof reviewDoc.extraction_metadata?.mapping === "object" ? reviewDoc.extraction_metadata.mapping as MappingReport : undefined}
+                                            onEvidence={setMappingHighlight}
+                                            onProposal={(values) => {
+                                                setEditedStructuredData(values)
+                                                setArrayDrafts({})
+                                                setStructuredJsonDraft(JSON.stringify(values, null, 2))
+                                                setStructuredJsonError(null)
+                                                setReviewDoc(previous => previous ? { ...previous, extraction_metadata: { ...previous.extraction_metadata, mapping: { status: "completed" } } } : previous)
+                                            }} />
                                         {structuredDataTab === "advanced" ? (
                                             <div className="flex min-h-0 flex-1 flex-col">
                                                 <textarea
@@ -1658,12 +1672,8 @@ export default function JobDetailPage() {
                                                 />
                                                 {structuredJsonError && <p className="mt-2 text-xs text-red-600">{structuredJsonError}</p>}
                                             </div>
-                                        ) : reviewDoc.extraction_metadata?.mapping && typeof reviewDoc.extraction_metadata.mapping !== "string" && reviewDoc.extraction_metadata.mapping.status === "failed" ? (
-                                            <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
-                                                Mapping failed. Review the AI Extract or use Advanced JSON to enter the fields manually.
-                                            </div>
                                         ) : reviewSchema && editedStructuredData && !Array.isArray(editedStructuredData) ? (
-                                            <div className="space-y-3 overflow-y-auto pr-1">
+                                            <div className="shrink-0 space-y-3 pr-1">
                                                 {reviewSchema.fields.map((field) => {
                                                     const value = editedStructuredData[field.name]
                                                     const label = field.required ? `${field.name} *` : field.name

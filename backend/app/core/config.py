@@ -73,6 +73,8 @@ class Settings(BaseSettings):
     # than a minute, so allow a bounded four-minute wait before OCR fallback.
     ANYDOC_PRIMARY_OCR_TIMEOUT_SECONDS: int = 240
     ANYDOC_FALLBACK_REQUEST_TIMEOUT_SECONDS: int = 120
+    MAPPING_REQUEST_TIMEOUT_SECONDS: int = 120
+    MAPPING_TOTAL_TIMEOUT_SECONDS: int = 300
 
     # Cloud storage OAuth. Keep provider secrets server-side; users connect
     # their own accounts through the integrations UI.

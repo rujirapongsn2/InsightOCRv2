@@ -140,7 +140,11 @@ def _extract_schema_sample_in_worker(file_path: str):
 
 def _extract_bbox_preview_in_worker(file_path: str, fields: list[dict[str, Any]]) -> tuple[dict[str, Any], dict[str, Any]]:
     """Evaluate BBox locators outside the async request loop."""
-    return extract_fixed_position_fields(file_path, fields)
+    from types import SimpleNamespace
+    from app.services.field_mapping import map_fields
+    values, report = map_fields("", SimpleNamespace(name="sample", fields=fields), None,
+                                file_path, engine="fixed")
+    return values, report["fields"]
 
 @router.get("/", response_model=List[DocumentSchemaSchema])
 def read_schemas(
@@ -349,16 +353,14 @@ async def preview_fixed_position_fields(
             tmp_file.write(file_bytes)
             tmp_path = tmp_file.name
         raw_values, evidence = await run_in_threadpool(_extract_bbox_preview_in_worker, tmp_path, fields)
-        values = {
-            name: evidence.get(name, {}).get("cleaned_value", raw_value)
-            for name, raw_value in raw_values.items()
-        }
+        values = raw_values
         return {
             "values": values,
-            "raw_values": raw_values,
+            "raw_values": {name: item.get("raw_rows", item.get("raw_text")) for name, item in evidence.items()},
             "evidence": evidence,
             "coordinate_unit": "percent",
             "coordinate_origin": "top_left",
+            "errors": {name: item.get("reason", "Field requires review") for name, item in evidence.items() if name not in values},
         }
     except BboxLocatorError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc

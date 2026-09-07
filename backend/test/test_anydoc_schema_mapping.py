@@ -86,11 +86,12 @@ def test_anydoc_schema_mapping_normalizes_numeric_values(monkeypatch):
 
 
 def test_apply_schema_mapping_marks_failures_without_losing_ocr_text(monkeypatch):
+    from app.services import field_mapping
     document = SimpleNamespace(filename="invoice.pdf", ocr_text="Invoice No: INV-1", extracted_data=None)
     metadata = {"pipeline": "ocr_fallback"}
     monkeypatch.setattr(
-        document_tasks,
-        "map_anydoc_schema_fields",
+        field_mapping,
+        "extract_structure",
         lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("provider unavailable")),
     )
 
@@ -101,6 +102,6 @@ def test_apply_schema_mapping_marks_failures_without_losing_ocr_text(monkeypatch
         metadata,
     )
 
-    assert error == "provider unavailable"
+    assert error == "Unresolved fields: invoice_number"
     assert document.ocr_text == "Invoice No: INV-1"
     assert metadata["mapping"]["status"] == "failed"

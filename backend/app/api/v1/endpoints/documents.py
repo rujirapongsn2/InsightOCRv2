@@ -40,6 +40,48 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+
+class MappingRetryRequest(BaseModel):
+    engine: Literal["auto", "softnix", "llm", "fixed"] = "auto"
+    fields: Optional[List[str]] = None
+
+
+@router.post("/{document_id}/retry-mapping", status_code=202)
+def retry_mapping(document_id: uuid.UUID, payload: MappingRetryRequest,
+                  db: Session = Depends(deps.get_db),
+                  current_user: User = Depends(deps.get_current_active_user)) -> Any:
+    document = db.query(Document).filter(Document.id == document_id).with_for_update().first()
+    if document is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    ensure_document_access(current_user, document)
+    if document.status in {"queued", "processing"}:
+        raise HTTPException(status_code=409, detail="Document is already processing")
+    if not document.schema_id or not document.ocr_text:
+        raise HTTPException(status_code=422, detail="A schema and extracted text are required")
+    schema = db.query(SchemaModel).filter(SchemaModel.id == document.schema_id).first()
+    names = {f["name"] for f in schema.fields} if schema else set()
+    if not names or (payload.fields is not None and (not payload.fields or set(payload.fields) - names)):
+        raise HTTPException(status_code=422, detail="Invalid mapping fields")
+    token = str(uuid.uuid4())
+    previous_status = document.status
+    metadata = dict(document.extraction_metadata or {})
+    metadata["mapping_retry"] = {"status": "queued", "prior_status": previous_status}
+    document.extraction_metadata = metadata
+    document.status = "queued"
+    document.task_id = token
+    document.processing_started_at = datetime.now(timezone.utc)
+    db.commit()
+    from app.tasks.document_tasks import remap_document_task
+    try:
+        remap_document_task.apply_async(args=[str(document_id), token, payload.engine, payload.fields], task_id=token)
+    except Exception:
+        document.status = previous_status
+        metadata["mapping_retry"] = {"status": "failed", "category": "queue_unavailable"}
+        document.extraction_metadata = metadata
+        db.commit()
+        raise HTTPException(status_code=503, detail="Mapping queue unavailable")
+    return {"task_id": token, "status": "queued"}
+
 # UPLOAD_DIR is kept for legacy compatibility with local storage
 # Directory creation is handled by LocalStorage class in storage.py
 UPLOAD_DIR = "/app/uploads"

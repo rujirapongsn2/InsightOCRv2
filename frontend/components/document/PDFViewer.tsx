@@ -13,9 +13,10 @@ pdfjs.GlobalWorkerOptions.workerSrc = `//unpkg.com/pdfjs-dist@${pdfjs.version}/b
 interface PDFViewerProps {
   fileUrl: string
   className?: string
+  highlight?: { page?: number; bbox?: { x: number; y: number; width: number; height: number } } | null
 }
 
-export function PDFViewer({ fileUrl, className = "" }: PDFViewerProps) {
+export function PDFViewer({ fileUrl, className = "", highlight }: PDFViewerProps) {
   const [numPages, setNumPages] = useState<number>(0)
   const [pageNumber, setPageNumber] = useState<number>(1)
   const [scale, setScale] = useState<number>(1.0)
@@ -23,6 +24,12 @@ export function PDFViewer({ fileUrl, className = "" }: PDFViewerProps) {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [pdfData, setPdfData] = useState<Uint8Array | null>(null)
+  useEffect(() => {
+    if (highlight?.page && highlight.page <= numPages) {
+      setPageNumber(highlight.page)
+      setRotation(0)
+    }
+  }, [highlight, numPages])
 
   // Fetch PDF with auth headers
   useEffect(() => {
@@ -112,7 +119,7 @@ export function PDFViewer({ fileUrl, className = "" }: PDFViewerProps) {
   return (
     <div className={`flex flex-col h-full ${className}`}>
       {/* Controls */}
-      <div className="flex items-center justify-between px-4 py-3 bg-slate-100 border-b border-slate-200 rounded-t-lg">
+      <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 px-4 py-3 bg-slate-100 border-b border-slate-200 rounded-t-lg">
         <div className="flex items-center gap-2">
           <Button
             variant="outline"
@@ -153,17 +160,19 @@ export function PDFViewer({ fileUrl, className = "" }: PDFViewerProps) {
               variant="outline"
               size="sm"
               onClick={handlePreviousPage}
+              aria-label="Previous page"
               disabled={pageNumber <= 1}
             >
               <ChevronLeft className="h-4 w-4" />
             </Button>
-            <span className="text-sm font-medium">
+            <span className="whitespace-nowrap text-sm font-medium">
               Page {pageNumber} of {numPages}
             </span>
             <Button
               variant="outline"
               size="sm"
               onClick={handleNextPage}
+              aria-label="Next page"
               disabled={pageNumber >= numPages}
             >
               <ChevronRight className="h-4 w-4" />
@@ -192,13 +201,14 @@ export function PDFViewer({ fileUrl, className = "" }: PDFViewerProps) {
         )}
 
         {!error && fileData && (
-          <div className="flex justify-center">
+          <div className="flex w-max min-w-full justify-center">
             <Document
               file={fileData}
               onLoadSuccess={onDocumentLoadSuccess}
               onLoadError={onDocumentLoadError}
               loading=""
             >
+              <div className="relative">
               <Page
                 pageNumber={pageNumber}
                 scale={scale}
@@ -207,6 +217,12 @@ export function PDFViewer({ fileUrl, className = "" }: PDFViewerProps) {
                 renderAnnotationLayer={true}
                 className="shadow-lg"
               />
+              {highlight?.page === pageNumber && highlight.bbox && rotation === 0 && <div
+                aria-label="Source evidence region"
+                className="pointer-events-none absolute border-2 border-amber-500 bg-amber-300/20"
+                style={{ left: `${highlight.bbox.x}%`, top: `${highlight.bbox.y}%`, width: `${highlight.bbox.width}%`, height: `${highlight.bbox.height}%` }}
+              />}
+              </div>
             </Document>
           </div>
         )}
