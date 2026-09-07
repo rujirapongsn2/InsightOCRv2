@@ -62,6 +62,14 @@ interface PendingAction {
     arguments: any
 }
 
+interface AgentRun {
+    id: string
+    conversation_id: string
+    status: "queued" | "running" | "succeeded" | "failed"
+    error?: string | null
+    pending_action?: PendingAction | null
+}
+
 interface AgentMemory {
     id: string
     scope: string
@@ -96,6 +104,7 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
     const [events, setEvents] = useState<AgentEvent[]>([])
     const [inputValue, setInputValue] = useState("")
     const [streaming, setStreaming] = useState(false)
+    const [activeRun, setActiveRun] = useState<AgentRun | null>(null)
     const [thinkingIteration, setThinkingIteration] = useState<number | null>(null)
     const [planSteps, setPlanSteps] = useState<string[]>([])
     const [reflection, setReflection] = useState<{ complete: boolean; missing: string[] } | null>(null)
@@ -153,18 +162,56 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
         } catch { }
     }, [activeConversation, apiBase, headers])
 
-    useEffect(() => {
-        if (!activeConversation) { setMessages([]); return }
-        reloadActiveMessages()
-    }, [activeConversation, reloadActiveMessages])
+    const refreshAgentRun = useCallback(async (conversationId: string, runId: string) => {
+        try {
+            const res = await fetch(`${apiBase}/agent/conversations/${conversationId}/runs/${runId}`, { headers: headers() })
+            if (!res.ok) return
+            const data = await res.json()
+            const run = data.run as AgentRun | null
+            if (!run) return
+            setActiveRun(run)
+            const isRunning = run.status === "queued" || run.status === "running"
+            setStreaming(isRunning)
+            if (!isRunning && run.status === "failed") {
+                setError(run.error || "Agent could not complete the request")
+            }
+            await reloadActiveMessages()
+        } catch { }
+    }, [apiBase, headers, reloadActiveMessages])
+
+    const restoreActiveRun = useCallback(async (conversationId: string) => {
+        try {
+            const res = await fetch(`${apiBase}/agent/conversations/${conversationId}/runs/active`, { headers: headers() })
+            if (!res.ok) return
+            const data = await res.json()
+            const run = data.run as AgentRun | null
+            setActiveRun(run)
+            setStreaming(Boolean(run))
+        } catch { }
+    }, [apiBase, headers])
 
     useEffect(() => {
-        if (!streaming || !activeConversation) return
+        if (!activeConversation) {
+            setMessages([])
+            setActiveRun(null)
+            setStreaming(false)
+            return
+        }
+        setActiveRun(null)
+        setStreaming(false)
+        setPendingAction(null)
+        setError(null)
+        reloadActiveMessages()
+        restoreActiveRun(activeConversation)
+    }, [activeConversation, reloadActiveMessages, restoreActiveRun])
+
+    useEffect(() => {
+        if (!activeRun || !activeConversation || !["queued", "running"].includes(activeRun.status)) return
         const interval = window.setInterval(() => {
-            reloadActiveMessages()
+            refreshAgentRun(activeConversation, activeRun.id)
         }, 1200)
         return () => window.clearInterval(interval)
-    }, [activeConversation, reloadActiveMessages, streaming])
+    }, [activeConversation, activeRun, refreshAgentRun])
 
     const loadMemories = useCallback(async (scope: "user" | "job" = memoryScope) => {
         setLoadingMemories(true)
@@ -189,6 +236,25 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
     }, [apiBase, headers])
 
     useEffect(() => { loadSkills() }, [loadSkills])
+
+    useEffect(() => {
+        const action = activeRun?.pending_action
+        if (!action) return
+
+        const requiresExplicitConfirmation = action.tool_name === "create_skill" || action.tool_name === "web_search"
+        if (!requiresExplicitConfirmation && autoConfirmRef.current) {
+            if (!autoConfirmedIds.has(action.pending_action_id)) {
+                setAutoConfirmedIds(prev => new Set(prev).add(action.pending_action_id))
+                fetch(`${apiBase}/agent/confirm/${action.pending_action_id}`, {
+                    method: "POST",
+                    headers: headers(),
+                    body: JSON.stringify({ approved: true }),
+                }).catch(() => setPendingAction(action))
+            }
+            return
+        }
+        setPendingAction(action)
+    }, [activeRun?.pending_action, apiBase, autoConfirmedIds, headers])
 
     const enableAutoConfirm = () => {
         if (autoConfirm) {
@@ -288,106 +354,17 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
                 setStreaming(false)
                 return
             }
-
-            const reader = res.body!.getReader()
-            const decoder = new TextDecoder()
-            let buffer = ""
-            let finalText = ""
-            const newEvents: AgentEvent[] = []
-            let receivedTerminalEvent = false
-
-            while (true) {
-                const { done, value } = await reader.read()
-                if (done) break
-                buffer += decoder.decode(value, { stream: true })
-                const lines = buffer.split("\n")
-                buffer = lines.pop() || ""
-                for (const line of lines) {
-                    if (!line.startsWith("data: ")) continue
-                    try {
-                        const evt: AgentEvent = JSON.parse(line.slice(6))
-                        switch (evt.type) {
-                            case "thinking":
-                                setThinkingIteration(evt.iteration || null)
-                                break
-                            case "plan":
-                                setPlanSteps(evt.steps || [])
-                                break
-                            case "reflection":
-                                setReflection({ complete: !!evt.complete, missing: evt.missing || [] })
-                                break
-                            case "tool_call":
-                            case "tool_result":
-                            case "tool_rejected":
-                                newEvents.push(evt)
-                                setEvents([...newEvents])
-                                break
-                            case "confirmation_required":
-                                // Skill creation and web search always require
-                                // the user to approve the action explicitly.
-                                const requiresExplicitConfirmation = evt.tool_name === "create_skill" || evt.tool_name === "web_search"
-                                if (!requiresExplicitConfirmation && autoConfirmRef.current && evt.tool_call_id && evt.pending_action_id) {
-                                    const toolCallId = evt.tool_call_id
-                                    const pendingId = evt.pending_action_id
-                                    setAutoConfirmedIds(prev => new Set(prev).add(toolCallId))
-                                    fetch(`${apiBase}/agent/confirm/${pendingId}`, {
-                                        method: "POST", headers: headers(),
-                                        body: JSON.stringify({ approved: true }),
-                                    }).catch(err => {
-                                        console.error("Auto-confirm failed, falling back to manual dialog", err)
-                                        setPendingAction(evt as unknown as PendingAction)
-                                    })
-                                } else {
-                                    setPendingAction(evt as unknown as PendingAction)
-                                }
-                                break
-                            case "delta":
-                                finalText += evt.text || ""
-                                setStreamText(finalText)
-                                break
-                            case "done":
-                                receivedTerminalEvent = true
-                                setStreaming(false)
-                                setThinkingIteration(null)
-                                if (finalText) {
-                                    setMessages(prev => [...prev, { id: crypto.randomUUID(), role: "assistant", content: finalText, created_at: new Date().toISOString() }])
-                                    setStreamText("")
-                                }
-                                if (evt.success === false) {
-                                    // A graceful-stop DONE (e.g. no_progress) still means the
-                                    // run failed — surface it like case "error" would, since a
-                                    // silent "done" with no assistant text looks like nothing
-                                    // happened at all.
-                                    setError((evt.failed_steps || []).join(" ") || "Agent could not complete the request")
-                                }
-                                // Reconcile with authoritative history (adds the persisted
-                                // plan card + tool messages in order), then drop the live
-                                // event cards so they don't double-render.
-                                reloadActiveMessages().then(() => setEvents([]))
-                                break
-                            case "error":
-                                receivedTerminalEvent = true
-                                setError(evt.message || "Agent error")
-                                setStreaming(false)
-                                break
-                        }
-                    } catch { }
-                }
-            }
-            // Stream closed without a "done" event — backend likely threw an
-            // unhandled exception and dropped the connection.
-            if (!receivedTerminalEvent) {
+            const data = await res.json()
+            const run = data.run as AgentRun | undefined
+            if (!run) {
+                setError("Agent run was not created")
                 setStreaming(false)
-                setThinkingIteration(null)
-                setError("การเชื่อมต่อขาดหาย — กรุณาลองส่งคำถามใหม่อีกครั้ง")
-                reloadActiveMessages().then(() => setEvents([]))
+                return
             }
+            setActiveRun(run)
+            await reloadActiveMessages()
         } catch (e: any) {
-            // Safari reports aborted SSE connections as "Load failed";
-            // Chrome/Firefox say "Failed to fetch". Show a friendlier message.
-            const raw: string = e?.message || ""
-            const isConnErr = raw === "Load failed" || raw === "Failed to fetch" || raw.includes("network") || raw.includes("connection")
-            setError(isConnErr ? "การเชื่อมต่อขาดหาย — กรุณาลองส่งคำถามใหม่อีกครั้ง" : raw || "Network error")
+            setError(e?.message || "Network error")
             setStreaming(false)
         }
     }

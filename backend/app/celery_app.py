@@ -13,6 +13,7 @@ celery_app = Celery(
         "app.tasks.document_tasks",
         "app.tasks.workflow_tasks",
         "app.tasks.maintenance_tasks",
+        "app.tasks.agent_tasks",
     ]
 )
 
@@ -46,6 +47,7 @@ celery_app.conf.update(
         "app.tasks.document_tasks.*": {"queue": "documents"},
         "app.tasks.workflow_tasks.*": {"queue": "workflows"},
         "app.tasks.maintenance_tasks.*": {"queue": "workflows"},
+        "app.tasks.agent_tasks.*": {"queue": "workflows"},
     },
     beat_schedule={
         "dispatch-scheduled-workflows": {

@@ -13,6 +13,7 @@ from app.models import (  # noqa: F401
     agent_memory,
     agent_message,
     agent_pending_action,
+    agent_run,
     agent_skill,
     ai_settings,
     api_access_token,

@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 from uuid import UUID
@@ -10,14 +10,17 @@ from urllib.parse import quote
 from app.api import deps
 from app.api.permissions import ensure_job_access, is_admin_user
 from app.api.v1.endpoints.integrations import _integration_api_key, _llm_base_url_for_integration
-from app.agent.loop import AgentLoop
 from app.crud.crud_agent_conversation import agent_conversation as crud_conv
 from app.crud.crud_agent_memory import agent_memory as crud_memory
 from app.crud.crud_agent_pending import agent_pending as crud_pending
+from app.crud.crud_agent_run import agent_run as crud_run
 from app.crud.crud_agent_skill import agent_skill as crud_skill
 from app.crud.crud_integration import integration as crud_integration
 from app.models.job import Job
 from app.models.ai_settings import AISettings
+from app.models.agent_conversation import AgentConversation
+from app.models.agent_pending_action import AgentPendingAction
+from app.models.agent_run import AgentRun
 from app.core.config import settings
 from app.schemas.agent import (
     AgentConversationCreate,
@@ -147,6 +150,38 @@ def _build_agent_llm_config(db: Session, conv) -> dict:
     return _ai_settings_to_config(setting, "fallback_ai_settings")
 
 
+def _agent_run_payload(db: Session, run: AgentRun) -> dict:
+    """Return only UI-safe run state; messages remain the source of evidence."""
+    pending = (
+        db.query(AgentPendingAction)
+        .filter(
+            AgentPendingAction.conversation_id == run.conversation_id,
+            AgentPendingAction.user_id == run.user_id,
+            AgentPendingAction.status == "pending",
+        )
+        .order_by(AgentPendingAction.created_at.desc())
+        .first()
+    )
+    return {
+        "id": str(run.id),
+        "conversation_id": str(run.conversation_id),
+        "status": run.status,
+        "error": run.error,
+        "created_at": run.created_at.isoformat() if run.created_at else None,
+        "started_at": run.started_at.isoformat() if run.started_at else None,
+        "finished_at": run.finished_at.isoformat() if run.finished_at else None,
+        "pending_action": (
+            {
+                "pending_action_id": str(pending.id),
+                "tool_name": pending.tool_name,
+                "description": pending.description or pending.tool_name,
+                "arguments": pending.tool_arguments,
+            }
+            if pending else None
+        ),
+    }
+
+
 @router.post("/conversations", status_code=201)
 async def create_agent_conversation(
     data: AgentConversationCreate,
@@ -240,7 +275,14 @@ async def get_agent_conversation(
     db: Session = Depends(deps.get_db),
     current_user=Depends(deps.get_current_user),
 ):
-    conv = crud_conv.get(db, conversation_id)
+    # Serialize admission per conversation. The partial unique index is the
+    # final guard, but the row lock lets us return a helpful conflict response.
+    conv = (
+        db.query(AgentConversation)
+        .filter(AgentConversation.id == conversation_id)
+        .with_for_update()
+        .first()
+    )
     if not conv or conv.user_id != current_user.id:
         raise HTTPException(status_code=404)
     if conv.job_id is not None:
@@ -264,15 +306,72 @@ async def send_agent_message(
         raise HTTPException(status_code=404)
     if conv.job_id is not None:
         _ensure_job_access(db, conv.job_id, current_user)
-    llm_config = _build_agent_llm_config(db, conv)
-
-    loop = AgentLoop(db=db, conversation_id=conversation_id, user_id=current_user.id, job_id=conv.job_id, llm_config=llm_config, max_iterations=conv.max_iterations, kind=conv.kind or "document")
-
-    return StreamingResponse(
-        loop.run(data.content),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
+    active = crud_run.get_active_for_conversation(
+        db,
+        conversation_id=conversation_id,
+        user_id=current_user.id,
     )
+    if active:
+        raise HTTPException(
+            status_code=409,
+            detail="Agent is already working on this conversation. Reopen it to follow the existing run.",
+        )
+
+    run = crud_run.create(
+        db,
+        conversation_id=conversation_id,
+        user_id=current_user.id,
+        user_message=data.content,
+    )
+    try:
+        from app.tasks.agent_tasks import run_agent_task
+
+        task = run_agent_task.delay(str(run.id))
+        run.task_id = task.id
+        db.commit()
+        db.refresh(run)
+    except Exception:
+        run.status = "failed"
+        run.error = "Agent queue is unavailable"
+        db.commit()
+        raise HTTPException(status_code=503, detail="Agent queue is unavailable")
+
+    return JSONResponse(status_code=202, content={"run": _agent_run_payload(db, run)})
+
+
+@router.get("/conversations/{conversation_id}/runs/active")
+async def get_active_agent_run(
+    conversation_id: UUID,
+    db: Session = Depends(deps.get_db),
+    current_user=Depends(deps.get_current_user),
+):
+    conv = crud_conv.get(db, conversation_id)
+    if not conv or conv.user_id != current_user.id:
+        raise HTTPException(status_code=404)
+    if conv.job_id is not None:
+        _ensure_job_access(db, conv.job_id, current_user)
+    run = crud_run.get_active_for_conversation(
+        db,
+        conversation_id=conversation_id,
+        user_id=current_user.id,
+    )
+    return {"run": _agent_run_payload(db, run) if run else None}
+
+
+@router.get("/conversations/{conversation_id}/runs/{run_id}")
+async def get_agent_run(
+    conversation_id: UUID,
+    run_id: UUID,
+    db: Session = Depends(deps.get_db),
+    current_user=Depends(deps.get_current_user),
+):
+    conv = crud_conv.get(db, conversation_id)
+    run = crud_run.get(db, run_id)
+    if not conv or not run or run.conversation_id != conversation_id or run.user_id != current_user.id:
+        raise HTTPException(status_code=404)
+    if conv.job_id is not None:
+        _ensure_job_access(db, conv.job_id, current_user)
+    return {"run": _agent_run_payload(db, run)}
 
 
 @router.post("/confirm/{pending_action_id}")
