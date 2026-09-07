@@ -248,7 +248,12 @@ def map_fields(text: str, schema: Any, db: Any, file_path: str | None = None,
         target = json.loads(build_schema_json(schema, pending))
         provider = route
         try:
-            timeout = min(settings.MAPPING_REQUEST_TIMEOUT_SECONDS, remaining)
+            request_limit = (
+                settings.MAPPING_SOFTNIX_REQUEST_TIMEOUT_SECONDS
+                if route == "softnix"
+                else settings.MAPPING_LLM_REQUEST_TIMEOUT_SECONDS
+            )
+            timeout = min(request_limit, remaining)
             if route == "softnix":
                 result = extract_structure(text, json.dumps(target), db, timeout=timeout)
             else:

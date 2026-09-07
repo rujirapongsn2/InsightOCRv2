@@ -129,6 +129,18 @@ def test_total_budget_prevents_next_provider(monkeypatch):
     assert report["attempts"][0]["status"] == "timeout"
 
 
+def test_provider_request_timeouts_are_independent(monkeypatch):
+    softnix = Mock(return_value={"id": "A"})
+    monkeypatch.setattr(mapping, "extract_structure", softnix)
+    mapping.map_fields("id A", schema({"name": "id", "type": "text"}), None, engine="softnix")
+    assert softnix.call_args.kwargs["timeout"] == 240
+
+    llm = Mock(return_value=({"id": "A"}, "llm:test"))
+    monkeypatch.setattr(mapping, "llm_mapping", llm)
+    mapping.map_fields("id A", schema({"name": "id", "type": "text"}), None, engine="llm")
+    assert llm.call_args.args[3] == 120
+
+
 def test_sample_uses_job_type_conversion(monkeypatch):
     from app.api.v1.endpoints.schemas import _extract_bbox_preview_in_worker
     monkeypatch.setattr(mapping, "extract_fixed_position_fields", lambda *a: (

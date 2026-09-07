@@ -59,7 +59,8 @@ guarantee of accuracy on large or complex documents.
 
 ## Time limits
 
-- Mapping request timeout: `MAPPING_REQUEST_TIMEOUT_SECONDS=120`.
+- Softnix Structured Output request timeout: `MAPPING_SOFTNIX_REQUEST_TIMEOUT_SECONDS=240`.
+- OpenAI-compatible LLM fallback request timeout: `MAPPING_LLM_REQUEST_TIMEOUT_SECONDS=120`.
 - Remaining stage budget: `MAPPING_TOTAL_TIMEOUT_SECONDS=300`.
 - Retry task soft/hard limits: 360/390 seconds.
 - Mapping probe task soft/hard limits: 300/330 seconds.
