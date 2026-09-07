@@ -20,6 +20,7 @@ from PIL import Image
 from pypdf import PdfReader
 
 from app.core.config import settings
+from app.services.pdf_render import find_pdftoppm_page_png
 from app.services.tesseract_ocr import TesseractOcrError, process_tesseract_ocr_tsv
 
 
@@ -155,10 +156,12 @@ def _render_pdf_page(file_path: str, page_number: int) -> str:
     except subprocess.TimeoutExpired as exc:
         _cleanup_rendered_directory(directory)
         raise BboxLocatorError("Rendering the scanned PDF page timed out") from exc
-    rendered_path = f"{output_prefix}-{page_number}.png"
-    if result.returncode != 0 or not os.path.isfile(rendered_path):
+    rendered_path = find_pdftoppm_page_png(output_prefix, page_number)
+    if result.returncode != 0 or rendered_path is None or not os.path.isfile(rendered_path):
         _cleanup_rendered_directory(directory)
-        raise BboxLocatorError(f"Unable to render PDF page {page_number} for OCR")
+        detail = result.stderr.strip()
+        suffix = f": {detail[:500]}" if detail else ""
+        raise BboxLocatorError(f"Unable to render PDF page {page_number} for OCR{suffix}")
     return rendered_path
 
 

@@ -34,7 +34,7 @@ accept a file or parse malformed input. It is not a user-selectable route.
 - Total extraction budget: `ANYDOC_DOCUMENT_TIMEOUT_SECONDS` (default `1200`)
 - TesseractOCR page timeout: `TESSERACT_OCR_TIMEOUT_SECONDS` (default `30`)
 - Softnix OCR page timeout: `ANYDOC_PRIMARY_OCR_TIMEOUT_SECONDS` (default
-  `90`)
+  `240`)
 - OCR fallback request timeout: `ANYDOC_FALLBACK_REQUEST_TIMEOUT_SECONDS`
   (default `120`)
 

@@ -69,9 +69,9 @@ class Settings(BaseSettings):
     ANYDOC_DOCUMENT_TIMEOUT_SECONDS: int = 1200
     TESSERACT_OCR_LANGUAGE: str = "tha+eng"
     TESSERACT_OCR_TIMEOUT_SECONDS: int = 30
-    # Softnix OCR is asynchronous. Do not let one stalled provider job delay
-    # the configured OCR fallback for a whole document page.
-    ANYDOC_PRIMARY_OCR_TIMEOUT_SECONDS: int = 30
+    # Softnix OCR is asynchronous. Complex scanned Thai pages can take more
+    # than a minute, so allow a bounded four-minute wait before OCR fallback.
+    ANYDOC_PRIMARY_OCR_TIMEOUT_SECONDS: int = 240
     ANYDOC_FALLBACK_REQUEST_TIMEOUT_SECONDS: int = 120
 
     # Cloud storage OAuth. Keep provider secrets server-side; users connect

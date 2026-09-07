@@ -77,6 +77,18 @@ const ocrEngineOptions: Array<{ value: OcrEngine; label: string }> = [
     { value: "softnix_ocr", label: "Softnix OCR" },
     { value: "ocr_fallback", label: "OCR fallback" },
 ]
+
+function supportsManualOcrRetry(document: Pick<Document, "filename" | "mime_type">): boolean {
+    const filename = document.filename.toLowerCase()
+    const mimeType = (document.mime_type || "").toLowerCase()
+    return (
+        mimeType === "application/pdf" ||
+        filename.endsWith(".pdf") ||
+        anyDocImageMimeTypes.has(mimeType) ||
+        anyDocImageExtensions.some((extension) => filename.endsWith(`.${extension}`))
+    )
+}
+
 type IntegrationType = "api" | "workflow" | "llm" | "softnix_genai" | "gdrive" | "onedrive"
 
 interface IntegrationConfig {
@@ -136,6 +148,7 @@ export default function JobDetailPage() {
     const [structuredJsonDraft, setStructuredJsonDraft] = useState("{}")
     const [structuredJsonError, setStructuredJsonError] = useState<string | null>(null)
     const [retryEngine, setRetryEngine] = useState<OcrEngine>("tesseract_ocr")
+    const [documentRetryEngines, setDocumentRetryEngines] = useState<Record<string, OcrEngine>>({})
     const [retryingDocId, setRetryingDocId] = useState<string | null>(null)
     const fileInputRef = useRef<HTMLInputElement>(null)
     const pollingIntervalsRef = useRef<Map<string, AbortController>>(new Map())
@@ -466,7 +479,7 @@ export default function JobDetailPage() {
         return controller
     }
 
-    const handleProcess = async (docId: string) => {
+    const handleProcess = async (docId: string, ocrEngine?: OcrEngine) => {
         const doc = documents.find(d => d.id === docId)
         if (!doc) return
 
@@ -483,6 +496,10 @@ export default function JobDetailPage() {
                 },
                 body: JSON.stringify({
                     schema_id: doc.schema_id || null,
+                    ...(ocrEngine ? {
+                        extraction_profile: "anydoc_hybrid",
+                        ocr_engine: ocrEngine,
+                    } : {}),
                 })
             })
 
@@ -1314,6 +1331,7 @@ export default function JobDetailPage() {
                                     const isProcessing = processingDocs.has(doc.id) || doc.status === "processing"
                                     const canReview = doc.status === "extraction_completed" || doc.status === "reviewed"
                                     const pipeline = doc.extraction_metadata?.pipeline
+                                    const canManuallyRetryOcr = doc.status === "failed" && supportsManualOcrRetry(doc)
 
                                     return (
                                         <div key={doc.id} className="p-4 border rounded-md bg-slate-50">
@@ -1358,7 +1376,7 @@ export default function JobDetailPage() {
                                                 </div>
                                             )}
 
-                                            <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_auto]">
+                                            <div className={`grid gap-2 ${canManuallyRetryOcr ? "md:grid-cols-[minmax(0,1fr)_minmax(10rem,0.35fr)_auto_auto]" : "md:grid-cols-[minmax(0,1fr)_auto]"}`}>
                                                 <div className="min-w-0 space-y-1">
                                                     <label className="text-xs font-medium text-slate-500">Schema</label>
                                                     <select
@@ -1374,10 +1392,37 @@ export default function JobDetailPage() {
                                                     </select>
                                                 </div>
 
+                                                {canManuallyRetryOcr && (
+                                                    <div className="min-w-0 space-y-1">
+                                                        <label className="text-xs font-medium text-slate-500" htmlFor={`ocr-engine-${doc.id}`}>
+                                                            OCR engine
+                                                        </label>
+                                                        <select
+                                                            id={`ocr-engine-${doc.id}`}
+                                                            value={documentRetryEngines[doc.id] || "tesseract_ocr"}
+                                                            onChange={(event) => setDocumentRetryEngines((previous) => ({
+                                                                ...previous,
+                                                                [doc.id]: event.target.value as OcrEngine,
+                                                            }))}
+                                                            disabled={isProcessing}
+                                                            className="flex h-9 w-full rounded-md border border-slate-200 bg-white px-3 py-1 text-sm"
+                                                        >
+                                                            {ocrEngineOptions.map((option) => (
+                                                                <option key={option.value} value={option.value}>{option.label}</option>
+                                                            ))}
+                                                        </select>
+                                                    </div>
+                                                )}
+
                                                 {(doc.status === "uploaded" || doc.status === "queued" || doc.status === "failed") && (
                                                     <>
                                                         <Button
-                                                            onClick={() => handleProcess(doc.id)}
+                                                            onClick={() => handleProcess(
+                                                                doc.id,
+                                                                canManuallyRetryOcr
+                                                                    ? (documentRetryEngines[doc.id] || "tesseract_ocr")
+                                                                    : undefined,
+                                                            )}
                                                             disabled={isProcessing}
                                                             size="sm"
                                                             variant={doc.status === "failed" ? "outline" : "default"}

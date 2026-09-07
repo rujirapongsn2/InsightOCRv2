@@ -28,6 +28,7 @@ from app.services.ocr_fallback import (
     process_fallback_ocr,
     resolve_fallback_api_key,
 )
+from app.services.pdf_render import find_pdftoppm_page_png
 from app.services.tesseract_ocr import TesseractOcrError, process_tesseract_ocr
 from app.services.tls import get_verify_ssl
 
@@ -203,10 +204,12 @@ def _render_pdf_page(file_path: str, page_number: int) -> str:
     except subprocess.TimeoutExpired as exc:
         shutil.rmtree(directory, ignore_errors=True)
         raise AnydocTerminalError(f"Rendering PDF page {page_number} timed out") from exc
-    rendered_path = f"{output_prefix}-{page_number}.png"
-    if result.returncode != 0 or not os.path.isfile(rendered_path):
+    rendered_path = find_pdftoppm_page_png(output_prefix, page_number)
+    if result.returncode != 0 or rendered_path is None or not os.path.isfile(rendered_path):
         shutil.rmtree(directory, ignore_errors=True)
-        raise AnydocTerminalError(f"Unable to render PDF page {page_number} for OCR")
+        detail = result.stderr.strip()
+        suffix = f": {detail[:500]}" if detail else ""
+        raise AnydocTerminalError(f"Unable to render PDF page {page_number} for OCR{suffix}")
     return rendered_path
 
 
