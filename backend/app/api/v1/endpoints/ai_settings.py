@@ -24,6 +24,8 @@ from app.services.ai_suggestion_service import AISuggestionService, _normalize_o
 
 router = APIRouter()
 
+PROVIDER_HEALTH_CHECK_TOKEN_LIMIT = 128
+
 
 def _validate_agent_provider(setting: AISettings) -> None:
     if not setting.is_active or setting.provider_type != "openai_compatible" or not setting.supports_tool_calling:
@@ -105,13 +107,18 @@ async def _test_openai_model_response(setting: AISettings) -> int:
                 "content": "Reply with exactly INSIGHTDOC_PROVIDER_OK and nothing else.",
             }],
             temperature=0,
-            max_tokens=16,
+            max_tokens=PROVIDER_HEALTH_CHECK_TOKEN_LIMIT,
         )
 
     choices = getattr(response, "choices", None) or []
-    message = getattr(choices[0], "message", None) if choices else None
+    choice = choices[0] if choices else None
+    message = getattr(choice, "message", None) if choice else None
     content = (getattr(message, "content", None) or "").strip()
     if "INSIGHTDOC_PROVIDER_OK" not in content:
+        if getattr(choice, "finish_reason", None) == "length":
+            raise ValueError(
+                "Model health-check response was truncated before completion"
+            )
         raise ValueError("Model returned an unexpected health-check response")
     return round((perf_counter() - started_at) * 1000)
 

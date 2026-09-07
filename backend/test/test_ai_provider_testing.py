@@ -128,6 +128,61 @@ async def test_model_probe_requires_the_expected_live_response(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_model_probe_allows_reasoning_models_enough_output_tokens(monkeypatch):
+    request = {}
+
+    class FakeCompletions:
+        async def create(self, **kwargs):
+            request.update(kwargs)
+            return SimpleNamespace(choices=[SimpleNamespace(
+                finish_reason="stop",
+                message=SimpleNamespace(content="\nINSIGHTDOC_PROVIDER_OK"),
+            )])
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+    monkeypatch.setattr(ai_settings, "AsyncOpenAI", FakeClient)
+
+    await ai_settings._test_openai_model_response(_provider())
+
+    assert request["max_tokens"] == ai_settings.PROVIDER_HEALTH_CHECK_TOKEN_LIMIT
+    assert request["max_tokens"] >= 128
+
+
+@pytest.mark.asyncio
+async def test_model_probe_reports_truncated_health_check(monkeypatch):
+    class FakeCompletions:
+        async def create(self, **_kwargs):
+            return SimpleNamespace(choices=[SimpleNamespace(
+                finish_reason="length",
+                message=SimpleNamespace(content="INSIGHTDOC_PROVIDER"),
+            )])
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+    monkeypatch.setattr(ai_settings, "AsyncOpenAI", FakeClient)
+
+    with pytest.raises(ValueError, match="truncated"):
+        await ai_settings._test_openai_model_response(_provider())
+
+
+@pytest.mark.asyncio
 async def test_provider_test_fails_when_insightdoc_extraction_fails(monkeypatch):
     provider = _provider()
 

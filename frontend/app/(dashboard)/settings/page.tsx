@@ -326,9 +326,16 @@ export default function SettingsPage() {
     try {
       const result = await testAIProvider(tok, provider.id)
       setProviderTestResults((current) => ({ ...current, [provider.id]: result }))
-      setAiProviderSuccess(result.success
-        ? `${provider.display_name}: การทดสอบ Provider ผ่านแล้ว${result.agent_ready ? " และพร้อมใช้กับ AI Agent" : ""}`
-        : `${provider.display_name}: การทดสอบ Provider ไม่ผ่าน`)
+      if (result.success) {
+        setAiProviderSuccess(
+          `${provider.display_name}: การทดสอบ Provider ผ่านแล้ว${result.agent_ready ? " และพร้อมใช้กับ AI Agent" : ""}`,
+        )
+      } else {
+        const failedStep = result.steps.find((step) => step.status === "failed")
+        setAiProviderError(
+          `${provider.display_name}: การทดสอบ Provider ไม่ผ่าน${failedStep ? ` - ${failedStep.detail}` : ""}`,
+        )
+      }
       await fetchAiProviders()
     } catch (e: unknown) {
       setAiProviderError(e instanceof Error ? e.message : String(e))
