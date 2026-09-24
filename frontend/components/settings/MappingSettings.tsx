@@ -9,6 +9,7 @@ type CheckResult = { engine: string; passed: boolean; elapsed_seconds: number }
 
 export function MappingSettings({ providers }: { providers: Array<{ id: string; display_name: string; is_active: boolean; provider_type?: string }> }) {
     const [policy, setPolicy] = useState<Policy>({ engine: "auto", fallback_provider_id: null, fallback_enabled: true })
+    const [savedPolicy, setSavedPolicy] = useState<Policy>({ engine: "auto", fallback_provider_id: null, fallback_enabled: true })
     const [loaded, setLoaded] = useState(false)
     const [busy, setBusy] = useState(false)
     const [message, setMessage] = useState("")
@@ -16,11 +17,14 @@ export function MappingSettings({ providers }: { providers: Array<{ id: string; 
     const controller = useRef<AbortController | null>(null)
     const base = `${getApiBaseUrl()}/settings/mapping`
     const headers = () => ({ Authorization: `Bearer ${localStorage.getItem("token")}`, "Content-Type": "application/json" })
+    const dirty = loaded && (policy.engine !== savedPolicy.engine
+        || policy.fallback_enabled !== savedPolicy.fallback_enabled
+        || (policy.fallback_provider_id ?? "") !== (savedPolicy.fallback_provider_id ?? ""))
     useEffect(() => {
         const abort = new AbortController()
         fetch(`${base}/config`, { headers: headers(), signal: abort.signal })
             .then(async response => { if (!response.ok) throw new Error("Unable to load mapping configuration"); return response.json() })
-            .then(data => { setPolicy(data); setLoaded(true) })
+            .then(data => { setPolicy(data); setSavedPolicy(data); setLoaded(true) })
             .catch(error => { if (!abort.signal.aborted) setMessage(error.message) })
         return () => { abort.abort(); controller.current?.abort() }
     }, [base])
@@ -30,6 +34,7 @@ export function MappingSettings({ providers }: { providers: Array<{ id: string; 
         try {
             const response = await fetch(`${base}/config`, { method: "PUT", headers: headers(), body: JSON.stringify(policy) })
             if (!response.ok) throw new Error((await response.json()).detail || "Save failed")
+            setSavedPolicy(policy)
             setMessage("Mapping settings saved")
         } catch (error) { setMessage(error instanceof Error ? error.message : "Save failed") }
         finally { setBusy(false) }
@@ -67,6 +72,7 @@ export function MappingSettings({ providers }: { providers: Array<{ id: string; 
             <label className="space-y-1 text-sm">Default engine
                 <select aria-label="Default mapping engine" disabled={!loaded || busy} value={policy.engine} onChange={e => setPolicy({ ...policy, engine: e.target.value })} className="block h-9 w-full rounded border bg-white px-2">
                     <option value="auto">Auto</option><option value="softnix">Softnix Structured</option>
+                    <option value="jev">TypeSafe Jev</option>
                     <option value="llm">LLM Provider</option><option value="fixed">Fixed position only</option>
                 </select>
             </label>
@@ -79,8 +85,9 @@ export function MappingSettings({ providers }: { providers: Array<{ id: string; 
         </div>
         <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={policy.fallback_enabled} disabled={!loaded || busy} onChange={e => setPolicy({ ...policy, fallback_enabled: e.target.checked })} />LLM fallback in Auto mode</label>
         <div className="flex flex-wrap gap-2">
-            <button type="button" onClick={save} disabled={!loaded || busy} className="inline-flex items-center gap-1 rounded border px-3 py-2 text-sm disabled:opacity-50"><Save className="h-4 w-4" />Save mapping settings</button>
-            <button type="button" onClick={test} disabled={!loaded || busy} title="Test saved providers using synthetic reference and amount fields" className="inline-flex items-center gap-1 rounded border px-3 py-2 text-sm disabled:opacity-50">{busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}Test saved providers</button>
+            <button type="button" onClick={save} disabled={!loaded || busy} className="inline-flex items-center gap-1 rounded border px-3 py-2 text-sm disabled:opacity-50"><Save className="h-4 w-4" />Save mapping settings{dirty ? " •" : ""}</button>
+            <button type="button" onClick={test} disabled={!loaded || busy || dirty} title={dirty ? "บันทึกก่อนทดสอบ — Test ใช้ค่าที่บันทึกแล้วเท่านั้น" : "ทดสอบ providers ที่บันทึกแล้วด้วยเอกสารตัวอย่าง"} className="inline-flex items-center gap-1 rounded border px-3 py-2 text-sm disabled:opacity-50">{busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}Test saved providers</button>
+            {dirty && <span className="self-center text-xs text-amber-700">มีการแก้ไขที่ยังไม่บันทึก — กด Save mapping settings ก่อนทดสอบ</span>}
         </div>
         {message && <p role="status" className="text-sm">{message}</p>}
         {checks.map(check => <div key={check.engine} className={`flex items-center gap-2 text-sm ${check.passed ? "text-green-700" : "text-red-700"}`}>

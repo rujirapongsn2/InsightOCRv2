@@ -14,6 +14,7 @@ import {
     useNodesState,
     useEdgesState,
     useReactFlow,
+    useUpdateNodeInternals,
     Handle,
     Position,
     MarkerType,
@@ -27,7 +28,8 @@ import {
     ArrowLeft, Save, Play, Loader2, CalendarClock, Trash2, X,
     Zap, FileText, Sparkles, GitBranch, Shuffle, Code2, Globe, FileOutput, Briefcase,
     CheckCircle2, XCircle, CircleDashed, CircleDot, SkipForward, Activity, ChevronDown, ChevronRight,
-    Download, Plus, FlaskConical, Cloud, CloudUpload, CloudDownload, Webhook, Copy, RotateCw, ShieldOff, Maximize2, Upload,
+    Download, Plus, FlaskConical, Cloud, CloudUpload, CloudDownload, Webhook, Copy, RotateCw, ShieldOff, Maximize2, Upload, ListFilter,
+    Gauge, Split, ShieldQuestion,
 } from "lucide-react"
 import {
     Workflow, WorkflowRun, NodeTypeDef, JobSummary,
@@ -53,12 +55,24 @@ const CATEGORY_STYLE: Record<string, { icon: any; color: string; bg: string }> =
     storage:   { icon: Cloud,      color: "#0EA5E9", bg: "#E0F2FE" },
 }
 
+function edgeLabel(sourceHandle?: string | null): string | undefined {
+    if (!sourceHandle) return undefined
+    if (sourceHandle === "true") return "True"
+    if (sourceHandle === "false") return "False"
+    if (sourceHandle === "fallback") return "Fallback"
+    return sourceHandle
+}
+
 const TYPE_ICON: Record<string, any> = {
     trigger_manual: Zap,
     trigger_schedule: CalendarClock,
     trigger_webhook: Webhook,
     job_source: Briefcase,
     document_source: FileText,
+    field_mapping: ListFilter,
+    jev_score: Gauge,
+    jev_choice: Split,
+    jev_noul: ShieldQuestion,
     llm: Sparkles,
     condition: GitBranch,
     transform: Shuffle,
@@ -89,12 +103,64 @@ type WfNodeData = {
     runStatus?: string
 }
 
-function WfNode({ data, selected }: NodeProps) {
+const JEV_CHOICE_FALLBACK = "fallback"
+
+// Source handles of a Choice node — must mirror backend _normalize_jev_options
+// (key before the first "|", trimmed; "fallback" is reserved; duplicates dropped).
+function jevChoiceHandlesFor(config: Record<string, any> | undefined): Array<{ id: string; label: string }> {
+    const raw = config?.options
+    const parse = (item: any): { id: string; label: string } | null => {
+        if (typeof item === "string") {
+            const [key, label] = item.split("|")
+            const k = (key || "").trim()
+            return k ? { id: k, label: (label || "").trim() || k } : null
+        }
+        const k = String(item?.key ?? "").trim()
+        return k ? { id: k, label: String(item?.label ?? k).trim() } : null
+    }
+    const items: any[] = Array.isArray(raw) ? raw : raw ? String(raw).split("\n") : []
+    const rows: Array<{ id: string; label: string }> = []
+    const seen = new Set<string>()
+    for (const item of items) {
+        const row = parse(item)
+        if (!row || row.id.toLowerCase() === JEV_CHOICE_FALLBACK || seen.has(row.id)) continue
+        seen.add(row.id)
+        rows.push(row)
+    }
+    if (config?.enable_fallback !== false) rows.push({ id: JEV_CHOICE_FALLBACK, label: "Fallback" })
+    return rows
+}
+
+// Edges whose Choice handle no longer exists are invisible on the canvas (so
+// they can't be deleted by hand) yet would still be saved and never run.
+function pruneStaleChoiceEdges(nodes: Node[], edges: Edge[]): { edges: Edge[]; removed: number } {
+    const handlesByNode = new Map<string, Set<string>>()
+    for (const n of nodes) {
+        const d = n.data as WfNodeData
+        if (d.nodeType === "jev_choice") handlesByNode.set(n.id, new Set(jevChoiceHandlesFor(d.config).map((h) => h.id)))
+    }
+    const kept = edges.filter((e) => {
+        const handles = handlesByNode.get(e.source)
+        return !handles || handles.has(e.sourceHandle || "")
+    })
+    return { edges: kept, removed: edges.length - kept.length }
+}
+
+function WfNode({ id, data, selected }: NodeProps) {
     const d = data as WfNodeData
     const style = CATEGORY_STYLE[d.category] || CATEGORY_STYLE.action
     const Icon = TYPE_ICON[d.nodeType] || style.icon
     const isTrigger = d.category === "trigger"
     const isCondition = d.nodeType === "condition"
+    const isJevChoice = d.nodeType === "jev_choice"
+    const jevChoiceHandles = isJevChoice ? jevChoiceHandlesFor(d.config) : []
+    // React Flow only re-measures handles when the node resizes; Choice handles
+    // change with the options text, so register them explicitly.
+    const updateNodeInternals = useUpdateNodeInternals()
+    const handleSignature = jevChoiceHandles.map((h) => h.id).join("\u0000")
+    useEffect(() => {
+        if (isJevChoice) updateNodeInternals(id)
+    }, [id, isJevChoice, handleSignature, updateNodeInternals])
     const borderColor = d.runStatus ? STATUS_BORDER[d.runStatus] : selected ? "#2786C2" : "#E2E8F0"
     const isRunning = d.runStatus === "running"
 
@@ -122,6 +188,19 @@ function WfNode({ data, selected }: NodeProps) {
                     <Handle id="false" type="source" position={Position.Right} style={{ top: "75%" }} className="!w-2.5 !h-2.5 !bg-red-400" />
                     <div className="absolute right-1.5 text-[9px] text-emerald-600 font-semibold" style={{ top: "calc(35% - 7px)" }}>T</div>
                     <div className="absolute right-1.5 text-[9px] text-red-500 font-semibold" style={{ top: "calc(75% - 7px)" }}>F</div>
+                </>
+            ) : isJevChoice ? (
+                <>
+                    {jevChoiceHandles.map((h, i) => (
+                        <Handle
+                            key={h.id}
+                            id={h.id}
+                            type="source"
+                            position={Position.Right}
+                            style={{ top: `${((i + 1) / (jevChoiceHandles.length + 1)) * 100}%` }}
+                            className={h.id === JEV_CHOICE_FALLBACK ? "!w-2.5 !h-2.5 !bg-amber-400" : "!w-2.5 !h-2.5 !bg-[#2786C2]"}
+                        />
+                    ))}
                 </>
             ) : (
                 <Handle type="source" position={Position.Right} className="!w-2.5 !h-2.5 !bg-[#2786C2]" />
@@ -215,6 +294,51 @@ const NODE_HELP_CONTENT: Record<string, NodeHelpContent> = {
             { task: "สร้างรายงาน", role: "รวบรวมผลทุก stage เป็นเอกสารจริงและผูกไฟล์ให้ดาวน์โหลด", budget: "3 รอบ · 300 วิ · 8,000 tokens", best_for: "จุดสุดท้ายของสาย Agent ที่ต้องส่งมอบไฟล์ HTML/DOCX/PDF/XLSX" },
         ],
         caution: "โหมด LLM: ระบุรูปแบบผลลัพธ์ให้ชัดเจน เช่น หัวข้อ ตาราง หรือ JSON เพื่อให้ node ถัดไปใช้งานต่อได้แน่นอน · โหมด Agent: งาน วิเคราะห์/ประเมินความเสี่ยง/ข้อเสนอแนะ ส่งผลได้เฉพาะข้อความ — หากต้องการไฟล์ ให้วาง node ที่เลือก “สร้างรายงาน” ไว้ตัวสุดท้ายของสาย Agent",
+    },
+    field_mapping: {
+        purpose: "ดึงค่าตามฟิลด์ใน Schema (เช่น เลขที่ใบแจ้งหนี้ ยอดรวม) จากข้อความ OCR ของเอกสาร ด้วยระบบเดียวกับหน้า Jobs",
+        steps: [
+            "ต่อเส้นจาก Jobs หรือ Document Source ที่มีข้อความ OCR แล้ว — node นี้อ่านเอกสารจาก node ก่อนหน้าให้เอง",
+            "เลือก Schema ที่กำหนดฟิลด์ที่ต้องการ",
+            "เลือกวิธีดึงข้อมูล: ถ้าไม่แน่ใจ ใช้ “อัตโนมัติ” ระบบจะลองทีละวิธีและข้ามวิธีที่ยังไม่ได้ตั้งค่า",
+            "ถ้าต้องการแค่บางฟิลด์ ใส่ชื่อฟิลด์คั่นด้วยจุลภาค ไม่อย่างนั้นเว้นว่างไว้",
+        ],
+        example: "ตัวอย่าง: Manual Trigger → Jobs → Field Mapping (Schema ใบแจ้งหนี้, อัตโนมัติ) → Condition",
+        caution: "ถ้าเลือก Jev แต่ยังไม่ได้ตั้งค่าที่ Settings › TypeSafe node จะหยุดทำงาน · ฟิลด์ที่ Jev ไม่ค่อยมั่นใจจะถูกทำเครื่องหมายให้ตรวจซ้ำ พร้อมค่าที่ Jev เสนอ",
+    },
+    jev_score: {
+        purpose: "ให้ Jev อ่านข้อมูลแล้วให้คะแนนตามเกณฑ์ที่คุณกำหนด เช่น ความครบถ้วนของเอกสาร — ได้ตัวเลขไว้ตัดสินใจต่อ ไม่ได้เขียนข้อความใหม่",
+        steps: [
+            "ตั้งชื่อสิ่งที่ต้องการให้คะแนน เช่น ความครบถ้วนของเอกสาร",
+            "ในช่อง “ข้อมูลที่ใช้ประเมิน” กด “แทรกข้อมูล” เพื่อเลือกข้อมูลจาก node ก่อนหน้า",
+            "เขียนเกณฑ์บรรทัดละ 1 ข้อ แบบ ชื่อเกณฑ์|น้ำหนัก|คำอธิบาย เช่น ความครบถ้วน|2|มีเลขที่และยอดรวมครบ",
+            "เลือกช่วงคะแนน และใส่คะแนนขั้นต่ำถ้าต้องการรู้ว่าผ่านหรือไม่",
+            "ต่อ Condition แล้วเลือกผลลัพธ์ “คะแนน” หรือ “ผ่านเกณฑ์” มาใช้ตัดสินใจ",
+        ],
+        example: "ตัวอย่าง: Field Mapping → Score (ความครบถ้วน, ผ่านที่ 70) → Condition: ผ่าน → อนุมัติ · ไม่ผ่าน → ส่งตรวจซ้ำ",
+        caution: "ต้องตั้งค่าที่ Settings › TypeSafe ก่อนใช้งาน · Jev ให้คะแนนจากข้อมูลที่ส่งเข้าไปเท่านั้น ถ้าส่งหลายเอกสารพร้อมกัน จะได้คะแนนรวมครั้งเดียว",
+    },
+    jev_choice: {
+        purpose: "ให้ Jev เลือก 1 ตัวเลือกที่เข้ากับข้อมูลที่สุด เช่น ส่งเอกสารให้ทีมไหน แล้วงานจะเดินต่อเฉพาะเส้นทางของตัวเลือกนั้น",
+        steps: [
+            "บอกว่ากำลังตัดสินใจเรื่องอะไร และเลือกข้อมูลที่ใช้ตัดสินจาก node ก่อนหน้า",
+            "เขียนตัวเลือก 2–6 บรรทัด แบบ รหัส|ชื่อที่แสดง|คำอธิบาย เช่น sales|ทีมขาย|ใบเสนอราคา",
+            "แต่ละรหัสจะกลายเป็นจุดต่อเส้นด้านขวาของ node — ต่อเส้นจากทุกจุดไปยังขั้นตอนถัดไป",
+            "ถ้าต้องการกันกรณีที่ Jev ไม่มั่นใจ ให้เปิดทางสำรอง ใส่ความมั่นใจขั้นต่ำ แล้วต่อเส้นจากจุด “Fallback” สีเหลือง",
+        ],
+        example: "ตัวอย่าง: Field Mapping → Choice (sales / support / ทางสำรอง) → แต่ละทีมรับงานของตัวเอง",
+        caution: "ต้องตั้งค่าที่ Settings › TypeSafe ก่อนใช้งาน · งานเดินต่อเฉพาะเส้นทางที่ถูกเลือก เส้นอื่นจะถูกข้าม · ถ้า Jev เลือกทางที่ยังไม่ได้ต่อเส้น node จะหยุดทำงาน ระบบจะเตือนตอนบันทึก",
+    },
+    jev_noul: {
+        purpose: "ถามคำถามแบบใช่/ไม่ใช่ เช่น “ต้องให้คนตรวจซ้ำไหม” แล้ว Jev ตอบเป็นโอกาสที่คำตอบคือ “ใช่” ตั้งแต่ 0 ถึง 1",
+        steps: [
+            "ตั้งชื่อคำถามสั้นๆ ไว้อ้างอิง เช่น needs_review",
+            "เขียนคำถามที่ตอบได้แค่ใช่หรือไม่ใช่ และถามทีละเรื่อง",
+            "เลือกข้อมูลที่ใช้ตอบจาก node ก่อนหน้า",
+            "ใส่เกณฑ์ (แนะนำ 0.5) แล้วต่อ Condition เพื่อแยกทางด้วยผลลัพธ์ “ผ่านเกณฑ์”",
+        ],
+        example: "ตัวอย่าง: Field Mapping → Yes/No (ต้องตรวจซ้ำไหม, เกณฑ์ 0.5) → Condition: ใช่ → ส่งให้คนตรวจ · ไม่ใช่ → ผ่านอัตโนมัติ",
+        caution: "ต้องตั้งค่าที่ Settings › TypeSafe ก่อนใช้งาน · node นี้ไม่แยกเส้นทางเอง ต้องต่อ Condition เสมอ",
     },
     condition: {
         purpose: "ใช้ตัดสินใจและส่งงานต่อคนละเส้นทางตามผล True หรือ False",
@@ -497,7 +621,7 @@ const toFlowEdges = (wf: Workflow): Edge[] =>
         target: e.target,
         sourceHandle: e.sourceHandle || undefined,
         targetHandle: e.targetHandle || undefined,
-        label: e.sourceHandle === "true" ? "True" : e.sourceHandle === "false" ? "False" : undefined,
+        label: edgeLabel(e.sourceHandle),
         markerEnd: { type: MarkerType.ArrowClosed },
         style: { strokeWidth: 1.5 },
     }))
@@ -1354,6 +1478,7 @@ function ConfigField({
             <input
                 ref={(el) => { inputRef.current = el }}
                 type={field.type === "number" ? "number" : "text"}
+                step={field.type === "number" ? "any" : undefined}
                 className={base}
                 placeholder={field.placeholder}
                 value={value ?? field.default ?? ""}
@@ -1729,7 +1854,7 @@ function Builder() {
     const onConnect = useCallback((conn: Connection) => {
         setEdges((eds) => addEdge({
             ...conn,
-            label: conn.sourceHandle === "true" ? "True" : conn.sourceHandle === "false" ? "False" : undefined,
+            label: edgeLabel(conn.sourceHandle),
             markerEnd: { type: MarkerType.ArrowClosed },
             style: { strokeWidth: 1.5 },
         }, eds))
@@ -1750,16 +1875,20 @@ function Builder() {
         }
         try {
             setSaving(true)
+            const pruned = pruneStaleChoiceEdges(nodes, edges)
             const updated = await updateWorkflow(token, workflowId, {
                 name: workflow.name,
                 description: workflow.description,
-                definition: toDefinition(nodes, edges),
+                definition: toDefinition(nodes, pruned.edges),
                 schedule_cron: scheduleIsEnabled ? scheduleCron : null,
                 schedule_enabled: scheduleIsEnabled,
             })
+            if (pruned.removed) setEdges(pruned.edges)
             setWorkflow(updated)
             setDirty(false)
-            setNotice(null)
+            setNotice(pruned.removed
+                ? `ลบเส้นเชื่อมจาก Choice ที่ไม่ตรงกับตัวเลือกปัจจุบัน ${pruned.removed} เส้น — ตรวจว่าต่อเส้นครบทุกตัวเลือก`
+                : null)
             return true
         } catch (e: any) {
             setNotice(`Save failed: ${e.message}`)

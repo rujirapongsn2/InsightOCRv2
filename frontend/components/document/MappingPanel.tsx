@@ -67,6 +67,7 @@ export function MappingPanel({ documentId, report, onEvidence, onProposal }: {
             <label className="space-y-1 text-slate-600">Mapping engine
                 <select aria-label="Mapping engine" value={engine} disabled={busy} onChange={e => setEngine(e.target.value)} className="block h-8 rounded border bg-white px-2">
                     <option value="auto">Auto</option><option value="softnix">Softnix Structured</option>
+                    <option value="jev">TypeSafe Jev</option>
                     <option value="llm">Configured LLM provider</option><option value="fixed">Fixed position only</option>
                 </select>
             </label>

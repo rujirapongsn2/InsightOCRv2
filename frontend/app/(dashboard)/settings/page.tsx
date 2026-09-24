@@ -29,6 +29,12 @@ import {
 
 type SettingsTab = "ocr" | "oauth" | "google_oauth" | "tokens" | "mcp" | "api" | "skills"
 
+type TypeSafeTestReport = {
+  status: string
+  message: string
+  latency_ms: number | null
+}
+
 const providerTestStepLabels = {
   connection: "การเชื่อมต่อ",
   model_response: "การตอบจากโมเดล",
@@ -66,6 +72,14 @@ export default function SettingsPage() {
   const [testEndpoint, setTestEndpoint] = useState("")
   const [token, setToken] = useState("")
   const [showToken, setShowToken] = useState(false)
+  const [typesafeEndpoint, setTypesafeEndpoint] = useState("")
+  const [typesafeApiKey, setTypesafeApiKey] = useState("")
+  const [typesafeSource, setTypesafeSource] = useState<"db" | "env" | "none">("none")
+  const [showTypesafeKey, setShowTypesafeKey] = useState(false)
+  const [typesafeTesting, setTypesafeTesting] = useState(false)
+  const [typesafeReport, setTypesafeReport] = useState<TypeSafeTestReport | null>(null)
+  const [typesafeSaving, setTypesafeSaving] = useState(false)
+  const [typesafeSavedMsg, setTypesafeSavedMsg] = useState<string | null>(null)
   const [isLoadingConfig, setIsLoadingConfig] = useState(true)
   const [ocrEngine, setOcrEngine] = useState("default")
   const [model, setModel] = useState("default")
@@ -148,6 +162,9 @@ export default function SettingsPage() {
           setSchemaSuggestionEndpoint(data.schema_suggestion_endpoint ?? "")
           setTestEndpoint(data.test_endpoint ?? "")
           setToken(data.api_token ?? "")
+          setTypesafeEndpoint(data.typesafe_endpoint ?? "")
+          setTypesafeApiKey(data.typesafe_api_key ?? "")
+          setTypesafeSource(data.typesafe_source ?? "none")
           setOcrFallbackEnabled(Boolean(data.ocr_fallback_enabled))
           setOcrFallbackConfigured(Boolean(data.ocr_fallback_configured))
           setOcrFallbackSource(data.ocr_fallback_source ?? "none")
@@ -432,6 +449,68 @@ export default function SettingsPage() {
     }
     setError(null)
     setOcrFallbackEnabled(enabled)
+  }
+
+  const handleSaveTypesafe = async () => {
+    setTypesafeSavedMsg(null)
+    setTypesafeSaving(true)
+    try {
+      const authToken = typeof window !== "undefined" ? localStorage.getItem("token") : null
+      const res = await fetch(`${getApiBaseUrl()}/settings/typesafe`, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          ...(authToken ? { Authorization: `Bearer ${authToken}` } : {})
+        },
+        body: JSON.stringify({
+          typesafe_endpoint: typesafeEndpoint,
+          typesafe_api_key: typesafeApiKey,
+        })
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.detail || "Failed to save TypeSafe settings.")
+      setTypesafeEndpoint(data.typesafe_endpoint ?? "")
+      setTypesafeApiKey(data.typesafe_api_key ?? "")
+      setTypesafeSource(data.typesafe_source ?? "none")
+      setTypesafeSavedMsg(
+        data.typesafe_endpoint && !data.typesafe_api_key
+          ? "บันทึก Endpoint แล้ว — ต้องกรอก API Key ของ Endpoint นี้ก่อนใช้งาน (key เดิมถูกล้างเพราะ Endpoint เปลี่ยน)"
+          : "บันทึกค่า TypeSafe แล้ว"
+      )
+    } catch (err: unknown) {
+      setTypesafeSavedMsg(`Error: ${err instanceof Error ? err.message : String(err)}`)
+    } finally {
+      setTypesafeSaving(false)
+    }
+  }
+
+  const handleTypesafeTest = async () => {
+    setTypesafeTesting(true)
+    setTypesafeReport(null)
+    try {
+      const authToken = typeof window !== "undefined" ? localStorage.getItem("token") : null
+      const res = await fetch(`${getApiBaseUrl()}/settings/typesafe/test`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(authToken ? { Authorization: `Bearer ${authToken}` } : {})
+        },
+        body: JSON.stringify({
+          endpoint: typesafeEndpoint,
+          api_key: typesafeApiKey,
+        })
+      })
+      const data = await res.json()
+      setTypesafeReport(data as TypeSafeTestReport)
+    } catch (err: unknown) {
+      setTypesafeReport({
+        status: "failed",
+        message: `Error: ${err instanceof Error ? err.message : String(err)}`,
+        latency_ms: null,
+      })
+    } finally {
+      setTypesafeTesting(false)
+    }
   }
 
   const handleTest = async () => {
@@ -808,7 +887,6 @@ export default function SettingsPage() {
             </p>
           </div>
 
-          <MappingSettings providers={aiProviders} />
           <div className="space-y-2">
             <label className="text-sm font-medium">Softnix OCR API Token</label>
             <div className="relative">
@@ -830,19 +908,22 @@ export default function SettingsPage() {
               </button>
             </div>
             <p className="text-xs text-slate-500">
-              API authentication token for both endpoints
+              API authentication token สำหรับ Softnix endpoints (ai-process-file / structured-output / suggest-schema)
             </p>
           </div>
 
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2">
             <Button type="button" variant="outline" onClick={handleSaveBackend} disabled={isLoadingConfig}>
-              Save Connection Settings
+              Save Softnix / OCR config
             </Button>
             <Button type="button" onClick={handleTest} disabled={loading || isLoadingConfig}>
               {loading && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
               Test OCR end-to-end
             </Button>
           </div>
+          <p className="text-xs text-slate-500">
+            บันทึกที่นี่ครอบขอบเขต Softnix connection (endpoints + token) และ Softnix OCR Options เท่านั้น — Field Mapping, TypeSafe และ OCR Fallback มีปุ่ม Save ของการ์ดตัวเอง
+          </p>
 
           {ocrTestReport && (
             <div className="space-y-2 rounded-md border border-slate-200 bg-slate-50 p-3" role="status">
@@ -886,6 +967,97 @@ export default function SettingsPage() {
               <span className="break-all">{error}</span>
             </div>
           )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Field Mapping</CardTitle>
+          <p className="text-sm text-slate-600 mt-1">
+            เลือก engine สำหรับ map ค่าลง JSON Schema — ทดสอบได้เฉพาะค่าที่บันทึกแล้ว
+          </p>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <MappingSettings providers={aiProviders} />
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between gap-3">
+            <CardTitle>TypeSafe (Jev)</CardTitle>
+            <span className={`rounded-full px-2 py-1 text-xs font-medium ${typesafeSource !== "none" ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
+              {typesafeSource === "db" ? "Configured" : typesafeSource === "env" ? "Configured (env)" : "Not configured"}
+            </span>
+          </div>
+          <p className="text-sm text-slate-600 mt-1">
+            ใช้กับฟีเจอร์ที่ต้องการคำตัดสินแบบ typed judgment (Noul/Choice/Score) ของ TypeSafe API เช่น การ triage เอกสารอัตโนมัติ — ค่าที่บันทึกที่นี่ถูกเรียกใช้จาก backend เท่านั้น
+          </p>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="space-y-2">
+            <label className="text-sm font-medium">TypeSafe Endpoint</label>
+            <Input
+              value={typesafeEndpoint}
+              onChange={(e) => setTypesafeEndpoint(e.target.value)}
+              placeholder="https://api.typesafe.ai"
+              disabled={isLoadingConfig}
+            />
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm font-medium">TypeSafe API Key</label>
+            <div className="relative">
+              <Input
+                value={typesafeApiKey}
+                onChange={(e) => setTypesafeApiKey(e.target.value)}
+                type={showTypesafeKey ? "text" : "password"}
+                placeholder="วาง API key ใหม่ หรือเว้นว่างเพื่อใช้ค่าที่บันทึกไว้"
+                className="pr-10"
+                disabled={isLoadingConfig}
+              />
+              <button
+                type="button"
+                onClick={() => setShowTypesafeKey(!showTypesafeKey)}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                aria-label={showTypesafeKey ? "Hide API key" : "Show API key"}
+              >
+                {showTypesafeKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+              </button>
+            </div>
+            <p className="text-xs text-slate-500">ระบบจะปกปิด key ที่บันทึกแล้วเมื่อแสดงกลับ · ลบ Endpoint แล้วบันทึกเพื่อล้างค่าในหน้านี้</p>
+            {typesafeSource === "env" && (
+              <p className="text-xs text-amber-700">
+                กำลังใช้ค่าจาก TYPESAFE_ENDPOINT / TYPESAFE_API_KEY ใน backend env — ต้องลบจาก env เพื่อปิด TypeSafe ทั้งหมด
+              </p>
+            )}
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button type="button" variant="outline" onClick={handleSaveTypesafe} disabled={typesafeSaving || isLoadingConfig}>
+              {typesafeSaving && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+              Save TypeSafe settings
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={handleTypesafeTest}
+              disabled={typesafeTesting || isLoadingConfig}
+              title="ทดสอบด้วยค่าในฟอร์มนี้ (ถ้ายังไม่บันทึก ระบบจะทดสอบค่าที่บันทึกไว้ล่าสุด)"
+            >
+              {typesafeTesting && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+              Test TypeSafe connection
+            </Button>
+            {typesafeSavedMsg && (
+              <span role="status" className={`text-xs ${typesafeSavedMsg.startsWith("Error") ? "text-red-700" : typesafeSource === "none" ? "text-amber-700" : "text-emerald-700"}`}>
+                {typesafeSavedMsg}
+              </span>
+            )}
+            {typesafeReport && (
+              <span role="status" className={`text-xs ${typesafeReport.status === "connected" ? "text-emerald-700" : "text-red-700"}`}>
+                {typesafeReport.message}
+                {typesafeReport.latency_ms != null ? ` (${typesafeReport.latency_ms}ms)` : ""}
+              </span>
+            )}
+          </div>
         </CardContent>
       </Card>
 
@@ -967,6 +1139,9 @@ export default function SettingsPage() {
               Save OCR Fallback Settings
             </Button>
           </div>
+          <p className="text-xs text-slate-500">
+            บันทึกเฉพาะการตั้งค่า OCR Fallback (สถานะเปิด/ปิด + key) — Softnix connection และ Options ใช้ปุ่ม Save ในการ์ด Softnix
+          </p>
         </CardContent>
       </Card>
 
