@@ -19,6 +19,10 @@ class SettingBase(BaseModel):
     ocr_fallback_enabled: bool = False
     ocr_fallback_api_key: str | None = None
 
+    # TypeSafe (Jev) typed-judgment API
+    typesafe_endpoint: str | None = None
+    typesafe_api_key: str | None = None
+
 class SettingUpdate(SettingBase):
     pass
 
@@ -27,6 +31,7 @@ class Setting(SettingBase):
     app_commit_sha: str | None = None
     ocr_fallback_configured: bool = False
     ocr_fallback_source: str = "none"
+    typesafe_source: str = "none"
 
     class Config:
         from_attributes = True

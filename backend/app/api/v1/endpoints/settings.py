@@ -3,6 +3,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Optional, Literal
 from uuid import UUID, uuid4
+from time import perf_counter
+import time
 from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, HttpUrl
@@ -23,6 +25,7 @@ from app.schemas.setting import (
 from app.services.tls import warn_ssl_verification_disabled
 from app.services.ocr_fallback import fallback_configuration_error, resolve_fallback_api_key
 from app.services.ocr_configuration_test import run_ocr_configuration_test
+from app.services.typesafe import typesafe_config_source
 from app.utils.activity_logger import log_activity, Actions
 from app.utils.redact import is_masked, mask_secret
 from app.utils.secret_store import SecretStoreError, encrypt_secret
@@ -32,7 +35,7 @@ BUILD_INFO_PATH = Path(__file__).resolve().parents[4] / ".build-info.json"
 
 
 class MappingPolicy(BaseModel):
-    engine: Literal["auto", "softnix", "llm", "fixed"] = "auto"
+    engine: Literal["auto", "softnix", "llm", "fixed", "jev"] = "auto"
     fallback_provider_id: UUID | None = None
     fallback_enabled: bool = True
 
@@ -102,6 +105,8 @@ def _setting_response(setting: Setting) -> SettingSchema:
         data.api_token = mask_secret(data.api_token)
     if data.ocr_fallback_api_key:
         data.ocr_fallback_api_key = mask_secret(data.ocr_fallback_api_key)
+    if data.typesafe_api_key:
+        data.typesafe_api_key = mask_secret(data.typesafe_api_key)
     return data
 
 
@@ -109,6 +114,7 @@ def _set_fallback_metadata(setting: Setting) -> None:
     key, source = resolve_fallback_api_key(setting)
     setattr(setting, "ocr_fallback_configured", bool(key))
     setattr(setting, "ocr_fallback_source", source)
+    setattr(setting, "typesafe_source", typesafe_config_source(setting))
 
 
 def get_app_commit_sha() -> str | None:
@@ -361,6 +367,67 @@ def get_settings(
     return _setting_response(setting)
 
 
+def _apply_typesafe_update(setting: Setting, payload: BaseModel) -> None:
+    # Blank/masked key keeps the stored key only while the endpoint stays the
+    # same — a stored key is never re-pointed at a different host. A new key
+    # with a blank endpoint uses the default endpoint. Clearing the endpoint
+    # without a new key drops the UI config; TYPESAFE_* env vars, if set, then
+    # take over (reported back as typesafe_source="env").
+    from app.services.typesafe import DEFAULT_TYPESAFE_ENDPOINT
+
+    raw_key = (payload.typesafe_api_key or "").strip()
+    new_key = raw_key if raw_key and not is_masked(raw_key) else None
+    old_endpoint = (setting.typesafe_endpoint or "").strip().rstrip("/") or None
+    endpoint = old_endpoint
+    if "typesafe_endpoint" in payload.model_fields_set:
+        endpoint = (payload.typesafe_endpoint or "").strip().rstrip("/") or None
+    if endpoint is None and new_key:
+        endpoint = DEFAULT_TYPESAFE_ENDPOINT
+    if endpoint is None:
+        setting.typesafe_endpoint = None
+        setting.typesafe_api_key = None
+        return
+    setting.typesafe_endpoint = endpoint
+    if new_key:
+        setting.typesafe_api_key = new_key
+    elif endpoint != old_endpoint:
+        setting.typesafe_api_key = None
+
+
+class TypeSafeConfigUpdate(BaseModel):
+    typesafe_endpoint: Optional[str] = None
+    typesafe_api_key: Optional[str] = None
+
+
+@router.put("/typesafe", response_model=SettingSchema)
+def update_typesafe_settings(
+    *,
+    db: Session = Depends(deps.get_db),
+    payload: TypeSafeConfigUpdate,
+    current_user: User = Depends(deps.get_current_active_superuser),
+) -> Any:
+    """Save only the TypeSafe card, leaving OCR/fallback settings untouched."""
+    setting = db.query(Setting).first()
+    if not setting:
+        setting = Setting()
+        db.add(setting)
+    _apply_typesafe_update(setting, payload)
+    db.add(setting)
+    db.commit()
+    db.refresh(setting)
+    setattr(setting, "app_commit_sha", get_app_commit_sha())
+    log_activity(
+        db=db,
+        user_id=current_user.id,
+        action=Actions.UPDATE_SETTINGS,
+        resource_type="settings",
+        resource_id=setting.id,
+        details={"typesafe_endpoint": setting.typesafe_endpoint},
+    )
+    _set_fallback_metadata(setting)
+    return _setting_response(setting)
+
+
 @router.put("/config", response_model=SettingSchema)
 def update_settings(
     *,
@@ -387,6 +454,7 @@ def update_settings(
     if "ocr_fallback_api_key" in payload.model_fields_set and not is_masked(payload.ocr_fallback_api_key):
         setting.ocr_fallback_api_key = payload.ocr_fallback_api_key or None
     setting.verify_ssl = payload.verify_ssl
+    _apply_typesafe_update(setting, payload)
 
     if payload.ocr_fallback_enabled:
         fallback_error = fallback_configuration_error(setting, enabled=True)
@@ -528,3 +596,97 @@ def test_endpoint(
         }
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+class TypeSafeTestRequest(BaseModel):
+    endpoint: Optional[str] = None
+    api_key: Optional[str] = None
+
+
+@router.post("/typesafe/test")
+def test_typesafe_configuration(
+    *,
+    payload: TypeSafeTestRequest,
+    current_user: User = Depends(deps.get_current_active_superuser),
+) -> Any:
+    """Verify the TypeSafe (Jev) endpoint and key with one real minimal call.
+
+    Accepts overrides so the admin can test unsaved form values. A blank or
+    masked key means "use the stored key" — and the stored key is only ever
+    sent to the stored endpoint, never to a caller-supplied URL.
+    """
+    from app.db.session import SessionLocal
+    from app.services.typesafe import TypeSafeConfigurationError, resolve_typesafe_config
+
+    db = SessionLocal()
+    try:
+        setting = db.query(Setting).first()
+    finally:
+        db.close()
+    try:
+        stored = resolve_typesafe_config(setting)
+    except TypeSafeConfigurationError:
+        stored = None
+    requested_endpoint = (payload.endpoint or "").strip().rstrip("/")
+    requested_key = (payload.api_key or "").strip()
+    if requested_key and not is_masked(requested_key):
+        endpoint = requested_endpoint or (stored.endpoint if stored else "")
+        api_key = requested_key
+    elif stored and (not requested_endpoint or requested_endpoint == stored.endpoint):
+        endpoint, api_key = stored.endpoint, stored.api_key
+    elif stored:
+        return {
+            "status": "failed",
+            "message": "Endpoint ถูกเปลี่ยน — กรุณากรอก API Key ใหม่เพื่อทดสอบกับ Endpoint นี้ (หรือบันทึกก่อนแล้วค่อยทดสอบ)",
+            "latency_ms": None,
+        }
+    else:
+        endpoint, api_key = requested_endpoint, ""
+    if not endpoint or not api_key:
+        return {
+            "status": "failed",
+            "message": "กรุณาระบุ TypeSafe Endpoint และ API Key ก่อนทดสอบ",
+            "latency_ms": None,
+        }
+
+    started = time.perf_counter()
+    try:
+        resp = requests.post(
+            endpoint.rstrip("/") + "/v1/systemone",
+            json={
+                "model": "jev-latest",
+                "state": {"ping": "insightdoc-connection-test"},
+                "questions": {
+                    "reachable": {
+                        "type": "noul",
+                        "instructions": "Is this a working TypeSafe API connection test?",
+                    }
+                },
+            },
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "accept": "application/json",
+            },
+            timeout=15,
+        )
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        if resp.status_code == 200:
+            return {
+                "status": "connected",
+                "message": f"เชื่อมต่อ TypeSafe สำเร็จ ({resp.headers.get('x-typesafe-model', 'jev')})",
+                "latency_ms": latency_ms,
+            }
+        if resp.status_code in (401, 403):
+            return {"status": "failed", "message": "API Key ไม่ถูกต้องหรือไม่มีสิทธิ์", "latency_ms": latency_ms}
+        return {
+            "status": "failed",
+            "message": f"Endpoint ตอบกลับ HTTP {resp.status_code}: {resp.text[:200]}",
+            "latency_ms": latency_ms,
+        }
+    except requests.RequestException as exc:
+        return {
+            "status": "failed",
+            "message": f"เชื่อมต่อไม่สำเร็จ: {exc}",
+            "latency_ms": int((time.perf_counter() - started) * 1000),
+        }

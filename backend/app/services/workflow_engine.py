@@ -21,6 +21,7 @@ import logging
 import re
 import os
 import socket
+from contextlib import ExitStack
 from io import BytesIO
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
@@ -39,7 +40,9 @@ from app.models.document import Document
 from app.models.job import Job
 from app.models.integration import Integration, IntegrationType, IntegrationStatus
 from app.models.ai_settings import AISettings
+from app.models.setting import Setting
 from app.services.storage import get_storage_service
+from app.services.typesafe import SCORE_SCALES, SCORE_SCALE_MAX, SCORE_SCALE_MIN
 from app.services.llm_provider_capabilities import integration_supports_tool_calling
 from app.utils.redact import redact_secrets
 from app.api.v1.endpoints.integrations import _integration_api_key, _llm_base_url_for_integration
@@ -140,6 +143,163 @@ NODE_TYPES: List[Dict[str, Any]] = [
             {"name": "count", "label": "จำนวนเอกสาร"},
             {"name": "documents", "label": "รายการเอกสาร (มีข้อความและสถานะ extraction)"},
             {"name": "job_name", "label": "ชื่อ Job"},
+        ],
+    },
+    {
+        "type": "field_mapping",
+        "category": "data",
+        "label": "Field Mapping (Schema)",
+        "description": "ดึงค่าตามฟิลด์ใน Schema จากข้อความ OCR ของเอกสาร ใช้ระบบเดียวกับหน้า Jobs",
+        "config_fields": [
+            {"name": "schema_id", "label": "Schema", "type": "schema_select", "required": True,
+             "hint": "เลือก Schema ที่กำหนดว่าต้องการดึงฟิลด์อะไรจากเอกสาร"},
+            {"name": "engine", "label": "วิธีดึงข้อมูล", "type": "select",
+             "options": ["auto", "softnix", "jev", "llm", "fixed"], "default": "auto",
+             "option_labels": {"auto": "อัตโนมัติ (แนะนำ)", "softnix": "Softnix", "jev": "Jev (TypeSafe)",
+                               "llm": "LLM", "fixed": "ตำแหน่งคงที่ (Fixed)"},
+             "hint": "อัตโนมัติจะลอง Softnix → Jev → LLM ตามลำดับ และข้ามตัวที่ยังไม่ได้ตั้งค่า · Jev ต้องตั้งค่าที่ Settings › TypeSafe ก่อน"},
+            {"name": "field_names", "label": "ดึงเฉพาะบางฟิลด์", "type": "text", "required": False,
+             "placeholder": "เช่น invoice_no, total",
+             "hint": "ใส่ชื่อฟิลด์คั่นด้วยจุลภาค · เว้นว่างเพื่อดึงทุกฟิลด์ใน Schema"},
+            {"name": "limit", "label": "จำนวนเอกสารสูงสุดต่อรอบ", "type": "number", "default": 10,
+             "placeholder": "10",
+             "hint": "ยิ่งมากยิ่งใช้เวลานาน · ผลลัพธ์ “ค่าที่ดึงได้” เป็นของเอกสารแรก ส่วนผลของทุกเอกสารอยู่ใน “ผลรายเอกสาร”"},
+        ],
+        "output_fields": [
+            {"name": "count", "label": "จำนวนเอกสารที่ดึงข้อมูล"},
+            {"name": "values", "label": "ค่าที่ดึงได้ (เอกสารแรก)"},
+            {"name": "status", "label": "สถานะรวมทุกเอกสาร (ยึดฉบับที่แย่ที่สุด)"},
+            {"name": "first_document_status", "label": "สถานะของเอกสารแรก"},
+            {"name": "incomplete_documents", "label": "เอกสารที่ดึงข้อมูลไม่ครบ"},
+            {"name": "evidence", "label": "หลักฐานของแต่ละฟิลด์ (เอกสารแรก)"},
+            {"name": "review_fields", "label": "ฟิลด์ที่ควรตรวจซ้ำ (เอกสารแรก)"},
+            {"name": "unresolved_fields", "label": "ฟิลด์ที่ดึงไม่ได้ (เอกสารแรก)"},
+            {"name": "provider", "label": "วิธีดึงข้อมูลที่ใช้จริง"},
+            {"name": "warnings", "label": "คำเตือน"},
+            {"name": "documents", "label": "ผลรายเอกสาร"},
+        ],
+    },
+    {
+        "type": "jev_score",
+        "category": "data",
+        "label": "Score – ให้คะแนน",
+        "description": "ให้ Jev ให้คะแนนข้อมูลตามเกณฑ์ที่คุณกำหนด แล้วนำคะแนนไปใช้ตัดสินใจใน Condition",
+        "config_fields": [
+            {"name": "score_name", "label": "สิ่งที่ต้องการให้คะแนน", "type": "text", "required": True,
+             "placeholder": "เช่น ความครบถ้วนของเอกสาร",
+             "hint": "ตั้งชื่อสั้นๆ ให้ Jev รู้ว่ากำลังประเมินเรื่องอะไร"},
+            {"name": "input_source", "label": "ข้อมูลที่ใช้ประเมิน", "type": "textarea", "required": True,
+             "placeholder": "เช่น {{documents_1.ocr_text}}",
+             "hint": "กด “แทรกข้อมูล” เพื่อเลือกข้อมูลจาก node ก่อนหน้า · ถ้าเลือกรายการหลายเอกสาร Jev จะตัดสินรวมครั้งเดียว ไม่ได้แยกทีละเอกสาร"},
+            {"name": "criteria", "label": "เกณฑ์การให้คะแนน", "type": "textarea", "required": True,
+             "placeholder": "ความครบถ้วน|2|มีเลขที่ วันที่ และยอดรวมครบ\nความชัดเจน|1|อ่านข้อความได้ไม่ตกหล่น",
+             "hint": "1 บรรทัดต่อ 1 เกณฑ์ เขียนแบบ ชื่อเกณฑ์|น้ำหนัก|คำอธิบาย · น้ำหนักใส่เป็นตัวเลขใดก็ได้ ระบบแปลงเป็นสัดส่วนให้ (ต้องใส่ทุกข้อ หรือเว้นว่างทุกข้อเพื่อให้เท่ากัน)"},
+            {"name": "scale", "label": "ช่วงคะแนน", "type": "select",
+             "options": ["0_100", "0_10", "1_5"], "default": "0_100",
+             "option_labels": {"0_100": "0–100", "0_10": "0–10", "1_5": "1–5"}},
+            {"name": "threshold", "label": "คะแนนขั้นต่ำที่ถือว่าผ่าน", "type": "number", "required": False,
+             "placeholder": "เช่น 70",
+             "hint": "ถ้าตั้งไว้ จะได้ผลลัพธ์ “ผ่านเกณฑ์” (จริง/เท็จ) ไว้ใช้ใน Condition · ใส่ค่าให้อยู่ในช่วงคะแนนที่เลือก"},
+            {"name": "fields_to_use", "label": "ใช้เฉพาะบางฟิลด์", "type": "text", "required": False, "advanced": True,
+             "placeholder": "เช่น total, vendor_name", "hint": "ใช้เมื่อข้อมูลเป็นชุดฟิลด์ (JSON) และต้องการส่งให้ Jev เฉพาะบางฟิลด์ · เว้นว่างเพื่อใช้ทั้งหมด"},
+            {"name": "include_confidence", "label": "แสดงความมั่นใจของ Jev", "type": "boolean", "default": True,
+             "advanced": True, "hint": "เพิ่มค่าความมั่นใจ (0–1) ไว้ในผลลัพธ์"},
+            {"name": "engine", "label": "ผู้ประมวลผล", "type": "select", "advanced": True,
+             "options": ["typesafe_jev", "auto"], "default": "typesafe_jev",
+             "option_labels": {"typesafe_jev": "Jev (TypeSafe)", "auto": "อัตโนมัติ"},
+             "hint": "ทั้งสองแบบใช้ Jev · ต้องตั้งค่าที่ Settings › TypeSafe ก่อน ไม่อย่างนั้น node จะหยุดทำงาน"},
+        ],
+        "output_fields": [
+            {"name": "score", "label": "คะแนน"},
+            {"name": "scale", "label": "ช่วงคะแนน"},
+            {"name": "threshold", "label": "คะแนนขั้นต่ำที่ตั้งไว้"},
+            {"name": "threshold_met", "label": "ผ่านเกณฑ์ (จริง/เท็จ)"},
+            {"name": "confidence", "label": "ความมั่นใจ (0–1)"},
+            {"name": "criteria", "label": "เกณฑ์ที่ใช้ (พร้อมสัดส่วน)"},
+            {"name": "provider", "label": "ผู้ประมวลผล"},
+        ],
+    },
+    {
+        "type": "jev_choice",
+        "category": "data",
+        "label": "Choice – เลือกเส้นทาง",
+        "description": "ให้ Jev เลือก 1 ตัวเลือกที่เข้ากับข้อมูลที่สุด แล้วส่งงานต่อตามเส้นทางของตัวเลือกนั้น",
+        "config_fields": [
+            {"name": "choice_name", "label": "เรื่องที่ต้องการให้เลือก", "type": "text", "required": True,
+             "placeholder": "เช่น ส่งเอกสารให้ทีมไหนดูแล",
+             "hint": "อธิบายสั้นๆ ว่ากำลังตัดสินใจเรื่องอะไร"},
+            {"name": "input_source", "label": "ข้อมูลที่ใช้ตัดสิน", "type": "textarea", "required": True,
+             "placeholder": "เช่น {{documents_1.ocr_text}}",
+             "hint": "กด “แทรกข้อมูล” เพื่อเลือกข้อมูลจาก node ก่อนหน้า · ถ้าเลือกรายการหลายเอกสาร Jev จะตัดสินรวมครั้งเดียว ไม่ได้แยกทีละเอกสาร"},
+            {"name": "options", "label": "ตัวเลือก", "type": "textarea", "required": True,
+             "placeholder": "sales|ทีมขาย|ใบเสนอราคา คำสั่งซื้อ\nsupport|ทีมบริการ|คำร้อง แจ้งปัญหา",
+             "hint": "2–6 บรรทัด บรรทัดละ 1 ตัวเลือก เขียนแบบ รหัส|ชื่อที่แสดง|คำอธิบาย · รหัสจะเป็นจุดต่อเส้นบน node ห้ามซ้ำกัน และห้ามใช้คำว่า fallback"},
+            {"name": "pick_rule", "label": "วิธีตัดสิน", "type": "select",
+             "options": ["highest", "first_above_threshold"], "default": "highest",
+             "option_labels": {"highest": "เลือกตัวที่มีโอกาสสูงสุด", "first_above_threshold": "เลือกตัวแรกที่ถึงเกณฑ์"},
+             "hint": "“ตัวแรกที่ถึงเกณฑ์” ไล่ตามลำดับบรรทัดในช่องตัวเลือก"},
+            {"name": "probability_threshold", "label": "โอกาสขั้นต่ำ (0–1)", "type": "number", "required": False,
+             "placeholder": "เช่น 0.6",
+             "visible_when": {"field": "pick_rule", "equals": "first_above_threshold"},
+             "hint": "ถ้าไม่มีตัวเลือกใดถึงค่านี้ งานจะไปทางสำรอง (ต้องเปิดทางสำรองไว้)"},
+            {"name": "min_confidence", "label": "ความมั่นใจขั้นต่ำ (0–1)", "type": "number", "required": False,
+             "placeholder": "เช่น 0.5",
+             "hint": "ถ้า Jev มั่นใจน้อยกว่านี้ งานจะไปทางสำรองแทน · เว้นว่างเพื่อไม่ตรวจ"},
+            {"name": "enable_fallback", "label": "มีทางสำรอง (Fallback)", "type": "boolean", "default": True,
+             "hint": "เพิ่มจุดต่อ “Fallback” สีเหลืองสำหรับกรณีที่ Jev ไม่มั่นใจ · ต่อเส้นจากจุดนี้ด้วย ไม่อย่างนั้น node จะหยุดทำงานเมื่อเข้าทางสำรอง"},
+            {"name": "fields_to_use", "label": "ใช้เฉพาะบางฟิลด์", "type": "text", "required": False, "advanced": True,
+             "placeholder": "เช่น document_type, subject", "hint": "ใช้เมื่อข้อมูลเป็นชุดฟิลด์ (JSON) และต้องการส่งให้ Jev เฉพาะบางฟิลด์ · เว้นว่างเพื่อใช้ทั้งหมด"},
+            {"name": "show_probabilities", "label": "แสดงโอกาสของทุกตัวเลือก", "type": "boolean", "default": True,
+             "advanced": True, "hint": "เพิ่มโอกาสของแต่ละตัวเลือกไว้ในผลลัพธ์"},
+            {"name": "engine", "label": "ผู้ประมวลผล", "type": "select", "advanced": True,
+             "options": ["typesafe_jev", "auto"], "default": "typesafe_jev",
+             "option_labels": {"typesafe_jev": "Jev (TypeSafe)", "auto": "อัตโนมัติ"},
+             "hint": "ทั้งสองแบบใช้ Jev · ต้องตั้งค่าที่ Settings › TypeSafe ก่อน ไม่อย่างนั้น node จะหยุดทำงาน"},
+        ],
+        "output_fields": [
+            {"name": "choice", "label": "รหัสตัวเลือกที่ได้"},
+            {"name": "label", "label": "ชื่อตัวเลือกที่ได้"},
+            {"name": "probability", "label": "โอกาสของตัวเลือกที่ได้ (0–1)"},
+            {"name": "confidence", "label": "ความมั่นใจ (0–1)"},
+            {"name": "used_fallback", "label": "ไปทางสำรอง (จริง/เท็จ)"},
+            {"name": "options", "label": "โอกาสของทุกตัวเลือก"},
+            {"name": "policy", "label": "กติกาที่ใช้ตัดสิน"},
+            {"name": "provider", "label": "ผู้ประมวลผล"},
+        ],
+    },
+    {
+        "type": "jev_noul",
+        "category": "data",
+        "label": "Yes/No – ถามใช่หรือไม่",
+        "description": "ถามคำถามแบบใช่/ไม่ใช่ แล้ว Jev ตอบเป็นโอกาสที่คำตอบคือ “ใช่” (0–1) เพื่อนำไปใช้ใน Condition",
+        "config_fields": [
+            {"name": "noul_name", "label": "ชื่อคำถาม", "type": "text", "required": True,
+             "placeholder": "เช่น needs_review",
+             "hint": "ชื่อสั้นๆ ไว้อ้างอิงในผลลัพธ์"},
+            {"name": "question", "label": "คำถาม", "type": "textarea", "required": True,
+             "placeholder": "เช่น เอกสารนี้ต้องให้คนตรวจซ้ำหรือไม่?",
+             "hint": "เขียนเป็นคำถามที่ตอบได้แค่ ใช่ หรือ ไม่ใช่ และถามทีละเรื่อง"},
+            {"name": "input_source", "label": "ข้อมูลที่ใช้ตอบ", "type": "textarea", "required": True,
+             "placeholder": "เช่น {{documents_1.ocr_text}}",
+             "hint": "กด “แทรกข้อมูล” เพื่อเลือกข้อมูลจาก node ก่อนหน้า · ถ้าเลือกรายการหลายเอกสาร Jev จะตัดสินรวมครั้งเดียว ไม่ได้แยกทีละเอกสาร"},
+            {"name": "threshold", "label": "ถือว่า “ใช่” เมื่อโอกาสถึง (0–1)", "type": "number", "required": False,
+             "placeholder": "เช่น 0.5",
+             "hint": "ถ้าตั้งไว้ จะได้ผลลัพธ์ “ผ่านเกณฑ์” (จริง/เท็จ) · node นี้ไม่แยกเส้นทางเอง ให้ต่อ Condition เพื่อแยกทาง"},
+            {"name": "fields_to_use", "label": "ใช้เฉพาะบางฟิลด์", "type": "text", "required": False, "advanced": True,
+             "placeholder": "เช่น total, status", "hint": "ใช้เมื่อข้อมูลเป็นชุดฟิลด์ (JSON) และต้องการส่งให้ Jev เฉพาะบางฟิลด์ · เว้นว่างเพื่อใช้ทั้งหมด"},
+            {"name": "engine", "label": "ผู้ประมวลผล", "type": "select", "advanced": True,
+             "options": ["typesafe_jev", "auto"], "default": "typesafe_jev",
+             "option_labels": {"typesafe_jev": "Jev (TypeSafe)", "auto": "อัตโนมัติ"},
+             "hint": "ทั้งสองแบบใช้ Jev · ต้องตั้งค่าที่ Settings › TypeSafe ก่อน ไม่อย่างนั้น node จะหยุดทำงาน"},
+        ],
+        "output_fields": [
+            {"name": "noul", "label": "โอกาสที่คำตอบคือ “ใช่” (0–1)"},
+            {"name": "question", "label": "คำถาม"},
+            {"name": "noul_name", "label": "ชื่อคำถาม"},
+            {"name": "threshold", "label": "เกณฑ์ที่ตั้งไว้"},
+            {"name": "threshold_met", "label": "ผ่านเกณฑ์ (จริง/เท็จ)"},
+            {"name": "provider", "label": "ผู้ประมวลผล"},
+            {"name": "input_from", "label": "ข้อมูลมาจาก"},
         ],
     },
     {
@@ -1981,12 +2141,648 @@ def _to_docx_bytes(content: Any) -> bytes:
     return buf.getvalue()
 
 
+def _jev_decision_setting(db: Session):
+    """Seam for tests: the mapping/TypeSafe settings row for decision nodes."""
+    return db.query(Setting).first()
+
+
+def _jev_decision_wanted_fields(fields_to_use) -> list:
+    """Seam for tests: normalize fields_to_use (comma string, list, or chips)."""
+    if fields_to_use is None:
+        return []
+    if isinstance(fields_to_use, str):
+        return [f.strip() for f in fields_to_use.split(",") if f.strip()]
+    if isinstance(fields_to_use, list):
+        wanted: list = []
+        for item in fields_to_use:
+            if isinstance(item, str):
+                wanted.extend(f.strip() for f in item.split(",") if f.strip())
+            elif isinstance(item, dict) and str(item.get("key") or item.get("label") or "").strip():
+                wanted.append(str(item.get("key") or item.get("label")).strip())
+        return wanted
+    return []
+
+
+def _jev_decision_input(config: dict, context: dict) -> str:
+    """Seam for tests: flatten input_source into the text Jev judges.
+
+    Major 4: ``fields_to_use`` must never silently no-op. After template render
+    ``input_source`` is usually a string, so a JSON-looking string is parsed and
+    filtered; if filtering is requested but cannot be applied → fail loud.
+    """
+    import re as _re
+
+    source = config.get("input_source")
+    if source is None:
+        raise NodeExecutionError("ต้องระบุข้อมูลที่ใช้ (input_source)")
+    wanted = _jev_decision_wanted_fields(config.get("fields_to_use"))
+
+    parsed = source
+    if isinstance(source, str):
+        stripped = source.strip()
+        if stripped.startswith(("{", "[")):
+            try:
+                parsed = json.loads(stripped)
+            except ValueError:
+                parsed = source
+    if isinstance(parsed, str):
+        if wanted:
+            raise NodeExecutionError(
+                f"fields_to_use ใช้ไม่ได้กับ input_source ที่เป็นข้อความล้วน ({', '.join(wanted)}) — "
+                "ให้ input_source อ้าง object/dict จาก node ก่อนหน้า หรือเว้นว่าง fields_to_use"
+            )
+        text = parsed
+    elif isinstance(parsed, dict):
+        if wanted:
+            missing = [k for k in wanted if k not in parsed]
+            if missing:
+                raise NodeExecutionError(f"input_source ไม่มีฟิลด์ที่ระบุใน fields_to_use: {', '.join(missing)}")
+            parsed = {k: parsed[k] for k in wanted}
+        text = json.dumps(parsed, ensure_ascii=False)
+    elif isinstance(parsed, list):
+        if wanted:
+            if all(isinstance(item, dict) for item in parsed):
+                missing = sorted({k for item in parsed for k in wanted if k not in item})
+                if missing:
+                    raise NodeExecutionError(f"input_source (list) ไม่มีฟิลด์ที่ระบุใน fields_to_use: {', '.join(missing)}")
+                parsed = [{k: item[k] for k in wanted if k in item} for item in parsed]
+            else:
+                raise NodeExecutionError(
+                    f"fields_to_use ใช้ได้เฉพาะเมื่อ input_source เป็น object/list ของ object — ได้รับ list ธรรมดา ({', '.join(wanted)})"
+                )
+        text = json.dumps(parsed, ensure_ascii=False)
+    else:
+        text = str(parsed)
+    return text
+
+
+def _jev_decision_state(config: dict, context: dict, log: Callable[[str], None], node_label: str) -> dict:
+    """Build the Jev state, capped so a whole batch can't blow the request.
+
+    A list input is judged as ONE combined answer, not per item — say so in
+    the log so users don't read a batch verdict as a per-document one.
+    """
+    from app.core.config import settings as app_settings
+
+    text = _jev_decision_input(config, context)
+    if not text.strip():
+        raise NodeExecutionError(f"{node_label}: ข้อมูลที่ใช้ตัดสินว่างเปล่า — ตรวจ input_source จาก node ก่อนหน้า")
+    if text.lstrip().startswith("["):
+        try:
+            items = json.loads(text)
+        except ValueError:
+            items = None
+        if isinstance(items, list) and len(items) > 1:
+            log(f"input เป็นรายการ {len(items)} รายการ — Jev ตัดสินรวมทั้งชุดเป็นคำตอบเดียว (ไม่ใช่รายเอกสาร)")
+    cap = app_settings.JEV_DECISION_INPUT_MAX_CHARS
+    if len(text) > cap:
+        log(f"input ยาว {len(text)} ตัวอักษร เกินเพดาน {cap} — ตัดส่วนท้ายออก")
+        text = text[:cap] + f"\n…[ตัดทอน {len(text) - cap} ตัวอักษร]"
+    return {"input": text}
+
+
+def _jev_decision_timeout() -> float:
+    from app.core.config import settings as app_settings
+    return float(app_settings.JEV_DECISION_TIMEOUT_SECONDS)
+
+
+def _jev_score_scale_index(scale: str) -> int:
+    """Number of API levels backing each UI scale."""
+    return len(SCORE_SCALES.get(scale) or SCORE_SCALES["0_100"])
+
+
+def _map_jev_score_index(index: float, scale: str) -> float:
+    """Map a TypeSafe score index s ∈ [0, n_levels-1] onto the UI scale.
+
+    0_100 / 0_10 are zero-anchored so proportional mapping applies; 1_5 maps
+    the normalized [0,1] span onto [1,5]. Kept pure for unit tests.
+    """
+    if index is None:
+        raise NodeExecutionError("Jev ไม่ได้ส่งคะแนนกลับมา")
+    levels = _jev_score_scale_index(scale)
+    max_out = SCORE_SCALE_MAX.get(scale, 100.0)
+    min_out = SCORE_SCALE_MIN.get(scale, 0.0)
+    normalized = max(0.0, min(1.0, float(index) / max(1, levels - 1)))
+    return round(min_out + normalized * (max_out - min_out), 2)
+
+
+def _normalize_jev_criteria(criteria) -> list:
+    """Validate UX criteria rows and normalize weights to sum to 1.0."""
+    rows: list = []
+    if isinstance(criteria, str):
+        criteria = criteria.splitlines()
+    for raw in criteria or []:
+        if isinstance(raw, str):
+            parts = [p.strip() for p in raw.split("|")]
+            if not parts or not parts[0]:
+                continue
+            row = {"label": parts[0]}
+            if len(parts) > 1 and parts[1]:
+                try:
+                    row["weight"] = float(parts[1])
+                except ValueError:
+                    row["weight"] = None
+            else:
+                row["weight"] = None
+            if len(parts) > 2 and parts[2]:
+                row["guidance"] = parts[2]
+            rows.append(row)
+        elif isinstance(raw, dict) and str(raw.get("label") or "").strip():
+            row = {"label": str(raw["label"]).strip()}
+            try:
+                row["weight"] = float(raw["weight"]) if raw.get("weight") is not None else None
+            except (TypeError, ValueError):
+                row["weight"] = None
+            if str(raw.get("guidance") or "").strip():
+                row["guidance"] = str(raw["guidance"]).strip()
+            rows.append(row)
+    if not rows:
+        raise NodeExecutionError("ต้องระบุเกณฑ์ (criteria) อย่างน้อย 1 ข้อ")
+    weights = [r["weight"] for r in rows if isinstance(r.get("weight"), (int, float))]
+    if weights and len(weights) != len(rows):
+        raise NodeExecutionError("ระบุน้ำหนัก (weight) ต้องครบทุกเกณฑ์ หรือเว้นว่างทั้งหมดเพื่อ normalize เท่ากัน")
+    if weights:
+        total = sum(weights)
+        if total <= 0:
+            raise NodeExecutionError("น้ำหนักรวมต้องมากกว่า 0")
+        for r in rows:
+            r["weight"] = round(r["weight"] / total, 4)
+    else:
+        share = round(1.0 / len(rows), 4)
+        for r in rows:
+            r["weight"] = share
+    return rows
+
+
+def _require_jev_configured(db: Session, config: dict, node_label: str):
+    """Resolve TypeSafe config for a decision node; fail loud when missing.
+
+    Both engines (typesafe_jev / auto) REQUIRE TypeSafe for decision nodes —
+    unlike mapping, there is no second provider to fall back to.
+    """
+    from app.services.typesafe import (
+        TypeSafeConfigurationError,
+        resolve_typesafe_config,
+        typesafe_is_configured,
+    )
+
+    engine = (config.get("engine") or "typesafe_jev").strip()
+    if engine not in {"typesafe_jev", "auto"}:
+        raise NodeExecutionError(f"{node_label}: engine ไม่ถูกต้อง: {engine}")
+    setting = _jev_decision_setting(db)
+    if not typesafe_is_configured(setting):
+        raise NodeExecutionError(
+            f"{node_label}: ยังไม่ได้ตั้งค่า TypeSafe (Jev) — ไปที่ Settings › OCR & Providers › TypeSafe แล้วกรอก Endpoint และ API Key"
+        )
+    try:
+        return engine, resolve_typesafe_config(setting)
+    except TypeSafeConfigurationError as exc:
+        raise NodeExecutionError(
+            f"{node_label}: ตั้งค่า TypeSafe (Jev) ไม่สมบูรณ์ — {exc} · ไปที่ Settings › OCR & Providers › TypeSafe"
+        ) from exc
+    except ValueError as exc:
+        raise NodeExecutionError(
+            f"{node_label}: ค่า TypeSafe ใน Settings ไม่ถูกต้อง — ไปที่ Settings › OCR & Providers › TypeSafe"
+        ) from exc
+
+
+def _exec_jev_score(db: Session, config: dict, context: dict, log: Callable[[str], None]) -> Any:
+    """Score upstream data on a weighted rubric (Decision ≠ Generation).
+
+    Single outbound; downstream Condition reads `score` / `threshold_met`.
+    """
+    from app.services import typesafe as ts_mod
+
+    score_name = str(config.get("score_name") or "").strip()
+    if not score_name:
+        raise NodeExecutionError("ต้องระบุชื่อการให้คะแนน (score_name)")
+    scale = config.get("scale") or "0_100"
+    if scale not in SCORE_SCALES:
+        raise NodeExecutionError(f"มาตราส่วนไม่ถูกต้อง: {scale}")
+    criteria = _normalize_jev_criteria(config.get("criteria"))
+    state = _jev_decision_state(config, context, log, "Score")
+
+    engine, config_jev = _require_jev_configured(db, config, "Score")
+    log(f"engine={engine} scale={scale} criteria={len(criteria)} ข้อ")
+
+    result = ts_mod.typesafe_score(
+        config_jev,
+        state,
+        score_name=score_name,
+        rubric=criteria,
+        scale=scale,
+        timeout=_jev_decision_timeout(),
+    )
+    raw_index = result.get("index")
+    score = _map_jev_score_index(raw_index, scale)
+    threshold = config.get("threshold")
+    try:
+        threshold_val = float(threshold) if threshold is not None and str(threshold).strip() != "" else None
+    except (TypeError, ValueError):
+        threshold_val = None
+    threshold_met = (score >= threshold_val) if threshold_val is not None else None
+    confidence = result.get("confidence") if config.get("include_confidence", True) else None
+    log(f"score={score}/{SCORE_SCALE_MAX.get(scale)} threshold_met={threshold_met} provider=jev:{result.get('model')}")
+
+    return {
+        "score": score,
+        "scale": scale,
+        "threshold": threshold_val,
+        "threshold_met": threshold_met,
+        "confidence": confidence,
+        "criteria": criteria,
+        "provider": f"jev:{result.get('model')}",
+    }
+
+
+JEV_CHOICE_FALLBACK_HANDLE = "fallback"
+
+
+def jev_choice_branch(output: Any) -> str:
+    """The sourceHandle a Choice output routes to."""
+    out = output if isinstance(output, dict) else {}
+    return JEV_CHOICE_FALLBACK_HANDLE if out.get("used_fallback") else str(out.get("choice") or "")
+
+
+def _check_jev_choice_branch_wired(node_id: str, output: Any, edges: List[dict]) -> None:
+    """Fail instead of silently skipping every downstream node.
+
+    A Choice with no outgoing edges is a terminal decision (its output is the
+    result); once any branch is wired, the chosen branch must be wired too.
+    """
+    outgoing = [e for e in edges if e.get("source") == node_id]
+    if not outgoing:
+        return
+    branch = jev_choice_branch(output)
+    if not any((e.get("sourceHandle") or "") == branch for e in outgoing):
+        raise NodeExecutionError(
+            f"Choice เลือกเส้นทาง '{branch}' แต่ไม่มีเส้นเชื่อมจาก handle นี้ — "
+            "ต่อเส้นให้ครบทุกตัวเลือก (รวม fallback) หรือปิด fallback"
+        )
+
+
+def _normalize_jev_options(options_raw) -> list:
+    """Validate UX option rows into {key,label,description?} with unique keys."""
+    rows: list = []
+    seen: set = set()
+    if isinstance(options_raw, str):
+        options_raw = options_raw.splitlines()
+    for raw in options_raw or []:
+        if isinstance(raw, str):
+            parts = [p.strip() for p in raw.split("|")]
+            if not parts or not parts[0]:
+                continue
+            row = {"key": parts[0], "label": parts[1] if len(parts) > 1 and parts[1] else parts[0]}
+            if len(parts) > 2 and parts[2]:
+                row["description"] = parts[2]
+        elif isinstance(raw, dict) and str(raw.get("key") or "").strip():
+            row = {
+                "key": str(raw["key"]).strip(),
+                "label": str(raw.get("label") or raw["key"]).strip(),
+            }
+            if str(raw.get("description") or "").strip():
+                row["description"] = str(raw["description"]).strip()
+        else:
+            continue
+        if row["key"].casefold() == JEV_CHOICE_FALLBACK_HANDLE:
+            raise NodeExecutionError("key 'fallback' สงวนไว้สำหรับเส้นทาง fallback — ตั้งชื่อ key อื่น")
+        if row["key"] in seen:
+            raise NodeExecutionError(f"key ของตัวเลือกซ้ำกัน: {row['key']}")
+        seen.add(row["key"])
+        rows.append(row)
+    if len(rows) < 2:
+        raise NodeExecutionError("ต้องระบุตัวเลือกอย่างน้อย 2 ตัว (รูปแบบ key|label|description ต่อบรรทัด)")
+    if len(rows) > 6:
+        raise NodeExecutionError("ตัวเลือกมากสุด 6 ตัว")
+    return rows
+
+
+def _exec_jev_choice(db: Session, config: dict, context: dict, log: Callable[[str], None]) -> Any:
+    """Choose among options with probabilities (Decision ≠ Generation).
+
+    Multi outbound: runtime walks only the edge whose sourceHandle equals the
+    chosen key (or `fallback` when used_fallback).
+    """
+    from app.services import typesafe as ts_mod
+
+    choice_name = str(config.get("choice_name") or "").strip()
+    if not choice_name:
+        raise NodeExecutionError("ต้องระบุชื่อการเลือก (choice_name)")
+    options = _normalize_jev_options(config.get("options"))
+    state = _jev_decision_state(config, context, log, "Choice")
+
+    engine, config_jev = _require_jev_configured(db, config, "Choice")
+    log(f"engine={engine} options={[o['key'] for o in options]}")
+
+    result = ts_mod.typesafe_choice(config_jev, state, choice_name=choice_name, options=options,
+                                    timeout=_jev_decision_timeout())
+    api_choice = result.get("choice")
+    valid_keys = [o["key"] for o in options]
+    if not api_choice or api_choice not in valid_keys:
+        raise NodeExecutionError(f"Jev เลือกตัวเลือกที่ไม่อยู่ในรายการ: {api_choice!r}")
+
+    probabilities = result.get("probabilities") or {}
+    pick_rule = config.get("pick_rule") or "highest"
+    fallback_reason = None  # set when the configured pick cannot be satisfied
+
+    def _prob(key: str):
+        try:
+            return float(probabilities.get(key))
+        except (TypeError, ValueError):
+            return None
+
+    if probabilities and any(_prob(k) is not None for k in valid_keys):
+        # Major 1: apply the configured pick rule locally over vendor probabilities.
+        if pick_rule == "highest":
+            choice_key = max(valid_keys, key=lambda k: (_prob(k) is not None, _prob(k) or 0.0))
+        elif pick_rule == "first_above_threshold":
+            try:
+                prob_threshold = float(config.get("probability_threshold"))
+            except (TypeError, ValueError):
+                raise NodeExecutionError(
+                    "Choice: pick_rule=first_above_threshold ต้องระบุ probability_threshold เป็นตัวเลข")
+            choice_key = next((k for k in valid_keys if (_prob(k) or 0.0) >= prob_threshold), None)
+            if choice_key is None:
+                if bool(config.get("enable_fallback", True)):
+                    choice_key = api_choice
+                    fallback_reason = f"ไม่มีตัวเลือกใดมี probability ≥ {prob_threshold}"
+                else:
+                    raise NodeExecutionError(
+                        f"Choice: ไม่มีตัวเลือกใดมี probability ≥ {prob_threshold} และไม่ได้เปิด fallback")
+        else:
+            raise NodeExecutionError(f"Choice: pick_rule ไม่ถูกต้อง: {pick_rule}")
+    else:
+        # Minor 5: no usable probabilities → keep the API choice, never invent numbers.
+        choice_key = api_choice
+
+    show_probabilities = bool(config.get("show_probabilities", True))
+    options_out: list = []
+    for o in options:
+        row = {"key": o["key"], "label": o["label"]}
+        if show_probabilities and _prob(o["key"]) is not None:
+            row["probability"] = round(_prob(o["key"]), 4)
+        options_out.append(row)
+
+    chosen_probability = None
+    if show_probabilities:
+        chosen_probability = next((r.get("probability") for r in options_out if r["key"] == choice_key), None)
+    confidence = result.get("confidence")
+
+    min_confidence = config.get("min_confidence")
+    try:
+        min_confidence_val = float(min_confidence) if min_confidence is not None and str(min_confidence).strip() != "" else None
+    except (TypeError, ValueError):
+        min_confidence_val = None
+    used_fallback = fallback_reason is not None
+    if not used_fallback and min_confidence_val is not None and isinstance(confidence, (int, float)) and confidence < min_confidence_val:
+        if bool(config.get("enable_fallback", True)):
+            used_fallback = True
+            fallback_reason = f"confidence {confidence} < min_confidence {min_confidence_val}"
+    if fallback_reason:
+        log(fallback_reason)
+
+    label = next((o["label"] for o in options if o["key"] == choice_key), choice_key)
+    log(f"pick_rule={pick_rule} choice={choice_key} probability={chosen_probability} used_fallback={used_fallback}")
+
+    policy: dict = {"pick": pick_rule, "min_confidence": min_confidence_val}
+    if pick_rule == "first_above_threshold":
+        try:
+            policy["probability_threshold"] = float(config.get("probability_threshold"))
+        except (TypeError, ValueError):
+            pass
+
+    # Minor 5: omit probability when the provider did not supply one (no one-hot).
+    return {
+        "choice": choice_key,
+        "label": label,
+        "probability": chosen_probability,
+        "confidence": confidence,
+        "used_fallback": used_fallback,
+        "policy": policy,
+        "options": options_out,
+        "provider": f"jev:{result.get('model')}",
+    }
+
+
+def _exec_jev_noul(db: Session, config: dict, context: dict, log: Callable[[str], None]) -> Any:
+    """Answer a yes/no probability question via Jev Noul (Decision ≠ Generation).
+
+    Single outbound like Score: writes noul + optional threshold/threshold_met;
+    branching belongs to the downstream Condition node.
+    """
+    from app.services import typesafe as ts_mod
+
+    noul_name = str(config.get("noul_name") or "").strip()
+    if not noul_name:
+        raise NodeExecutionError("ต้องระบุชื่อคำถาม (noul_name)")
+    question = str(config.get("question") or "").strip()
+    if not question:
+        raise NodeExecutionError("ต้องระบุคำถาม Yes/No (question)")
+    state = _jev_decision_state(config, context, log, "Noul")
+
+    engine, config_jev = _require_jev_configured(db, config, "Noul")
+    log(f"engine={engine} question={question[:80]}")
+
+    result = ts_mod.typesafe_noul(config_jev, state, question=question, timeout=_jev_decision_timeout())
+    noul = result.get("noul")
+    if noul is None:
+        raise NodeExecutionError("Jev ไม่ได้ส่งค่า noul กลับมา")
+    noul = round(float(noul), 4)
+
+    threshold = config.get("threshold")
+    try:
+        threshold_val = float(threshold) if threshold is not None and str(threshold).strip() != "" else None
+    except (TypeError, ValueError):
+        threshold_val = None
+    threshold_met = (noul >= threshold_val) if threshold_val is not None else None
+    log(f"noul={noul} threshold={threshold_val} threshold_met={threshold_met} provider=jev:{result.get('model')}")
+
+    return {
+        "noul": noul,
+        "question": question,
+        "noul_name": noul_name,
+        "threshold": threshold_val,
+        "threshold_met": threshold_met,
+        "provider": f"jev:{result.get('model')}",
+        "input_from": str(config.get("_input_source_template") or config.get("input_source") or ""),
+    }
+
+
+def _field_mapping_setting(db: Session):
+    """Seam for tests: the mapping/TypeSafe settings row."""
+    return db.query(Setting).first()
+
+
+def _field_mapping_schema(db: Session, schema_id: str):
+    """Seam for tests: the selected DocumentSchema."""
+    from app.models.schema import DocumentSchema
+
+    return db.query(DocumentSchema).filter(DocumentSchema.id == schema_id).first()
+
+
+def _field_mapping_documents(db: Session, config: dict, context: dict, limit: int) -> list:
+    """Seam for tests: documents from an explicit job_id or upstream sources."""
+    from app.models.document import Document
+
+    job_id = (config.get("job_id") or "").strip()
+    if job_id:
+        return (
+            db.query(Document)
+            .filter(Document.job_id == job_id, Document.ocr_text.isnot(None))
+            .order_by(Document.uploaded_at.desc())
+            .limit(limit)
+            .all()
+        )
+    docs: list = []
+    seen: set[str] = set()
+    for source_id in _upstream_node_ids(str(context.get("_node_id") or ""), config.get("_edges") or []):
+        output = context.get(source_id)
+        if not isinstance(output, dict):
+            continue
+        for item in output.get("documents") or []:
+            doc_id = str((item or {}).get("id") or "")
+            if not doc_id or doc_id in seen:
+                continue
+            seen.add(doc_id)
+            if len(docs) >= limit:
+                break
+            doc = db.query(Document).filter(Document.id == doc_id).first()
+            if doc is not None and doc.ocr_text:
+                docs.append(doc)
+    return docs
+
+
+def _exec_field_mapping(db: Session, config: dict, context: dict, log: Callable[[str], None]) -> Any:
+    """Map schema fields from upstream documents' OCR text (same engines as Jobs).
+
+    Reuses ``map_fields`` unchanged: bbox locators are honored first, then the
+    selected engine (auto prunes unconfigured providers). Documents come from
+    upstream job_source/document_source outputs (or an explicit job_id), and
+    each document's stored file is resolved so fixed-position extraction works
+    exactly like Jobs Processing.
+    """
+    from app.services.field_mapping import map_fields
+    from app.services.typesafe import typesafe_is_configured
+    from app.services.storage import get_storage_service
+
+    engine = (config.get("engine") or "").strip() or "auto"
+    if engine not in {"auto", "softnix", "jev", "llm", "fixed"}:
+        raise NodeExecutionError(f"Field Mapping: engine ไม่ถูกต้อง: {engine}")
+
+    schema_id = (config.get("schema_id") or "").strip()
+    if not schema_id:
+        raise NodeExecutionError("Field Mapping: ต้องเลือก Schema ก่อน")
+    schema = _field_mapping_schema(db, schema_id)
+    if not schema:
+        raise NodeExecutionError(f"Field Mapping: ไม่พบ Schema {schema_id}")
+    schema_fields = [f for f in (schema.fields or []) if f.get("name")]
+    if not schema_fields:
+        raise NodeExecutionError("Field Mapping: Schema นี้ไม่มีฟิลด์")
+
+    raw_names = config.get("field_names")
+    if isinstance(raw_names, list):
+        field_names = [str(n).strip() for n in raw_names if str(n).strip()]
+    else:
+        field_names = [n.strip() for n in str(raw_names or "").split(",") if n.strip()]
+    unknown = [n for n in field_names if n not in {f["name"] for f in schema_fields}]
+    if unknown:
+        raise NodeExecutionError(f"Field Mapping: Schema ไม่มีฟิลด์ {', '.join(unknown)}")
+    field_names = field_names or None
+
+    try:
+        limit = max(1, min(int(config.get("limit") or 10), 50))
+    except (TypeError, ValueError):
+        limit = 10
+
+    docs = _field_mapping_documents(db, config, context, limit)
+    if not docs:
+        raise NodeExecutionError(
+            "Field Mapping: ไม่พบเอกสารที่มีข้อความ OCR — เชื่อมต่อจาก Jobs หรือ Document Source ที่ประมวลผลแล้ว"
+        )
+
+    if engine == "jev" and not typesafe_is_configured(_field_mapping_setting(db)):
+        raise NodeExecutionError(
+            "Field Mapping: ยังไม่ได้ตั้งค่า TypeSafe (Jev) — ไปที่ Settings › OCR & Providers › TypeSafe แล้วกรอก Endpoint และ API Key"
+        )
+
+    storage = get_storage_service()
+    mapped: List[Dict[str, Any]] = []
+    warnings: List[str] = []
+    for doc in docs:
+        text = doc.ocr_text or ""
+        if not text.strip():
+            warnings.append(f"ข้าม '{doc.filename}': ไม่มีข้อความ OCR")
+            continue
+        with ExitStack() as stack:
+            file_path = None
+            if doc.file_path:
+                try:
+                    file_path = stack.enter_context(storage.get_local_path(doc.file_path))
+                except Exception:  # noqa: BLE001 — file is optional (bbox fields only)
+                    file_path = None
+            values, report = map_fields(text, schema, db, file_path, engine=engine, field_names=field_names)
+        for attempt in report.get("attempts") or []:
+            if attempt.get("status") == "skipped":
+                warnings.append(
+                    f"ข้าม engine {attempt.get('provider')} ({attempt.get('category')}) ในโหมด auto — '{doc.filename}'"
+                )
+        mapped.append({
+            "document_id": str(doc.id),
+            "filename": doc.filename,
+            "values": values,
+            "status": report.get("status"),
+            "provider": report.get("attempts"),
+            "engine": report.get("engine"),
+            "fields": report.get("fields"),
+            "review_fields": report.get("review_fields"),
+            "unresolved_fields": report.get("unresolved_fields"),
+            "missing_fields": report.get("missing_fields"),
+        })
+        log(
+            f"map '{doc.filename}': status={report.get('status')} "
+            f"providers={[a.get('provider') for a in report.get('attempts') or []]} "
+            f"review={len(report.get('review_fields') or [])} unresolved={len(report.get('unresolved_fields') or [])}"
+        )
+
+    if not mapped:
+        raise NodeExecutionError("Field Mapping: ทุกเอกสารไม่มีข้อความ OCR ที่ map ได้")
+
+    first = mapped[0]
+    # Worst case across documents so a Condition on {{node.status}} can't pass
+    # a batch whose later documents failed.
+    severity = {"completed": 0, "partial": 1, "failed": 2}
+    overall_status = max((d["status"] or "failed" for d in mapped), key=lambda s: severity.get(s, 2))
+    incomplete = [d["filename"] for d in mapped if d["status"] != "completed"]
+    if len(mapped) > 1:
+        warnings.append(
+            f"values/evidence/review_fields เป็นของเอกสารแรก ('{first['filename']}') — ผลของทุกเอกสารอยู่ใน documents"
+        )
+    return {
+        "count": len(mapped),
+        "values": first["values"],
+        "status": overall_status,
+        "first_document_status": first["status"],
+        "incomplete_documents": incomplete,
+        "evidence": first["fields"],
+        "review_fields": first["review_fields"],
+        "unresolved_fields": first["unresolved_fields"],
+        "provider": [a.get("provider") for a in first["provider"] or [] if a.get("status") != "skipped"],
+        "warnings": warnings,
+        "documents": mapped,
+    }
+
+
+
 EXECUTORS: Dict[str, Callable] = {
     "trigger_manual": _exec_trigger,
     "trigger_schedule": _exec_trigger,
     "trigger_webhook": _exec_trigger,
     "job_source": _exec_job_source,
     "document_source": _exec_document_source,
+    "field_mapping": _exec_field_mapping,
+    "jev_score": _exec_jev_score,
+    "jev_choice": _exec_jev_choice,
+    "jev_noul": _exec_jev_noul,
     "llm": _exec_llm,
     "condition": _exec_condition,
     "transform": _exec_transform,
@@ -2260,6 +3056,15 @@ def _resolve_node_config(
 ) -> dict:
     """Resolve templates and infer a single upstream Job in every execution path."""
     resolved_config = resolve_template(raw_config, context)
+    if node.get("type") in {"field_mapping", "jev_score", "jev_choice", "jev_noul"}:
+        resolved_config = {
+            **resolved_config,
+            "_edges": edges,
+            "_node_id": node.get("id"),
+            # Minor 6: keep the UNRESOLVED input_source template for input_from
+            # provenance (resolved values would leak rendered payloads).
+            "_input_source_template": raw_config.get("input_source"),
+        }
     resolved_config = _add_inferred_agent_job_id(
         node, resolved_config, edges, context, node_status
     )
@@ -2351,6 +3156,12 @@ def execute_workflow_run(db: Session, run: WorkflowRun) -> None:
                     if handle == branch:
                         should_run = True
                         break
+                elif src_node and src_node.get("type") == "jev_choice":
+                    branch = jev_choice_branch(src_output)
+                    handle = (e.get("sourceHandle") or "")
+                    if handle and handle == branch:
+                        should_run = True
+                        break
                 else:
                     should_run = True
                     break
@@ -2385,6 +3196,8 @@ def execute_workflow_run(db: Session, run: WorkflowRun) -> None:
             output = executor(db, resolved_config, {**context, "_node_id": node_id}, log)
             context[node_id] = output
             nr.output = _safe_json(redact_secrets(output))
+            if node_type == "jev_choice":
+                _check_jev_choice_branch_wired(node_id, output, edges)
             nr.status = "succeeded"
             node_status[node_id] = "succeeded"
             if node_type == "webhook_response":

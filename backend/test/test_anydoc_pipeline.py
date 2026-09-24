@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 from PIL import Image
@@ -8,6 +9,7 @@ from pydantic import ValidationError
 
 from app.schemas.schema import DocumentSchemaCreate
 from app.services import anydoc_pipeline
+from app.services.tesseract_ocr import TesseractOcrError
 from app.services.anydoc_pipeline import (
     AnydocFallbackToLegacy,
     AnydocTerminalError,
@@ -427,3 +429,37 @@ def test_schema_sample_fails_when_tesseract_and_fallback_return_no_text(monkeypa
 
     with pytest.raises(AnydocTerminalError, match="TesseractOCR and OCR fallback"):
         extract_schema_sample(_write_image(tmp_path), FakeDb(_setting(False)))
+
+
+def test_auto_skips_unconfigured_softnix_and_fallback(monkeypatch, tmp_path):
+    """Auto OCR must not call Softnix/fallback when credentials are missing."""
+    from app.services import anydoc_pipeline as pipeline
+
+    image = tmp_path / "page.png"
+    image.write_bytes(b"fake")
+    setting = SimpleNamespace(
+        api_token="",
+        api_endpoint="",
+        ocr_endpoint="",
+        ocr_fallback_enabled=False,
+        ocr_fallback_api_key=None,
+        verify_ssl=True,
+    )
+    softnix = Mock(side_effect=AssertionError("softnix should be skipped"))
+    fallback = Mock(side_effect=AssertionError("fallback should be skipped"))
+    monkeypatch.setattr(pipeline, "process_ocr", softnix)
+    monkeypatch.setattr(pipeline, "process_fallback_ocr", fallback)
+    monkeypatch.setattr(
+        pipeline,
+        "process_tesseract_ocr",
+        Mock(side_effect=TesseractOcrError("empty")),
+    )
+
+    with pytest.raises(pipeline.AnydocTerminalError) as raised:
+        pipeline._ocr_page_with_providers(
+            str(image), 1, Mock(), setting, deadline_monotonic=__import__("time").monotonic() + 30
+        )
+    softnix.assert_not_called()
+    fallback.assert_not_called()
+    message = str(raised.value)
+    assert "skipped" in message.lower() or "not configured" in message.lower() or "disabled" in message.lower()

@@ -27,6 +27,12 @@ class Setting(Base):
     ocr_fallback_enabled = Column(Boolean, default=False, nullable=False)
     ocr_fallback_api_key = Column(String, nullable=True)
 
+    # TypeSafe (Jev) — typed judgment API used by workflow triage/verification
+    # features. The key is stored plaintext like the other API tokens in this
+    # table and is never echoed back to clients in full (see redact helpers).
+    typesafe_endpoint = Column(String, nullable=True)
+    typesafe_api_key = Column(String, nullable=True)
+
     # Admin-managed Microsoft delegated OAuth configuration. The secret is
     # encrypted with the application SECRET_KEY before it reaches the DB.
     microsoft_oauth_client_id = Column(String, nullable=True)

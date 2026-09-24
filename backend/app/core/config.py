@@ -78,6 +78,12 @@ class Settings(BaseSettings):
     MAPPING_SOFTNIX_REQUEST_TIMEOUT_SECONDS: int = 240
     MAPPING_LLM_REQUEST_TIMEOUT_SECONDS: int = 120
     MAPPING_TOTAL_TIMEOUT_SECONDS: int = 300
+    # TypeSafe (Jev) mapping engine: per-request timeout and the confidence
+    # under which a mapped value is marked needs_review instead of accepted.
+    MAPPING_JEV_REQUEST_TIMEOUT_SECONDS: int = 90
+    MAPPING_JEV_CONFIDENCE_FLOOR: float = 0.7
+    JEV_DECISION_INPUT_MAX_CHARS: int = 24000
+    JEV_DECISION_TIMEOUT_SECONDS: int = 60
 
     # Cloud storage OAuth. Keep provider secrets server-side; users connect
     # their own accounts through the integrations UI.

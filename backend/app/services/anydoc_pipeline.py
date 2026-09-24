@@ -75,6 +75,15 @@ def normalize_ocr_engine(engine: str | None) -> str | None:
     return normalized
 
 
+
+def softnix_ocr_configured(setting: Setting | None) -> bool:
+    """True when Softnix OCR endpoint and API token are present."""
+    if setting is None:
+        return True
+    endpoint = getattr(setting, "ocr_endpoint", None) or getattr(setting, "api_endpoint", None)
+    return bool(str(endpoint or "").strip() and str(getattr(setting, "api_token", None) or "").strip())
+
+
 @dataclass
 class AnydocExtractionResult:
     markdown: str
@@ -336,26 +345,49 @@ def _ocr_page_with_providers(
                 f"{forced_provider} returned no readable text for page {page_number}"
             ) from error
 
+    attempted: list[str] = []
+    skipped: list[str] = []
+    last_failure = "no OCR provider produced text"
+
     try:
+        attempted.append("TesseractOCR")
         return run_tesseract()
     except Exception as error:
         logger.info("TesseractOCR did not produce text for page %s: %s", page_number, error)
+        last_failure = str(error)
 
     if allow_softnix_ocr:
+        if softnix_ocr_configured(setting):
+            try:
+                attempted.append("Softnix OCR")
+                return run_softnix()
+            except Exception as error:
+                logger.warning("Softnix OCR failed for page %s: %s", page_number, error)
+                last_failure = str(error)
+        else:
+            skipped.append("Softnix OCR (not configured)")
+            logger.info("Skipping Softnix OCR for page %s: not configured", page_number)
+    else:
+        skipped.append("Softnix OCR (disabled for this operation)")
+
+    fallback_failure = fallback_configuration_error(
+        setting, bool(getattr(setting, "ocr_fallback_enabled", False))
+    )
+    if fallback_failure:
+        skipped.append(f"OCR fallback ({fallback_failure})")
+        logger.info("Skipping OCR fallback for page %s: %s", page_number, fallback_failure)
+    else:
         try:
-            return run_softnix()
+            attempted.append("OCR fallback")
+            return run_fallback()
         except Exception as error:
-            logger.warning("Softnix OCR failed for page %s: %s", page_number, error)
+            logger.warning("OCR fallback failed for page %s: %s", page_number, error)
+            last_failure = str(error)
 
-    try:
-        return run_fallback()
-    except Exception as error:
-        logger.warning("OCR fallback failed for page %s: %s", page_number, error)
-        fallback_failure = str(error)
-
-    attempted_providers = "TesseractOCR, Softnix OCR, and OCR fallback" if allow_softnix_ocr else "TesseractOCR and OCR fallback"
+    attempted_label = ", ".join(attempted) if attempted else "no providers"
+    skipped_label = f"; skipped: {', '.join(skipped)}" if skipped else ""
     raise AnydocTerminalError(
-        f"{attempted_providers} returned no text for page {page_number}; {fallback_failure}"
+        f"{attempted_label} returned no text for page {page_number}{skipped_label}; {last_failure}"
     )
 
 

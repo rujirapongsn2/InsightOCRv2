@@ -56,7 +56,7 @@ def test_mapping_providers_task(user_id: str, run_id: str):
                 {"name": "reference", "type": "text", "required": True},
                 {"name": "total", "type": "currency", "required": True},
             ])
-            for engine in ("softnix", "llm"):
+            for engine in ("softnix", "jev", "llm"):
                 values, report = map_fields("Reference: MAP-42\nTotal: 25", sample, db, engine=engine)
                 checks.append({"engine": engine, "passed": values == {"reference": "MAP-42", "total": 25},
                                "attempts": report["attempts"], "elapsed_seconds": report["elapsed_seconds"]})
@@ -811,7 +811,7 @@ def _normalise_fixed_position_date(value: str) -> str:
         if month:
             return to_iso(int(day), month, int(year))
 
-    candidates = ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y", "%d %B %Y", "%B %d, %Y")
+    candidates = ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y", "%d %B %Y", "%d %b %Y", "%B %d, %Y", "%b %d, %Y")
     for date_format in candidates:
         try:
             return datetime.strptime(cleaned, date_format).date().isoformat()

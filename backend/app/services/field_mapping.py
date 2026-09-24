@@ -17,6 +17,13 @@ from app.models.setting import Setting
 from app.services.ai_suggestion_service import _normalize_openai_base_url
 from app.services.anydoc_bbox import extract_fixed_position_fields
 from app.services.structure import extract_structure
+from app.services.typesafe import resolve_typesafe_config, typesafe_is_configured, typesafe_system_one
+
+JEV_SCALAR_CANDIDATE_CAP = 80
+JEV_TEXT_CANDIDATE_CAP = 120
+JEV_LABELLED_LINE_LIMIT = 40
+# Jev picks one verbatim candidate, so it cannot produce list/table/object values.
+JEV_UNSUPPORTED_TYPES = {"array", "object"}
 
 
 def parse_mapping_result(result: Any, names: set[str]) -> dict:
@@ -55,6 +62,169 @@ def attach_page_evidence(report: dict, pages: Any) -> None:
                 visit(child)
     for item in report.get("fields", {}).values():
         visit(item)
+
+
+def jev_mapping(text: str, schema: dict, db: Any, timeout: float) -> tuple[dict, str, dict]:
+    """Map fields with TypeSafe (Jev): one Choice judgment per schema field.
+
+    Select instead of generate: for each field the options presented to Jev are
+    candidate values lifted from the document text by deterministic per-type
+    patterns; Jev only decides which candidate (if any) satisfies the schema
+    field, returning typed confidence for the selection.
+    """
+    config = resolve_typesafe_config(db.query(Setting).first() if hasattr(db, "query") else None)
+    field_defs = schema.get("properties", {})
+    raw_names = [name for name in field_defs if name != "$schema"]
+    if not raw_names:
+        raise ValueError("Schema has no fields for Jev mapping")
+
+    text_lines = text.splitlines()
+    folded_lines = [line.casefold() for line in text_lines]
+
+    def number_candidates(chunk: str) -> list[str]:
+        return re.findall(r"(?<![\w.,])[-+]?\d[\d,]*(?:\.\d+)?(?![\w.,])", chunk)
+
+    def date_candidates(chunk: str) -> list[str]:
+        return re.findall(
+            r"(?<!\w)(?:\d{1,2}[/\-.]\d{1,2}[/\-.]\d{2,4}|\d{4}-\d{2}-\d{2}|\d{1,2}\s+\w+\s+\d{4})(?!\w)",
+            chunk,
+        )
+
+    def text_candidates(chunk: str) -> list[str]:
+        """Full lines first (Thai OCR rarely space-tokenises like English), then
+        colon-values and short n-grams, so multi-token addresses and company
+        names survive the option cap."""
+        lines: list[str] = []
+        for raw_line in chunk.splitlines():
+            line = raw_line.strip()
+            if not line or len(line) > 120:
+                continue
+            if line.startswith("![") or line.startswith("[tbl"):
+                continue
+            if line.startswith("#"):
+                line = line.lstrip("#").strip()
+                if not line:
+                    continue
+            lines.append(line)
+        quoted = re.findall(r"[:：]\s*([^\n:]{2,120})", chunk)
+        words = chunk.split()
+        ngrams = [
+            " ".join(words[i:i + n])
+            for n in (1, 2, 3, 4)
+            for i in range(max(0, len(words) - n + 1))
+        ]
+        return [item.strip() for item in lines + quoted + ngrams if item and len(item.strip()) <= 120]
+
+    # Document-wide candidates are computed once and shared by every field.
+    document_candidates: dict[str, list[str]] = {}
+
+    def unique_candidates(kind: str, extract: Any) -> list[str]:
+        if kind not in document_candidates:
+            document_candidates[kind] = list(dict.fromkeys(extract(text)))
+        return document_candidates[kind]
+
+    def keywords_for(name: str, field_def: dict) -> set[str]:
+        source = " ".join([name, str(field_def.get("title") or ""), str(field_def.get("description") or "")])
+        return {token.casefold() for token in re.split(r"[\W_]+", source) if len(token) >= 2}
+
+    def budget(unique: list[str], extract: Any, keywords: set[str], cap: int) -> tuple[list[str], bool]:
+        """Cap options without dropping likely answers.
+
+        Candidates extracted from lines that mention the field's
+        name/description come first (bounded to JEV_LABELLED_LINE_LIMIT lines so
+        short keywords like "no"/"id" can't blow up the work); the rest keep
+        head and tail of the document (totals and signatures sit at the bottom)
+        instead of only the first ``cap`` items.
+        """
+        if len(unique) <= cap:
+            return unique, False
+        labelled = [text_lines[i] for i, folded in enumerate(folded_lines)
+                    if any(k in folded for k in keywords)][:JEV_LABELLED_LINE_LIMIT]
+        unique_set = set(unique)
+        preferred = list(dict.fromkeys(
+            c.strip() for line in labelled for c in extract(line) if c.strip() in unique_set
+        ))[:cap]
+        preferred_set = set(preferred)
+        rest = [c for c in unique if c not in preferred_set]
+        room = cap - len(preferred)
+        head = rest[: (room + 1) // 2]
+        tail = rest[len(rest) - room // 2:] if room // 2 else []
+        chosen = preferred_set | set(head) | set(tail)
+        return [c for c in unique if c in chosen], True
+
+    def candidates_for(name: str, field_def: dict) -> tuple[list[str], bool]:
+        """Lift verbatim options from document text for one schema field.
+
+        Returns ``(options, truncated)``. JSON Schema dates arrive as
+        ``{"type": "string", "format": "date"}`` (see ``build_schema_json``), so
+        date detection must honour ``format`` or dates fall through to n-grams.
+        """
+        field_type = str(field_def.get("type") or "string")
+        field_format = str(field_def.get("format") or "")
+        if field_type == "boolean":
+            return ["true", "false", "__none__"], False
+        if field_type in ("number", "integer", "currency"):
+            kind, extract, cap = "number", number_candidates, JEV_SCALAR_CANDIDATE_CAP
+        elif field_type == "date" or field_format == "date":
+            kind, extract, cap = "date", date_candidates, JEV_SCALAR_CANDIDATE_CAP
+        else:
+            kind, extract, cap = "text", text_candidates, JEV_TEXT_CANDIDATE_CAP
+        options, truncated = budget(unique_candidates(kind, extract), extract, keywords_for(name, field_def), cap)
+        return options + ["__none__"], truncated
+
+    questions: dict[str, Any] = {}
+    name_for_key: dict[str, str] = {}
+    truncated_fields: set[str] = set()
+    for name in raw_names:
+        field_def = field_defs[name] if isinstance(field_defs[name], dict) else {"type": "string"}
+        options, truncated = candidates_for(name, field_def)
+        if truncated:
+            truncated_fields.add(name)
+        key = f"f{len(name_for_key)}_{re.sub(r'[^A-Za-z0-9_]', '_', name)[:40]}"
+        name_for_key[key] = name
+        description = str(field_def.get("description") or "").strip()
+        criteria: dict[str, Any] = {option: None for option in options}
+        criteria["__none__"] = "The document does not contain a value for this field"
+        questions[key] = {
+            "type": "choice",
+            "instructions": {
+                "field_name": name,
+                "field_description": description or "Extract this field from the document.",
+                "candidates": options[:-1],
+                "question": (
+                    f"Which candidate value is the document's value for the field `{name}`? "
+                    "Choose exactly one candidate taken verbatim from `document_text`, "
+                    "or `__none__` when no candidate is the field's value."
+                ),
+            },
+            "criteria": criteria,
+        }
+    state = {"document_text": text, "schema_fields": raw_names}
+    response = typesafe_system_one(config, state, questions, timeout=timeout)
+    answers = response.get("answers", {})
+    floor = settings.MAPPING_JEV_CONFIDENCE_FLOOR
+    values: dict[str, Any] = {}
+    low_confidence: dict[str, dict] = {}
+    for key, name in name_for_key.items():
+        answer = answers.get(key) or {}
+        choice = answer.get("choice")
+        confidence = answer.get("confidence")
+        if not choice or choice == "__none__":
+            if name in truncated_fields:
+                low_confidence[name] = {
+                    "value": None, "confidence": confidence,
+                    "reason": "Jev saw a truncated candidate list; the value may be outside the options offered",
+                }
+            continue
+        if isinstance(field_defs[name], dict) and field_defs[name].get("type") == "boolean":
+            choice = {"true": True, "false": False}.get(choice, choice)
+        if isinstance(confidence, (int, float)) and confidence < floor:
+            low_confidence[name] = {"value": choice, "confidence": confidence}
+            continue
+        values[name] = choice
+    tag = f"jev:{response.get('model', 'jev')}"
+    return values, tag, low_confidence
+
 
 
 def llm_mapping(text: str, schema: dict, db: Any, timeout: float) -> tuple[Any, str]:
@@ -147,6 +317,64 @@ def validate_relationships(values: dict, fields: list[dict], evidence: dict) -> 
             evidence.setdefault(name, {}).update(status="needs_review", reason="Insufficient values for schema arithmetic check")
 
 
+
+def softnix_structure_configured(setting: Any) -> bool:
+    """True when Softnix structured-output credentials are present.
+
+    When ``setting`` is missing (unit tests / callers without a DB row), keep the
+    engine in Auto so monkeypatched providers can still run.
+    """
+    if setting is None:
+        return True
+    if not str(getattr(setting, "api_token", None) or "").strip():
+        return False
+    if str(getattr(setting, "structured_output_endpoint", None) or "").strip():
+        return True
+    endpoint = (
+        getattr(setting, "ocr_endpoint", None) or getattr(setting, "api_endpoint", None)
+    )
+    return bool(str(endpoint or "").strip())
+
+
+def llm_mapping_configured(db: Any, setting: Any) -> bool:
+    """True when an active OpenAI-compatible mapping fallback provider exists."""
+    if setting is None or db is None or not hasattr(db, "query"):
+        return True
+    provider_id = getattr(setting, "mapping_fallback_provider_id", None)
+    query = db.query(AISettings).filter(
+        AISettings.is_active.is_(True),
+        AISettings.provider_type == "openai_compatible",
+    )
+    provider = (
+        query.filter(AISettings.id == provider_id).first()
+        if provider_id
+        else query.filter(AISettings.is_default.is_(True)).first()
+    )
+    if provider is None:
+        return False
+    return bool(str(getattr(provider, "api_key", None) or "").strip() and str(getattr(provider, "api_url", None) or "").strip())
+
+
+def auto_mapping_routes(setting: Any, db: Any) -> tuple[list[str], list[dict]]:
+    """Auto chain with unconfigured engines removed before any provider call."""
+    routes: list[str] = []
+    skipped: list[dict] = []
+    if softnix_structure_configured(setting):
+        routes.append("softnix")
+    else:
+        skipped.append({"provider": "softnix", "status": "skipped", "category": "not_configured"})
+    if typesafe_is_configured(setting):
+        routes.append("jev")
+    else:
+        skipped.append({"provider": "jev", "status": "skipped", "category": "not_configured"})
+    if getattr(setting, "mapping_fallback_enabled", True):
+        if llm_mapping_configured(db, setting):
+            routes.append("llm")
+        else:
+            skipped.append({"provider": "llm", "status": "skipped", "category": "not_configured"})
+    return routes, skipped
+
+
 def map_fields(text: str, schema: Any, db: Any, file_path: str | None = None,
                *, engine: str | None = None, field_names: list[str] | None = None) -> tuple[dict, dict]:
     # Kept here to share the existing schema coercion contract with legacy callers.
@@ -160,7 +388,7 @@ def map_fields(text: str, schema: Any, db: Any, file_path: str | None = None,
     fields = [f for f in schema.fields or [] if f.get("name")]
     policy = db.query(Setting).first() if hasattr(db, "query") else None
     engine = engine or getattr(policy, "mapping_engine", None) or "auto"
-    if engine not in {"auto", "softnix", "llm", "fixed"}:
+    if engine not in {"auto", "softnix", "llm", "fixed", "jev"}:
         raise ValueError("Unsupported mapping engine")
     if field_names is not None:
         fields = [f for f in fields if f["name"] in field_names]
@@ -173,8 +401,18 @@ def map_fields(text: str, schema: Any, db: Any, file_path: str | None = None,
 
     def accept(name: str, raw: Any, provider: str, proof: dict | None = None) -> None:
         try:
-            value = _normalise_fixed_position_value(raw, properties[name], name) if proof else (
-                _normalize_schema_value(raw, properties[name], name))
+            # Date fields: coerce common OCR forms ("24 Aug 2026") to ISO the same
+            # way bbox does, then match evidence against the verbatim raw quote so
+            # source_matched stays honest when the stored value is normalised.
+            if proof:
+                value = _normalise_fixed_position_value(raw, properties[name], name)
+                proof_evidence = proof
+            elif isinstance(raw, str) and properties[name].get("format") == "date":
+                value = _normalise_fixed_position_value(raw, properties[name], name)
+                proof_evidence = source_evidence(raw, text)
+            else:
+                value = _normalize_schema_value(raw, properties[name], name)
+                proof_evidence = None
             json.dumps(value, allow_nan=False)
             if value in (None, "", [], {}):
                 if name in values:
@@ -187,7 +425,7 @@ def map_fields(text: str, schema: Any, db: Any, file_path: str | None = None,
                                       alternative={"value": value, "provider": provider})
                 return
             values[name] = value
-            evidence[name] = {**(proof or source_evidence(value, text)), "provider": provider}
+            evidence[name] = {**(proof_evidence or source_evidence(value, text)), "provider": provider}
             if proof:
                 evidence[name].update(status="needs_review", reason="Position read; template alignment requires review")
         except (ValueError, TypeError) as exc:
@@ -235,12 +473,22 @@ def map_fields(text: str, schema: Any, db: Any, file_path: str | None = None,
             if len(matches) == 1:
                 accept(name, matches[0].group(1), "label")
 
-    routes = (["softnix", "llm"] if getattr(policy, "mapping_fallback_enabled", True) else ["softnix"]) if engine == "auto" else [engine]
+    skipped_routes: list[dict] = []
+    if engine == "auto":
+        routes, skipped_routes = auto_mapping_routes(policy, db)
+    else:
+        routes = [engine]
+    jev_low_confidence: dict[str, dict] = {}
     for route in routes:
         pending = [f for f in fields if f["name"] not in values or (
             evidence[f["name"]].get("provider") != "bbox" and evidence[f["name"]].get("status") == "needs_review")]
         if not pending or route == "fixed":
             break
+        if route == "jev":
+            pending = [f for f in pending if properties[f["name"]].get("type") not in JEV_UNSUPPORTED_TYPES]
+            if not pending:
+                attempts.append({"provider": route, "status": "skipped", "category": "unsupported_field_types"})
+                continue
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             attempts.append({"provider": route, "status": "timeout"})
@@ -252,10 +500,14 @@ def map_fields(text: str, schema: Any, db: Any, file_path: str | None = None,
                 settings.MAPPING_SOFTNIX_REQUEST_TIMEOUT_SECONDS
                 if route == "softnix"
                 else settings.MAPPING_LLM_REQUEST_TIMEOUT_SECONDS
+                if route == "llm"
+                else settings.MAPPING_JEV_REQUEST_TIMEOUT_SECONDS
             )
             timeout = min(request_limit, remaining)
             if route == "softnix":
                 result = extract_structure(text, json.dumps(target), db, timeout=timeout)
+            elif route == "jev":
+                result, provider, jev_low_confidence = jev_mapping(text, target, db, timeout)
             else:
                 result, provider = llm_mapping(text, target, db, timeout)
             names = {f["name"] for f in pending}
@@ -269,6 +521,17 @@ def map_fields(text: str, schema: Any, db: Any, file_path: str | None = None,
             for field in pending:
                 evidence.setdefault(field["name"], {"status": "failed", "provider": provider,
                                                     "reason": "Mapping provider unavailable or invalid response"})
+        finally:
+            for name, detail in jev_low_confidence.items():
+                item = evidence.get(name)
+                if item is not None and name not in values:
+                    item.update(status="needs_review",
+                                reason=detail.get("reason") or "Jev confidence below threshold; value requires review")
+                    if detail["value"] is not None:
+                        item["jev_candidate"] = {"value": detail["value"], "confidence": detail["confidence"]}
+            jev_low_confidence = {}
+
+    attempts.extend(skipped_routes)
 
     for field in fields:
         evidence.setdefault(field["name"], {"status": "failed", "reason": "Mapping budget exhausted or engine unavailable"})

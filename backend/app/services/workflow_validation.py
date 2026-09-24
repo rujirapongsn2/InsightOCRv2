@@ -28,9 +28,12 @@ from app.models.schema import DocumentSchema
 from app.models.user import User
 from app.services.workflow_engine import (
     EXECUTORS,
+    JEV_CHOICE_FALLBACK_HANDLE,
     NODE_TYPES,
     TEMPLATE_RE,
     NodeExecutionError,
+    _normalize_jev_criteria,
+    _normalize_jev_options,
     _topological_order,
     _workflow_provider_ref,
 )
@@ -122,6 +125,47 @@ def _has_possible_upstream_job_context(node_id: str, nodes: List[dict], edges: L
     return False
 
 
+def _validate_jev_node(nid: str, ntype: str, config: dict, edges: List[dict]) -> List[Dict[str, Any]]:
+    """Catch Score/Choice config and Choice wiring that would only fail (or
+    silently skip branches) at run time. Templated values are left to runtime."""
+    issues: List[Dict[str, Any]] = []
+
+    def templated(value: Any) -> bool:
+        return isinstance(value, str) and bool(TEMPLATE_RE.search(value))
+
+    if ntype == "jev_score" and config.get("criteria") and not templated(config.get("criteria")):
+        try:
+            _normalize_jev_criteria(config.get("criteria"))
+        except NodeExecutionError as exc:
+            issues.append(_issue(nid, "error", "criteria", str(exc)))
+    if ntype != "jev_choice" or not config.get("options") or templated(config.get("options")):
+        return issues
+    try:
+        keys = [o["key"] for o in _normalize_jev_options(config.get("options"))]
+    except NodeExecutionError as exc:
+        issues.append(_issue(nid, "error", "options", str(exc)))
+        return issues
+    fallback_enabled = config.get("enable_fallback", True) is not False
+    handles = set(keys) | ({JEV_CHOICE_FALLBACK_HANDLE} if fallback_enabled else set())
+    outgoing = [e for e in edges if e.get("source") == nid]
+    for edge in outgoing:
+        handle = edge.get("sourceHandle") or ""
+        if handle not in handles:
+            issues.append(_issue(
+                nid, "error", "options",
+                f"เส้นเชื่อมจาก handle '{handle or '(ไม่มี)'}' ไม่ตรงกับตัวเลือกใด — ลบเส้นนี้แล้วต่อใหม่จากตัวเลือกที่ถูกต้อง",
+            ))
+    if outgoing:
+        wired = {e.get("sourceHandle") for e in outgoing}
+        unwired = [h for h in keys + ([JEV_CHOICE_FALLBACK_HANDLE] if fallback_enabled else []) if h not in wired]
+        if unwired:
+            issues.append(_issue(
+                nid, "warning", "options",
+                "ตัวเลือกที่ยังไม่ได้ต่อเส้น: " + ", ".join(unwired) + " — ถ้า Jev เลือกเส้นทางนี้ node จะ fail",
+            ))
+    return issues
+
+
 def validate_workflow_definition(
     db: Session,
     definition: Dict[str, Any],
@@ -192,7 +236,12 @@ def validate_workflow_definition(
         if config.get("schema_id"):
             schema = db.query(DocumentSchema).filter(DocumentSchema.id == config["schema_id"]).first()
             if not schema:
-                issues.append(_issue(nid, "warning", "schema_id", "ไม่พบ Schema ที่อ้างถึง — โปรดเลือกใหม่"))
+                # field_mapping has no Job schema to fall back on.
+                level = "error" if ntype == "field_mapping" and not allow_unresolved_references else "warning"
+                issues.append(_issue(nid, level, "schema_id", "ไม่พบ Schema ที่อ้างถึง — โปรดเลือกใหม่"))
+
+        if ntype in {"jev_score", "jev_choice"}:
+            issues.extend(_validate_jev_node(nid, ntype, config, edges))
 
         # Referenced Integration must exist, be owned, and match provider type.
         provider = _INTEGRATION_FIELDS.get(ntype)

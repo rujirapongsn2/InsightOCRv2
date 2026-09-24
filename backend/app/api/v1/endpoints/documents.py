@@ -42,7 +42,7 @@ router = APIRouter()
 
 
 class MappingRetryRequest(BaseModel):
-    engine: Literal["auto", "softnix", "llm", "fixed"] = "auto"
+    engine: Literal["auto", "softnix", "llm", "fixed", "jev"] = "auto"
     fields: Optional[List[str]] = None
 
 
