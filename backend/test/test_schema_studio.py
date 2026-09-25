@@ -407,3 +407,50 @@ def test_unknown_or_expired_run_is_not_reported_as_queued(monkeypatch):
     with pytest.raises(HTTPException) as exc:
         ep.read_sample_run("c" * 32, current_user=ADMIN)
     assert exc.value.status_code == 404 and "expired" in exc.value.detail
+
+
+@pytest.mark.parametrize("quote,text,found", [
+    ("100", "Total 1000", False),
+    ("100", "Ref INV-1005", False),
+    ("100", "Paid 100.50", False),
+    ("100", "Qty: 100.", True),
+    ("1,250.00", "Total: 11,250.00", False),
+    ("ดีทวิน", "บริษัทดีทวินจำกัด", True),
+    ("(สำนักงานใหญ่)", "จำกัด (สำนักงานใหญ่)", True),
+    ("1,250.00", "Total 1,250.00THB", True),
+    ("1,250.00", "THB1,250.00", True),
+    ("12", "weight 12kg", True),
+    ("INV-20", "XINV-20", False),
+])
+def test_quote_must_not_be_part_of_a_longer_token(quote, text, found):
+    assert (studio.locate_quote(quote, text)["match"] != "none") is found
+
+
+@pytest.mark.parametrize("quote,field_type,ok", [
+    ("INV-001", "number", False),
+    ("12/08/2026", "number", False),
+    ("฿1,250.00", "currency", True),
+    ("1,250.00 บาท", "currency", True),
+    ("7.0%", "number", True),
+    ("๑๐๐,๐๐๐ บาท", "currency", True),
+    ("THB1,250.00", "currency", True),
+    ("1,250.00THB", "currency", True),
+    ("1,250.-", "currency", True),
+    ("(1,250.00)", "currency", True),
+    ("1,250.00-", "currency", True),
+    ("1 250.00", "number", True),
+])
+def test_number_check_accepts_currency_marks_but_not_other_text(quote, field_type, ok):
+    assert studio._type_check(quote, field_type, "f")[0] is ok
+
+
+def test_confirmed_values_for_removed_fields_are_ignored_not_failed():
+    result = studio.compare_with_expected({"invoice_no": "INV-1", "old_name": "x"}, {"invoice_no": "INV-1"},
+                                          {"invoice_no"})
+    assert (result["checked"], result["matched"], result["ignored"]) == (1, 1, ["old_name"])
+
+
+def test_accounting_negatives_read_as_negative_numbers():
+    assert studio._normalize_amount("(1,250.00)") == "-1,250.00"
+    assert studio._normalize_amount("1,250.00-") == "-1,250.00"
+    assert studio._type_check("(1,250.00)", "currency", "total") == (True, "Reads as currency: -1250.0")

@@ -22,13 +22,14 @@ interface StoredSample {
   id: string
   filename: string
   confirmed_fields: string[]
+  outdated_fields?: string[]
   last_run: LastRun | null
   created_at: string
   expires_at: string | null
 }
 
 type RunCell = { value: unknown; status?: string }
-type Comparison = { checked: number; matched: number; fields: Record<string, { expected: unknown; actual: unknown; match: boolean }> }
+type Comparison = { checked: number; matched: number; fields: Record<string, { expected: unknown; actual: unknown; match: boolean }>; ignored?: string[] }
 type RunSample = { index: number; filename: string; sample_id: string; report?: { fields: Record<string, RunCell> }; comparison?: Comparison; error?: string }
 type RunState = { status: "queued" | "running" | "completed" | "failed"; total: number | null; done: number; samples: RunSample[]; error?: string | null }
 
@@ -239,7 +240,14 @@ export function SchemaTestSetPanel({ schemaId, fieldNames }: { schemaId: string;
               {samples.map((sample) => (
                 <tr key={sample.id} className="border-b last:border-0 align-top">
                   <td className="px-3 py-2 font-medium text-slate-800">{sample.filename}</td>
-                  <td className="px-3 py-2 tabular-nums text-slate-700">{sample.confirmed_fields.length} of {fieldNames.length}</td>
+                  <td className="px-3 py-2 tabular-nums text-slate-700">
+                    {sample.confirmed_fields.length} of {fieldNames.length}
+                    {!!sample.outdated_fields?.length && (
+                      <span className="block text-xs text-slate-500" title={sample.outdated_fields.join(", ")}>
+                        {sample.outdated_fields.length} for fields no longer in the schema (not tested)
+                      </span>
+                    )}
+                  </td>
                   <td className="px-3 py-2 text-slate-700">
                     {sample.last_run ? (
                       sample.last_run.error ? <span className="text-red-700">Failed</span> : (
@@ -304,6 +312,11 @@ export function SchemaTestSetPanel({ schemaId, fieldNames }: { schemaId: string;
               </span>
             )}
           </div>
+          {!!sample.comparison?.ignored?.length && (
+            <p className="text-xs text-slate-500">
+              Not counted: confirmed values for fields no longer in the schema ({sample.comparison.ignored.join(", ")}).
+            </p>
+          )}
           {sample.error ? <p className="text-sm text-red-700">This sample could not be tested.</p> : (
             <div className="overflow-x-auto">
               <table className="w-full min-w-[520px] text-sm">

@@ -10,7 +10,8 @@ import { isValidFieldName, validateFields } from "@/lib/schema-validation"
 export function DetailsAndSaveStep() {
     const { schemaData, fields, updateSchemaData, isSaving, saveSchema, previousStep, studio, updateStudio } = useSchemaWizard()
     const confirmedValues = studio
-        ? Object.values(studio.expected).reduce((sum, values) => sum + Object.keys(values).length, 0)
+        ? Object.values(studio.expected).reduce(
+            (sum, values) => sum + fields.filter((field) => field.id && values[field.id] !== undefined).length, 0)
         : 0
     const [nameError, setNameError] = useState("")
 

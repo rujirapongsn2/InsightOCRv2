@@ -307,8 +307,31 @@ def _snake_case(value: str) -> str:
     return value
 
 
+# Letters/digits that make a value part of a longer token (Latin and Thai digits).
+_TOKEN_CHAR = "A-Za-z0-9\u0E50-\u0E59"
+
+
 def _flexible_pattern(quote: str) -> str:
-    return r"\s+".join(re.escape(part) for part in quote.split())
+    """Match the quote allowing any whitespace between words, but not inside a
+    longer token: "100" must not match in "1000", "INV-1005" or "100.50".
+
+    A digit edge only rejects neighbouring digits (so "1,250.00" is still found
+    in "1,250.00THB" or "THB1,250.00"); a Latin-letter edge rejects letters and
+    digits. Thai text has no spaces between words, so a Thai edge is not
+    constrained.
+    """
+    body = r"\s+".join(re.escape(part) for part in quote.split())
+    digit = "0-9\u0E50-\u0E59"
+    start, end = "", ""
+    if re.match(f"[{digit}]", quote):
+        start = f"(?<![{digit}])(?<![{digit}][.,])"
+    elif re.match(f"[{_TOKEN_CHAR}]", quote):
+        start = f"(?<![{_TOKEN_CHAR}])"
+    if re.search(f"[{digit}]$", quote):
+        end = f"(?![{digit}])(?![.,][{digit}])"
+    elif re.search(f"[{_TOKEN_CHAR}]$", quote):
+        end = f"(?![{_TOKEN_CHAR}])"
+    return start + body + end
 
 
 def locate_quote(quote: str, text: str) -> dict[str, Any]:
@@ -333,6 +356,26 @@ def locate_quote(quote: str, text: str) -> dict[str, Any]:
     }
 
 
+def _normalize_amount(text: str) -> Optional[str]:
+    """Reduce a written amount to a plain number string, or None if it is not one.
+
+    Accepts a currency sign or code (attached or spaced), %, Thai "1,250.-",
+    accounting negatives "(1,250.00)" / "1,250.00-", and thousands separated by
+    spaces. Anything else ("INV-001", "12/08/2026") is not a number.
+    """
+    value = re.sub(r"(?i)THB|USD|EUR|baht|บาท|[฿$€£¥%]", "", text or "").strip()
+    negative = False
+    if value.startswith("(") and value.endswith(")"):
+        negative, value = True, value[1:-1].strip()
+    value = re.sub(r"[.,]-$", "", value)
+    if value.endswith("-") and not value.startswith("-"):
+        negative, value = True, value[:-1].strip()
+    value = re.sub(r"(?<=\d) (?=\d{3}(?:\D|$))", "", value)
+    if not re.fullmatch(r"[-+]?\d[\d,]*(?:\.\d+)?", value):
+        return None
+    return f"-{value.lstrip('+-')}" if negative else value
+
+
 def _type_check(quote: str, field_type: str, name: str) -> tuple[Optional[bool], str]:
     """Parse the quote with the same coercion rules mapping uses."""
     from app.tasks.document_tasks import (
@@ -348,7 +391,10 @@ def _type_check(quote: str, field_type: str, name: str) -> tuple[Optional[bool],
     schema = map_field_type_to_json_schema(field_type, "")
     candidate = quote
     if field_type in {"number", "currency"}:
-        candidate = re.sub(r"[^\d.,\-]", "", quote)
+        normalized = _normalize_amount(quote)
+        if normalized is None:
+            return False, f"“{quote[:60]}” does not read as {field_type}"
+        candidate = normalized
     try:
         if schema.get("format") == "date":
             value = _normalise_fixed_position_value(candidate, schema, name)
@@ -675,12 +721,19 @@ def values_match(expected: Any, actual: Any) -> bool:
     return json.dumps(expected, sort_keys=True, ensure_ascii=False) == json.dumps(actual, sort_keys=True, ensure_ascii=False)
 
 
-def compare_with_expected(expected: dict[str, Any], values: dict[str, Any]) -> dict[str, Any]:
-    """Score one sample: only fields a person confirmed are counted."""
+def compare_with_expected(expected: dict[str, Any], values: dict[str, Any],
+                          field_names: Optional[set[str]] = None) -> dict[str, Any]:
+    """Score one sample: only fields a person confirmed are counted.
+
+    Confirmed values for fields no longer in the schema (renamed or removed)
+    are listed as ``ignored`` instead of being counted as failures.
+    """
+    current = {name: want for name, want in (expected or {}).items() if field_names is None or name in field_names}
     fields = {name: {"expected": want, "actual": values.get(name), "match": values_match(want, values.get(name))}
-              for name, want in (expected or {}).items()}
+              for name, want in current.items()}
     matched = sum(1 for item in fields.values() if item["match"])
-    return {"checked": len(fields), "matched": matched, "fields": fields}
+    ignored = sorted(set(expected or {}) - set(current))
+    return {"checked": len(fields), "matched": matched, "fields": fields, "ignored": ignored}
 
 
 def dry_run_report(values: dict[str, Any], report: dict[str, Any]) -> dict[str, Any]:

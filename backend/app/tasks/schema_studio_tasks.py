@@ -67,6 +67,7 @@ def run_schema_samples_task(user_id: str, run_id: str, samples: list[dict[str, A
     client = redis.from_url(settings.REDIS_URL)
     key = run_key(user_id, run_id)
     state: dict[str, Any] = {"status": "running", "total": len(samples), "done": 0, "samples": [], "error": None}
+    field_names = {field.get("name") for field in fields}
     try:
         _write(client, key, state)
         stored: dict[str, Any] = {}
@@ -94,7 +95,7 @@ def run_schema_samples_task(user_id: str, run_id: str, samples: list[dict[str, A
                     result = future.result()
                     entry["report"] = result["report"]
                     if expected:
-                        entry["comparison"] = compare_with_expected(expected, result["values"])
+                        entry["comparison"] = compare_with_expected(expected, result["values"], field_names)
                 except Exception as exc:  # noqa: BLE001 — one sample failing must not hide the others
                     logger.exception("Schema test run failed for sample %s", sample.get("index"))
                     entry["error"] = type(exc).__name__

@@ -240,7 +240,8 @@ export function AIFieldsStep() {
     const fieldErrors = validateFields(fields).filter((error) => error.severity === "error")
     const running = runId !== null
     const runStale = run?.status === "completed" && runSignature !== signature
-    const confirmedCount = Object.values(expected).reduce((sum, values) => sum + Object.keys(values).length, 0)
+    const confirmedCount = Object.values(expected).reduce(
+        (sum, values) => sum + fields.filter((f) => values[f.id!] !== undefined).length, 0)
 
     const handleFileSelect = (e: ChangeEvent<HTMLInputElement>) => {
         const chosen = Array.from(e.target.files || [])
@@ -333,11 +334,12 @@ export function AIFieldsStep() {
         return primary ? { sample: primary.sample ?? 0, line: primary.line_no, quote: primary.quote } : { sample: 0 }
     }
 
-    const setConfirmed = (sampleIndex: number, name: string, value: unknown, confirmed: boolean) => {
+    // Confirmations are keyed by field id so renaming a field keeps them.
+    const setConfirmed = (sampleIndex: number, fieldId: string, value: unknown, confirmed: boolean) => {
         if (!studio) return
         const current = { ...(studio.expected[sampleIndex] || {}) }
-        if (confirmed) current[name] = value
-        else delete current[name]
+        if (confirmed) current[fieldId] = value
+        else delete current[fieldId]
         updateStudio({ expected: { ...studio.expected, [sampleIndex]: current } })
     }
 
@@ -351,7 +353,7 @@ export function AIFieldsStep() {
         const current = { ...(studio.expected[sample.index] || {}) }
         for (const field of fields) {
             const cell = sample.report.fields[field.name]
-            if (cell && cell.value !== null && cell.value !== undefined && cell.value !== "") current[field.name] = cell.value
+            if (cell && cell.value !== null && cell.value !== undefined && cell.value !== "") current[field.id!] = cell.value
         }
         updateStudio({ expected: { ...studio.expected, [sample.index]: current } })
     }
@@ -755,7 +757,7 @@ export function AIFieldsStep() {
                                             <tr className="border-b text-left align-bottom">
                                                 <th className="py-2 pr-3 text-xs font-semibold uppercase tracking-wide text-slate-500">Field</th>
                                                 {run.samples.map((sample) => {
-                                                    const confirmedHere = Object.keys(expected[sample.index] || {}).length
+                                                    const confirmedHere = fields.filter((f) => expected[sample.index]?.[f.id!] !== undefined).length
                                                     return (
                                                         <th key={sample.index} className="py-2 pr-3 font-normal">
                                                             <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Sample {sample.index + 1}</div>
@@ -787,7 +789,7 @@ export function AIFieldsStep() {
                                                         const cell = sample.report?.fields[field.name]
                                                         const result = cell?.status ? RESULT[cell.status] : null
                                                         const value = formatValue(cell?.value)
-                                                        const confirmedValue = expected[sample.index]?.[field.name]
+                                                        const confirmedValue = expected[sample.index]?.[field.id!]
                                                         const isConfirmed = confirmedValue !== undefined
                                                         const hasValue = cell && cell.value !== null && cell.value !== undefined && cell.value !== ""
                                                         const differs = isConfirmed && hasValue && !sameValue(confirmedValue, cell?.value)
@@ -807,7 +809,7 @@ export function AIFieldsStep() {
                                                                     {isConfirmed ? (
                                                                         <button
                                                                             type="button"
-                                                                            onClick={() => setConfirmed(sample.index, field.name, undefined, false)}
+                                                                            onClick={() => setConfirmed(sample.index, field.id!, undefined, false)}
                                                                             title="Click to undo"
                                                                             aria-pressed="true"
                                                                             className="inline-flex shrink-0 items-center gap-1 rounded-full bg-emerald-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-emerald-700"
@@ -817,7 +819,7 @@ export function AIFieldsStep() {
                                                                     ) : hasValue ? (
                                                                         <button
                                                                             type="button"
-                                                                            onClick={() => setConfirmed(sample.index, field.name, cell?.value, true)}
+                                                                            onClick={() => setConfirmed(sample.index, field.id!, cell?.value, true)}
                                                                             aria-pressed="false"
                                                                             className="shrink-0 rounded-full border border-slate-300 bg-white px-2.5 py-1 text-xs font-medium text-slate-700 hover:border-emerald-500 hover:text-emerald-700"
                                                                         >

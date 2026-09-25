@@ -462,12 +462,15 @@ def _get_managed_schema(db: Session, schema_id: str, current_user: User) -> Docu
     return schema
 
 
-def _sample_summary(row: SchemaSample) -> dict[str, Any]:
+def _sample_summary(row: SchemaSample, field_names: set[str] | None = None) -> dict[str, Any]:
+    confirmed = sorted((row.expected or {}).keys())
     return {
         "id": str(row.id),
         "filename": row.filename,
         "mime_type": row.mime_type,
-        "confirmed_fields": sorted((row.expected or {}).keys()),
+        # Values confirmed for fields later renamed or removed are not tested.
+        "confirmed_fields": [name for name in confirmed if field_names is None or name in field_names],
+        "outdated_fields": [name for name in confirmed if field_names is not None and name not in field_names],
         "last_run": row.last_run,
         "created_at": row.created_at,
         "expires_at": row.expires_at,
@@ -536,8 +539,15 @@ async def store_schema_samples(
                     tmp_path = tmp.name
                 try:
                     text = (await run_in_threadpool(_extract_schema_sample_in_worker, tmp_path)).markdown
+                except (AnydocFallbackToLegacy, AnydocTerminalError, ValueError) as exc:
+                    raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                                        detail=f"Could not read {upload.filename}: {exc}") from exc
                 finally:
                     os.unlink(tmp_path)
+            # A sample without text would fail every future test run.
+            if not (text or "").strip():
+                raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                                    detail=f"No text could be read from {upload.filename}, so it cannot be used as a test sample")
             path = f"schema-samples/{schema.id}/{uuid4().hex}{os.path.splitext(upload.filename)[1].lower()}"
             storage.upload_file(BytesIO(data), path, content_type=upload.content_type)
             stored_paths.append(path)
@@ -570,7 +580,9 @@ def list_schema_samples(
     schema = _get_managed_schema(db, schema_id, current_user)
     rows = (db.query(SchemaSample).filter(SchemaSample.schema_id == schema.id)
             .order_by(SchemaSample.created_at).all())
-    return {"retention_days": settings.SCHEMA_SAMPLE_RETENTION_DAYS, "samples": [_sample_summary(row) for row in rows]}
+    field_names = {field.get("name") for field in schema.fields or []}
+    return {"retention_days": settings.SCHEMA_SAMPLE_RETENTION_DAYS,
+            "samples": [_sample_summary(row, field_names) for row in rows]}
 
 
 @router.delete("/{schema_id}/samples/{sample_id}", status_code=status.HTTP_204_NO_CONTENT)

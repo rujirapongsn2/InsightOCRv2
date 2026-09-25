@@ -186,7 +186,7 @@ export function SchemaWizardProvider({ children, onSaved }: { children: ReactNod
       const created = await res.json()
       const studio = state.studio
       if (studio?.keepSamples && studio.files.length) {
-        const kept = await storeTestSet(created.id, studio, token)
+        const kept = await storeTestSet(created.id, studio, state.fields, token)
         if (!kept) {
           alert("The schema was saved, but the sample files could not be kept as its test set. You can add them later from the schema page.")
         }
@@ -250,10 +250,17 @@ export function SchemaWizardProvider({ children, onSaved }: { children: ReactNod
   )
 }
 
-async function storeTestSet(schemaId: string, studio: StudioSession, token: string | null): Promise<boolean> {
+async function storeTestSet(schemaId: string, studio: StudioSession, fields: SchemaField[], token: string | null): Promise<boolean> {
   const form = new FormData()
   studio.files.forEach((file) => form.append("files", file))
-  form.append("expected", JSON.stringify(studio.files.map((_, index) => studio.expected[index] || {})))
+  // Confirmations are keyed by field id; send them under the fields' final names.
+  const byName = studio.files.map((_, index) => {
+    const confirmed = studio.expected[index] || {}
+    return Object.fromEntries(fields
+      .filter((field) => field.id && confirmed[field.id] !== undefined)
+      .map((field) => [field.name, confirmed[field.id!]]))
+  })
+  form.append("expected", JSON.stringify(byName))
   if (studio.sessionId) form.append("session_id", studio.sessionId)
   form.append("consent", "true")
   try {

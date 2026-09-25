@@ -65,7 +65,8 @@ export interface StudioSession {
   sessionId: string | null
   files: File[]
   samples: StudioSample[]
-  // Values a person confirmed as correct, per sample index then field name.
+  // Values a person confirmed as correct, per sample index then field id
+  // (ids survive renames; names are resolved when the test set is saved).
   expected: Record<number, Record<string, unknown>>
   keepSamples: boolean
   retentionDays: number

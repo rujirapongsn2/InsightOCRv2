@@ -195,3 +195,33 @@ def test_test_set_results_keep_the_version_that_was_tested(db, monkeypatch):
     monkeypatch.setattr(db, "close", lambda: None)
     tasks._save_last_runs(str(schema.id), [{"sample_id": row.id, "comparison": {"checked": 1, "matched": 1, "fields": {}}}], 3)
     assert db.get(SchemaSample, row.id).last_run["schema_version"] == 3
+
+
+@pytest.mark.parametrize("extracted,detail", [(ValueError("no pages"), "Could not read"), ("", "No text could be read")])
+def test_unreadable_samples_are_rejected_with_a_clear_message(db, storage, monkeypatch, extracted, detail):
+    from app.api.v1.endpoints import schemas as ep
+
+    def fake_extract(path):
+        if isinstance(extracted, Exception):
+            raise extracted
+        return SimpleNamespace(markdown=extracted)
+
+    monkeypatch.setattr(ep, "_extract_schema_sample_in_worker", fake_extract)
+    schema = make_schema(db, [{"name": "invoice_no", "type": "text"}])
+    db.commit()
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(ep.store_schema_samples(db=db, schema_id=str(schema.id), files=[upload("scan.pdf")],
+                                            expected="[]", session_id=None, consent=True, current_user=ADMIN))
+    assert exc.value.status_code == 422 and detail in exc.value.detail and "scan.pdf" in exc.value.detail
+    assert db.query(SchemaSample).count() == 0 and not storage.files
+
+
+def test_sample_list_separates_outdated_confirmations(db, storage):
+    from app.api.v1.endpoints import schemas as ep
+
+    schema = make_schema(db, [{"name": "invoice_number", "type": "text"}])
+    db.add(SchemaSample(id=uuid4(), schema_id=schema.id, filename="a.pdf", storage_path="p/a", text="t",
+                        expected={"invoice_no": "INV-1", "invoice_number": "INV-1"}))
+    db.commit()
+    sample = ep.list_schema_samples(db=db, schema_id=str(schema.id), current_user=ADMIN)["samples"][0]
+    assert sample["confirmed_fields"] == ["invoice_number"] and sample["outdated_fields"] == ["invoice_no"]
