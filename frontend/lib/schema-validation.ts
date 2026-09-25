@@ -61,6 +61,20 @@ export function suggestFieldName(invalidName: string): string {
 }
 
 /**
+ * Best-effort check that a format rule compiles, using the browser's RegExp.
+ * Rules run in Python on the backend, so (?P<name>...) is translated first;
+ * other Python-only syntax may still fail here while being valid.
+ */
+export function isValidPattern(pattern: string): boolean {
+  try {
+    new RegExp(pattern.replace(/\(\?P</g, "(?<"))
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
  * Check if a field name is unique in the list of fields
  */
 export function isUniqueFieldName(name: string, fields: SchemaField[], excludeId?: string): boolean {
@@ -120,6 +134,34 @@ export function validateField(field: SchemaField, allFields: SchemaField[]): Val
       errors.push({
         field: field.id || field.name,
         message: `Table field "${field.name}" needs valid unique column names, bounds, and row detection settings.`,
+        severity: "error"
+      })
+    }
+  }
+
+  // A warning only: rules run in Python, which accepts syntax the browser's
+  // RegExp does not (e.g. inline flags like (?i)). The backend has the final say.
+  const pattern = field.validation_rules?.pattern
+  if (pattern && !isValidPattern(pattern)) {
+    errors.push({
+      field: field.id || field.name,
+      message: `The format rule for "${field.name || "this field"}" could not be checked here. It is checked when you test or save.`,
+      severity: "warning"
+    })
+  }
+
+  if (field.type === "array" && !field.locator && field.table_columns) {
+    const columnNames = field.table_columns.map(column => column.name.trim())
+    if (!columnNames.length) {
+      errors.push({
+        field: field.id || field.name,
+        message: `Table field "${field.name}" has no columns. Add the columns to read from each row.`,
+        severity: "warning"
+      })
+    } else if (columnNames.some(name => !isValidFieldName(name)) || new Set(columnNames).size !== columnNames.length) {
+      errors.push({
+        field: field.id || field.name,
+        message: `Table field "${field.name}" needs unique column names using English letters, numbers, and underscores.`,
         severity: "error"
       })
     }

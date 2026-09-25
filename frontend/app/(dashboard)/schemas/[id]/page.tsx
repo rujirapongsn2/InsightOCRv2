@@ -7,6 +7,8 @@ import { ArrowLeft, FileText, Shield, Trash2, Pencil } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { useAuth } from "@/components/auth-provider"
 import { getApiBaseUrl } from "@/lib/api"
+import { SchemaVersionsPanel } from "@/components/schema/SchemaVersionsPanel"
+import { SchemaTestSetPanel } from "@/components/schema/SchemaTestSetPanel"
 
 interface SchemaField {
   name: string
@@ -37,7 +39,7 @@ export default function SchemaDetailPage() {
 
   const [schema, setSchema] = useState<SchemaDetail | null>(null)
   const [loading, setLoading] = useState(true)
-  const [activeTab, setActiveTab] = useState<"fields" | "json">("fields")
+  const [activeTab, setActiveTab] = useState<"fields" | "json" | "versions" | "tests">("fields")
 
   const normalizedRole = useMemo(() => {
     if (!user?.role) return "user"
@@ -175,6 +177,26 @@ export default function SchemaDetailPage() {
             >
               JSON Schema
             </button>
+            <button
+              onClick={() => setActiveTab("versions")}
+              className={`px-6 py-3 text-sm font-medium border-b-2 transition-colors ${activeTab === "versions"
+                  ? "border-blue-600 text-blue-600"
+                  : "border-transparent text-slate-500 hover:text-slate-700"
+                }`}
+            >
+              Versions
+            </button>
+            {canManage && (
+              <button
+                onClick={() => setActiveTab("tests")}
+                className={`px-6 py-3 text-sm font-medium border-b-2 transition-colors ${activeTab === "tests"
+                    ? "border-blue-600 text-blue-600"
+                    : "border-transparent text-slate-500 hover:text-slate-700"
+                  }`}
+              >
+                Test set
+              </button>
+            )}
           </div>
         </div>
 
@@ -207,6 +229,12 @@ export default function SchemaDetailPage() {
                 <div className="text-slate-500 text-sm">No fields defined.</div>
               )}
             </div>
+          )}
+
+          {activeTab === "versions" && <SchemaVersionsPanel schemaId={schema.id} />}
+
+          {activeTab === "tests" && canManage && (
+            <SchemaTestSetPanel schemaId={schema.id} fieldNames={(schema.fields || []).map((field) => field.name)} />
           )}
 
           {activeTab === "json" && (

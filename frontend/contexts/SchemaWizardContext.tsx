@@ -9,10 +9,10 @@ import {
   StartingPoint,
   SchemaData,
   SchemaField,
-  ValidationError,
-  TestResults
+  StudioSession,
 } from "@/types/schema"
 import { validateSchema, hasErrors } from "@/lib/schema-validation"
+import { toSchemaPayloadField } from "@/lib/schema-studio"
 import { getApiBaseUrl } from "@/lib/api"
 
 // Helper function to generate unique IDs
@@ -40,7 +40,8 @@ const initialState: SchemaWizardState = {
   fields: [],
   validationErrors: [],
   isSaving: false,
-  testResults: undefined
+  testResults: undefined,
+  studio: null
 }
 
 const SchemaWizardContext = createContext<
@@ -162,14 +163,7 @@ export function SchemaWizardProvider({ children, onSaved }: { children: ReactNod
         document_type: state.schemaData.document_type,
         ocr_engine: state.schemaData.ocr_engine || "tesseract",
         extraction_profile: "anydoc_hybrid",
-        fields: state.fields.map(({ id, ...field }) => {
-          // For array type, ensure items is included in payload
-          if (field.type === "array" && field.items) {
-            return { ...field, items: field.items }
-          }
-          const { items, ...restField } = field as any
-          return restField
-        }),
+        fields: state.fields.map(toSchemaPayloadField),
         template_id: state.schemaData.template_id
       }
 
@@ -185,15 +179,22 @@ export function SchemaWizardProvider({ children, onSaved }: { children: ReactNod
         }
       )
 
-      if (res.ok) {
-        if (onSaved) {
-          onSaved()
-        } else {
-          router.push("/schemas")
-        }
-      } else {
+      if (!res.ok) {
         const error = await res.json()
-        throw new Error(error.detail || "Failed to create schema")
+        throw new Error(typeof error.detail === "string" ? error.detail : "Failed to create schema")
+      }
+      const created = await res.json()
+      const studio = state.studio
+      if (studio?.keepSamples && studio.files.length) {
+        const kept = await storeTestSet(created.id, studio, token)
+        if (!kept) {
+          alert("The schema was saved, but the sample files could not be kept as its test set. You can add them later from the schema page.")
+        }
+      }
+      if (onSaved) {
+        onSaved()
+      } else {
+        router.push("/schemas")
       }
     } catch (error) {
       console.error("Error creating schema:", error)
@@ -213,6 +214,14 @@ export function SchemaWizardProvider({ children, onSaved }: { children: ReactNod
     setState(initialState)
   }
 
+  const setStudio = (studio: StudioSession | null) => {
+    setState(prev => ({ ...prev, studio }))
+  }
+
+  const updateStudio = (updates: Partial<StudioSession>) => {
+    setState(prev => (prev.studio ? { ...prev, studio: { ...prev.studio, ...updates } } : prev))
+  }
+
   const value = {
     ...state,
     setCurrentStep,
@@ -229,7 +238,9 @@ export function SchemaWizardProvider({ children, onSaved }: { children: ReactNod
     previousStep,
     saveSchema,
     testSchema,
-    resetWizard
+    resetWizard,
+    setStudio,
+    updateStudio
   }
 
   return (
@@ -237,6 +248,24 @@ export function SchemaWizardProvider({ children, onSaved }: { children: ReactNod
       {children}
     </SchemaWizardContext.Provider>
   )
+}
+
+async function storeTestSet(schemaId: string, studio: StudioSession, token: string | null): Promise<boolean> {
+  const form = new FormData()
+  studio.files.forEach((file) => form.append("files", file))
+  form.append("expected", JSON.stringify(studio.files.map((_, index) => studio.expected[index] || {})))
+  if (studio.sessionId) form.append("session_id", studio.sessionId)
+  form.append("consent", "true")
+  try {
+    const res = await fetch(`${getApiBaseUrl()}/schemas/${schemaId}/samples`, {
+      method: "POST",
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      body: form,
+    })
+    return res.ok
+  } catch {
+    return false
+  }
 }
 
 export function useSchemaWizard() {

@@ -8,7 +8,10 @@ import { SchemaField } from "@/types/schema"
 import { isValidFieldName, validateFields } from "@/lib/schema-validation"
 
 export function DetailsAndSaveStep() {
-    const { schemaData, fields, updateSchemaData, isSaving, saveSchema, previousStep } = useSchemaWizard()
+    const { schemaData, fields, updateSchemaData, isSaving, saveSchema, previousStep, studio, updateStudio } = useSchemaWizard()
+    const confirmedValues = studio
+        ? Object.values(studio.expected).reduce((sum, values) => sum + Object.keys(values).length, 0)
+        : 0
     const [nameError, setNameError] = useState("")
 
     const fieldErrors = validateFields(fields).filter((error) => error.severity === "error")
@@ -81,6 +84,31 @@ export function DetailsAndSaveStep() {
                     ))}
                 </div>
             </div>
+
+            {studio && studio.files.length > 0 && (
+                <div className="space-y-2 border-t pt-4">
+                    <h3 className="text-sm font-semibold text-slate-800">Test set</h3>
+                    <label className="flex items-start gap-2 text-sm text-slate-700">
+                        <input
+                            type="checkbox"
+                            className="mt-1"
+                            checked={studio.keepSamples}
+                            onChange={(e) => updateStudio({ keepSamples: e.target.checked })}
+                            disabled={isSaving}
+                        />
+                        <span>
+                            Keep {studio.files.length === 1 ? "this sample file" : `these ${studio.files.length} sample files`} as this schema&apos;s test set.
+                            <span className="block text-xs text-slate-500">
+                                The files and their text are stored for {studio.retentionDays} days and are visible only to people who can manage this schema.
+                                They may contain personal data. You can delete them at any time from the schema page.
+                                {confirmedValues > 0
+                                    ? ` ${confirmedValues} confirmed value${confirmedValues === 1 ? "" : "s"} will be used to check future changes.`
+                                    : " No values are confirmed yet, so tests can only show what is extracted."}
+                            </span>
+                        </span>
+                    </label>
+                </div>
+            )}
 
             {/* Navigation */}
             <div className="flex justify-between pt-6 border-t mt-8">

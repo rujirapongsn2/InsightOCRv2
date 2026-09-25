@@ -14,6 +14,61 @@ export interface ValidationRule {
   max?: number
   pattern?: string
   format?: string
+  source_labels?: string[]
+}
+
+// Column of a table field that is read from text (no BBox). Converted to
+// array_config when the field is sent to the backend.
+export interface TableColumn {
+  name: string
+  type: ArrayColumnType
+}
+
+export type FieldEvidenceStatus = "verified" | "review" | "not_found"
+
+export interface FieldCheck {
+  key: "evidence" | "type" | "labels" | "pattern" | "duplicate"
+  ok: boolean | null
+  message: string
+}
+
+export interface SampleEvidence {
+  sample: number
+  quote: string
+  match: "once" | "multiple" | "none"
+  count: number
+  line_no?: number
+  context?: string
+  partial?: boolean
+}
+
+// Review metadata from AI suggestion; never saved with the schema.
+export interface FieldInsight {
+  label: string
+  confidence: number
+  status: FieldEvidenceStatus
+  presence?: { found: number; total: number }
+  evidence: SampleEvidence
+  samples?: SampleEvidence[]
+  checks: FieldCheck[]
+}
+
+export interface StudioSample {
+  filename: string
+  text: string
+  truncated: boolean
+}
+
+// Uploaded samples for one schema draft. Files stay in the browser and are
+// only sent again when the user agrees to keep them as the test set.
+export interface StudioSession {
+  sessionId: string | null
+  files: File[]
+  samples: StudioSample[]
+  // Values a person confirmed as correct, per sample index then field name.
+  expected: Record<number, Record<string, unknown>>
+  keepSamples: boolean
+  retentionDays: number
 }
 
 export interface ArrayItems {
@@ -52,6 +107,8 @@ export interface SchemaField {
   example?: string
   order?: number
   locator?: BboxLocator
+  table_columns?: TableColumn[]
+  studio?: FieldInsight
 }
 
 export interface BboxLocator {
@@ -82,6 +139,7 @@ export interface SchemaWizardState {
   validationErrors: ValidationError[]
   isSaving: boolean
   testResults?: TestResults
+  studio: StudioSession | null
 }
 
 export interface ValidationError {
@@ -180,6 +238,8 @@ export interface SchemaWizardActions {
   saveSchema: () => Promise<void>
   testSchema: (file: File) => Promise<void>
   resetWizard: () => void
+  setStudio: (studio: StudioSession | null) => void
+  updateStudio: (updates: Partial<StudioSession>) => void
 }
 
 // Field Suggestions based on document type
