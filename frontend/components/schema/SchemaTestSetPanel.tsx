@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState, type ChangeEvent } from "reac
 import { CheckCircle2, Loader2, Play, Trash2, Upload, XCircle } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { getApiBaseUrl } from "@/lib/api"
+import { editableText, parseTypedValue } from "@/lib/schema-studio"
 
 const POLL_MS = 2000
 // A run still "queued" after this long means no worker picked it up.
@@ -53,7 +54,9 @@ function detailOf(data: unknown, fallback: string): string {
   return typeof detail === "string" ? detail : fallback
 }
 
-export function SchemaTestSetPanel({ schemaId, fieldNames }: { schemaId: string; fieldNames: string[] }) {
+export function SchemaTestSetPanel({ schemaId, fields }: { schemaId: string; fields: Array<{ name: string; type: string }> }) {
+  const fieldNames = fields.map((field) => field.name)
+  const [editing, setEditing] = useState<{ key: string; text: string } | null>(null)
   const [samples, setSamples] = useState<StoredSample[] | null>(null)
   const [retentionDays, setRetentionDays] = useState(180)
   const [error, setError] = useState<string | null>(null)
@@ -337,7 +340,44 @@ export function SchemaTestSetPanel({ schemaId, fieldNames }: { schemaId: string;
                     return (
                       <tr key={name} className="border-b last:border-0 align-top">
                         <td className="py-1.5 pr-3 font-medium text-slate-800">{name}</td>
-                        <td className="py-1.5 pr-3 text-slate-700">{confirmed === undefined ? <span className="text-slate-400">Not confirmed</span> : formatValue(confirmed)}</td>
+                        <td className="py-1.5 pr-3 text-slate-700">
+                          {editing?.key === `${sample.sample_id}:${name}` ? (
+                            <form
+                              className="flex items-center gap-1"
+                              onSubmit={(e) => {
+                                e.preventDefault()
+                                const type = fields.find((field) => field.name === name)?.type || "text"
+                                const typed = parseTypedValue(editing.text, type)
+                                if (typed !== undefined) markCorrect(sample, name, typed)
+                                setEditing(null)
+                              }}
+                            >
+                              <input
+                                autoFocus
+                                aria-label={`Correct value for ${name}`}
+                                className="w-40 rounded border border-slate-300 px-1.5 py-0.5 text-xs"
+                                value={editing.text}
+                                onChange={(e) => setEditing({ key: `${sample.sample_id}:${name}`, text: e.target.value })}
+                                onKeyDown={(e) => { if (e.key === "Escape") setEditing(null) }}
+                              />
+                              <button type="submit" className="text-xs font-medium text-emerald-700">Save</button>
+                              <button type="button" className="text-xs text-slate-500" onClick={() => setEditing(null)}>Cancel</button>
+                            </form>
+                          ) : (
+                            <span className="inline-flex flex-wrap items-center gap-x-2">
+                              {confirmed === undefined ? <span className="text-slate-400">Not confirmed</span> : formatValue(confirmed)}
+                              {fields.find((field) => field.name === name)?.type !== "array" && (
+                                <button
+                                  type="button"
+                                  className="text-xs text-blue-700 hover:text-blue-800"
+                                  onClick={() => setEditing({ key: `${sample.sample_id}:${name}`, text: editableText(confirmed) })}
+                                >
+                                  {confirmed === undefined ? "Enter value" : "Edit"}
+                                </button>
+                              )}
+                            </span>
+                          )}
+                        </td>
                         <td className="py-1.5 pr-3 text-slate-700">
                           <span className="inline-flex items-start gap-1">
                             {compared && (compared.match

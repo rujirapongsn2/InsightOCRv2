@@ -8,10 +8,10 @@ import {
 import { Button } from "@/components/ui/button"
 import { useSchemaWizard } from "@/contexts/SchemaWizardContext"
 import {
-    ArrayColumnType, FieldEvidenceStatus, SampleEvidence, SchemaField, StudioSample, TableColumn,
+    ArrayColumnType, FieldEvidenceStatus, SampleEvidence, SchemaField, StudioSample, StudioSession, TableColumn,
 } from "@/types/schema"
 import { getApiBaseUrl } from "@/lib/api"
-import { fromSuggestedField, splitList, toSchemaPayloadField, type SuggestedFieldResponse } from "@/lib/schema-studio"
+import { editableText, fromSuggestedField, parseTypedValue, splitList, toSchemaPayloadField, type SuggestedFieldResponse } from "@/lib/schema-studio"
 import { isValidPattern, validateFields } from "@/lib/schema-validation"
 
 // Generate a simple unique ID
@@ -28,6 +28,8 @@ type RunField = { value: unknown; status?: string; provider?: string; reason?: s
 type RunSample = { index: number; filename: string; report?: { fields: Record<string, RunField> }; error?: string }
 type RunState = { status: "queued" | "running" | "completed" | "failed"; total: number | null; done: number; samples: RunSample[]; error?: string | null }
 type Focus = { sample: number; line?: number; quote?: string }
+type SuggestionResult = { suggested_fields: SuggestedFieldResponse[]; summary: Summary }
+type SuggestionState = { status: "queued" | "running" | "completed" | "failed"; error?: string | null; result?: SuggestionResult | null }
 
 const STATUS: Record<FieldEvidenceStatus, { label: string; cls: string; Icon: typeof CheckCircle2 }> = {
     verified: { label: "Verified", cls: "border-emerald-200 bg-emerald-50 text-emerald-700", Icon: CheckCircle2 },
@@ -75,6 +77,7 @@ function formatValue(value: unknown): string {
 
 const sameValue = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
 
+
 function Highlight({ text, quote }: { text: string; quote?: string }) {
     const index = quote ? text.indexOf(quote) : -1
     if (!quote || index < 0) return <>{text}</>
@@ -115,6 +118,50 @@ function CheckIcon({ ok }: { ok: boolean | null }) {
     if (ok === true) return <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-emerald-600" />
     if (ok === false) return <XCircle className="h-3.5 w-3.5 shrink-0 text-red-500" />
     return <MinusCircle className="h-3.5 w-3.5 shrink-0 text-slate-400" />
+}
+
+type RunStatus = { status: string; error?: string | null }
+
+// Polls a background Schema Studio run until it completes, fails, or never
+// starts. Handlers are read through a ref so callers can pass inline closures.
+function usePolledRun<T extends RunStatus>(runId: string | null, onState: (state: T) => void, onError: (message: string) => void) {
+    const handlers = useRef({ onState, onError })
+    handlers.current = { onState, onError }
+    useEffect(() => {
+        if (!runId) return
+        let cancelled = false
+        const token = localStorage.getItem("token")
+        const startedAt = Date.now()
+        // `timer` is assigned below; stop() only runs after an await, so it is set by then.
+        const stop = () => {
+            cancelled = true
+            clearInterval(timer)
+        }
+        const poll = async () => {
+            try {
+                const res = await fetch(`${getApiBaseUrl()}/schemas/sample-runs/${runId}`, {
+                    headers: token ? { Authorization: `Bearer ${token}` } : {},
+                })
+                const data = await res.json().catch(() => ({}))
+                if (cancelled) return
+                if (!res.ok) throw new Error(errorDetail(data.detail, "Could not read progress"))
+                if (data.status === "queued" && Date.now() - startedAt > QUEUED_TIMEOUT_MS) {
+                    stop()
+                    handlers.current.onError("The job did not start. The document worker may be busy or offline. Try again later.")
+                    return
+                }
+                handlers.current.onState(data as T)
+                if (data.status === "completed" || data.status === "failed") stop()
+            } catch (err: unknown) {
+                if (cancelled) return
+                stop()
+                handlers.current.onError(err instanceof Error ? err.message : "Could not read progress")
+            }
+        }
+        poll()
+        const timer = setInterval(poll, POLL_MS)
+        return stop
+    }, [runId])
 }
 
 function DocumentTextPanel({ samples, focus, onFocus }: { samples: StudioSample[]; focus: Focus; onFocus: (focus: Focus) => void }) {
@@ -185,44 +232,41 @@ export function AIFieldsStep() {
     const [run, setRun] = useState<RunState | null>(null)
     const [runSignature, setRunSignature] = useState<string | null>(null)
     const [runError, setRunError] = useState<string | null>(null)
+    const [suggestRunId, setSuggestRunId] = useState<string | null>(null)
+    const [analyzeStage, setAnalyzeStage] = useState<"reading" | "suggesting">("reading")
+    const pendingStudio = useRef<StudioSession | null>(null)
+    const [editing, setEditing] = useState<{ key: string; text: string } | null>(null)
 
     const samples = studio?.samples || []
     const expected = studio?.expected || {}
 
-    useEffect(() => {
-        if (!runId) return
-        let cancelled = false
-        const token = localStorage.getItem("token")
-        const startedAt = Date.now()
-        const poll = async () => {
-            try {
-                const res = await fetch(`${getApiBaseUrl()}/schemas/sample-runs/${runId}`, {
-                    headers: token ? { Authorization: `Bearer ${token}` } : {},
-                })
-                const data = await res.json().catch(() => ({}))
-                if (cancelled) return
-                if (!res.ok) throw new Error(errorDetail(data.detail, "Could not read test progress"))
-                setRun(data as RunState)
-                if (data.status === "completed" || data.status === "failed") {
-                    if (data.status === "failed") setRunError(data.error || "The test run failed. Try again.")
-                    setRunId(null)
-                } else if (data.status === "queued" && Date.now() - startedAt > QUEUED_TIMEOUT_MS) {
-                    setRunError("The test did not start. The document worker may be busy or offline. Try again later.")
-                    setRunId(null)
-                }
-            } catch (err: unknown) {
-                if (cancelled) return
-                setRunError(err instanceof Error ? err.message : "Could not read test progress")
-                setRunId(null)
-            }
+    usePolledRun<RunState>(runId, (state) => {
+        setRun(state)
+        if (state.status === "completed" || state.status === "failed") {
+            if (state.status === "failed") setRunError(state.error || "The test run failed. Try again.")
+            setRunId(null)
         }
-        poll()
-        const timer = setInterval(poll, POLL_MS)
-        return () => {
-            cancelled = true
-            clearInterval(timer)
+    }, (message) => {
+        setRunError(message)
+        setRunId(null)
+    })
+
+    usePolledRun<SuggestionState>(suggestRunId, (state) => {
+        if (state.status === "running") setAnalyzeStage("suggesting")
+        if (state.status === "completed" && state.result) {
+            applySuggestion(state.result)
+            setSuggestRunId(null)
+            setIsAnalyzing(false)
+        } else if (state.status === "failed") {
+            setAiError(state.error || "AI suggestion failed. Try again.")
+            setSuggestRunId(null)
+            setIsAnalyzing(false)
         }
-    }, [runId])
+    }, (message) => {
+        setAiError(message)
+        setSuggestRunId(null)
+        setIsAnalyzing(false)
+    })
 
     if (!isAIMode) {
         return (
@@ -260,6 +304,7 @@ export function AIFieldsStep() {
     const handleAnalyze = async () => {
         if (!pendingFiles.length) return
         setIsAnalyzing(true)
+        setAnalyzeStage("reading")
         setAiError(null)
         try {
             const token = localStorage.getItem("token")
@@ -278,28 +323,37 @@ export function AIFieldsStep() {
                 throw new Error(errorDetail(err.detail, "AI suggestion failed"))
             }
             const data = await res.json()
-            const suggested: SchemaField[] = ((data.suggested_fields || []) as SuggestedFieldResponse[]).map((f) => fromSuggestedField(f, genId()))
-            setFields(suggested.filter((f) => f.studio?.status !== "not_found"))
-            setNotFound(suggested.filter((f) => f.studio?.status === "not_found"))
-            setSummary(data.summary || null)
-            setStudio({
+            // Kept aside until the suggestion finishes, so a failed run leaves no half-set state.
+            pendingStudio.current = {
                 sessionId: data.session_id || null,
                 files: pendingFiles,
-                samples: (data.samples || []).map((s: StudioSample) => ({ filename: s.filename, text: s.text, truncated: s.truncated })),
+                samples: (data.samples || []).map((s: StudioSample) => ({
+                    filename: s.filename, text: s.text, truncated: s.truncated, garbled_pages: s.garbled_pages || [],
+                })),
                 expected: {},
                 keepSamples: false,
                 retentionDays: data.sample_retention_days || 180,
-            })
-            setExpanded({})
-            setFocusByField({})
-            setRun(null)
-            setRunError(null)
-            setAnalyzed(true)
+            }
+            setAnalyzeStage("suggesting")
+            setSuggestRunId(data.run_id)
         } catch (err: unknown) {
             setAiError(err instanceof Error ? err.message : "Analysis failed")
-        } finally {
             setIsAnalyzing(false)
         }
+    }
+
+    function applySuggestion(result: SuggestionResult) {
+        const suggested: SchemaField[] = (result.suggested_fields || []).map((f) => fromSuggestedField(f, genId()))
+        setFields(suggested.filter((f) => f.studio?.status !== "not_found"))
+        setNotFound(suggested.filter((f) => f.studio?.status === "not_found"))
+        setSummary(result.summary || null)
+        setStudio(pendingStudio.current)
+        pendingStudio.current = null
+        setExpanded({})
+        setFocusByField({})
+        setRun(null)
+        setRunError(null)
+        setAnalyzed(true)
     }
 
     const handleStartOver = () => {
@@ -438,7 +492,11 @@ export function AIFieldsStep() {
                             size="lg"
                         >
                             {isAnalyzing ? (
-                                <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> Reading and checking {pendingFiles.length > 1 ? `${pendingFiles.length} documents` : "document"}...</>
+                                <><Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                                    {analyzeStage === "reading"
+                                        ? `Reading ${pendingFiles.length > 1 ? `${pendingFiles.length} documents` : "the document"}...`
+                                        : "AI is suggesting and checking fields. This usually takes 1–3 minutes..."}
+                                </>
                             ) : (
                                 <><Sparkles className="h-4 w-4 mr-2" /> Suggest fields</>
                             )}
@@ -474,6 +532,22 @@ export function AIFieldsStep() {
                             <RotateCcw className="h-3.5 w-3.5" /> Use other files
                         </Button>
                     </div>
+
+                    {samples.some((sample) => sample.garbled_pages?.length) && (
+                        <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+                            <p className="font-medium">Thai text in some samples looks garbled</p>
+                            <p className="mt-0.5 text-xs">
+                                {samples
+                                    .map((sample, index) => (sample.garbled_pages?.length
+                                        ? `Sample ${index + 1} (page${sample.garbled_pages.length > 1 ? "s" : ""} ${sample.garbled_pages.join(", ")})`
+                                        : null))
+                                    .filter(Boolean)
+                                    .join(" · ")}
+                                {" "}uses a PDF font that stores Thai characters incorrectly, so words like “ภาษีมูลค่าเพิ่ม” can appear misspelled.
+                                Suggested values and labels may contain wrong characters. Check them carefully, or use a scanned or re-exported copy of the file.
+                            </p>
+                        </div>
+                    )}
 
                     <div className="flex items-center justify-between">
                         <h3 className="text-lg font-semibold text-slate-900">Suggested fields</h3>
@@ -746,8 +820,8 @@ export function AIFieldsStep() {
                                 <div className="rounded-md border border-blue-100 bg-blue-50 p-3 text-sm text-slate-700">
                                     <p className="font-medium text-slate-900">Check the results, then confirm the correct values</p>
                                     <p className="mt-0.5 text-xs text-slate-600">
-                                        Compare each value with the document and click <b>Mark correct</b> when it is right.
-                                        Confirmed values become this schema&apos;s answer key: later tests are scored against them. Leave wrong values unconfirmed.
+                                        Compare each value with the document. Click <b>Mark correct</b> when it is right, or <b>Type the correct value</b> when it is wrong.
+                                        Confirmed values become this schema&apos;s answer key: later tests are scored against them.
                                     </p>
                                 </div>
                                 {runStale && <p className="text-xs text-amber-700">Fields changed since this test. Run it again to see current results.</p>}
@@ -792,10 +866,13 @@ export function AIFieldsStep() {
                                                         const confirmedValue = expected[sample.index]?.[field.id!]
                                                         const isConfirmed = confirmedValue !== undefined
                                                         const hasValue = cell && cell.value !== null && cell.value !== undefined && cell.value !== ""
-                                                        const differs = isConfirmed && hasValue && !sameValue(confirmedValue, cell?.value)
+                                                        const differs = isConfirmed && !sameValue(confirmedValue, cell?.value)
+                                                        const editKey = `${sample.index}:${field.id}`
+                                                        const isEditing = editing?.key === editKey
+                                                        const canType = field.type !== "array"
                                                         return (
                                                             <td key={sample.index} className="py-1 pr-3">
-                                                                <div className={`flex items-start justify-between gap-3 rounded-md px-2 py-1.5 ${isConfirmed && !differs ? "bg-emerald-50" : ""}`}>
+                                                                <div className={`flex items-start justify-between gap-3 rounded-md px-2 py-1.5 ${isConfirmed ? "bg-emerald-50" : ""}`}>
                                                                     <div className="min-w-0">
                                                                         <div className="max-w-[220px] break-words text-slate-800" title={value}>{value}</div>
                                                                         <div className={`mt-0.5 flex items-center gap-1 text-xs ${result?.cls || "text-slate-500"}`} title={cell?.reason || undefined}>
@@ -803,7 +880,42 @@ export function AIFieldsStep() {
                                                                             {cell ? (result?.label || cell.status) : "Not tested"}
                                                                         </div>
                                                                         {differs && (
-                                                                            <div className="mt-0.5 text-xs text-red-700">You confirmed a different value: {formatValue(confirmedValue)}</div>
+                                                                            <div className="mt-0.5 text-xs text-slate-700">
+                                                                                Correct value: <span className="font-medium">{formatValue(confirmedValue)}</span>
+                                                                            </div>
+                                                                        )}
+                                                                        {isEditing ? (
+                                                                            <form
+                                                                                className="mt-1 flex items-center gap-1"
+                                                                                onSubmit={(e) => {
+                                                                                    e.preventDefault()
+                                                                                    const typed = parseTypedValue(editing.text, field.type)
+                                                                                    if (typed !== undefined) setConfirmed(sample.index, field.id!, typed, true)
+                                                                                    setEditing(null)
+                                                                                }}
+                                                                            >
+                                                                                <input
+                                                                                    autoFocus
+                                                                                    aria-label={`Correct value for ${field.name} in sample ${sample.index + 1}`}
+                                                                                    className="w-40 rounded border border-slate-300 px-1.5 py-0.5 text-xs"
+                                                                                    value={editing.text}
+                                                                                    onChange={(e) => setEditing({ key: editKey, text: e.target.value })}
+                                                                                    onKeyDown={(e) => { if (e.key === "Escape") setEditing(null) }}
+                                                                                />
+                                                                                <button type="submit" className="text-xs font-medium text-emerald-700">Save</button>
+                                                                                <button type="button" className="text-xs text-slate-500" onClick={() => setEditing(null)}>Cancel</button>
+                                                                            </form>
+                                                                        ) : canType && (
+                                                                            <button
+                                                                                type="button"
+                                                                                className="mt-0.5 text-xs text-blue-700 hover:text-blue-800"
+                                                                                onClick={() => setEditing({
+                                                                                    key: editKey,
+                                                                                    text: editableText(isConfirmed ? confirmedValue : cell?.value),
+                                                                                })}
+                                                                            >
+                                                                                {hasValue || isConfirmed ? "Type the correct value" : "Enter the value"}
+                                                                            </button>
                                                                         )}
                                                                     </div>
                                                                     {isConfirmed ? (

@@ -57,6 +57,8 @@ export interface StudioSample {
   filename: string
   text: string
   truncated: boolean
+  // PDF pages whose Thai text looks garbled by a broken font in the file.
+  garbled_pages?: number[]
 }
 
 // Uploaded samples for one schema draft. Files stay in the browser and are

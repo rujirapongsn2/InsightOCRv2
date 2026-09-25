@@ -234,7 +234,7 @@ export default function SchemaDetailPage() {
           {activeTab === "versions" && <SchemaVersionsPanel schemaId={schema.id} />}
 
           {activeTab === "tests" && canManage && (
-            <SchemaTestSetPanel schemaId={schema.id} fieldNames={(schema.fields || []).map((field) => field.name)} />
+            <SchemaTestSetPanel schemaId={schema.id} fields={(schema.fields || []).map((field) => ({ name: field.name, type: field.type }))} />
           )}
 
           {activeTab === "json" && (

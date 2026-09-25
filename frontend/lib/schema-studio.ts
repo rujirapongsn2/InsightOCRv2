@@ -56,3 +56,26 @@ export function fromSuggestedField(field: SuggestedFieldResponse, id: string): S
 export function splitList(value: string): string[] {
   return value.split(",").map((item) => item.trim()).filter(Boolean)
 }
+
+// A value typed by the user: numbers for number/currency fields when it reads
+// as one, otherwise the trimmed text. Empty input confirms nothing.
+export function parseTypedValue(text: string, type: SchemaField["type"] | string): unknown {
+    const value = text.trim()
+    if (!value) return undefined
+    if (type === "number" || type === "currency") {
+        const number = Number(value.replace(/,/g, ""))
+        if (Number.isFinite(number)) return number
+    }
+    if (type === "boolean") {
+        if (/^(true|yes|y|ใช่|มี)$/i.test(value)) return true
+        if (/^(false|no|n|ไม่ใช่|ไม่มี)$/i.test(value)) return false
+    }
+    return value
+}
+
+/** Text to pre-fill when editing a confirmed or extracted value; never "null" or "[object Object]". */
+export function editableText(value: unknown): string {
+  if (value === null || value === undefined) return ""
+  if (typeof value === "object") return JSON.stringify(value)
+  return String(value)
+}
