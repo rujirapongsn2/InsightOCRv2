@@ -29,6 +29,9 @@ class Settings(BaseSettings):
     # Sample documents kept as a schema's test set (Schema Studio), with consent.
     SCHEMA_SAMPLE_RETENTION_DAYS: int = 180
     SCHEMA_SAMPLE_MAX_FILES: int = 5
+    # PDF pages whose Thai text layer looks garbled by a broken font map are
+    # always reported in extraction metadata; set true to also OCR them.
+    TEXT_LAYER_THAI_REPAIR: bool = False
     
     # MinIO / S3 Common
     MINIO_ENDPOINT: str = "localhost:9000"

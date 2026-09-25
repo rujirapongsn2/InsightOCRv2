@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -171,15 +172,49 @@ def _text_layer_quality(text: str) -> dict[str, Any]:
     ]
     replacement_count = value.count("\ufffd")
     reasons: list[str] = []
+    warnings: list[str] = []
     if controls:
         reasons.append("control_characters")
     if replacement_count:
         reasons.append("replacement_characters")
+    thai = _thai_font_mapping_signals(value)
+    if thai["suspect"]:
+        # Report-only until TEXT_LAYER_THAI_REPAIR is enabled, so the detector
+        # can be checked on real documents before it changes any output.
+        (reasons if settings.TEXT_LAYER_THAI_REPAIR else warnings).append("thai_font_mapping")
     return {
         "usable": bool(value.strip()) and not reasons,
         "reasons": reasons,
+        "warnings": warnings,
         "control_character_count": len(controls),
         "replacement_character_count": replacement_count,
+        "thai": thai,
+    }
+
+
+# A Latin letter wedged between Thai characters ("เพิMม", "ทัeงสิeน") and a
+# Thai vowel/tone mark separated from its base by a space ("บร ิษัท") do not
+# occur in correctly encoded Thai; they are what broken PDF font maps produce.
+_THAI_LATIN_INSIDE_WORD = re.compile(r"[\u0E01-\u0E4F][A-Za-z][\u0E01-\u0E4F]")
+_THAI_DETACHED_MARK = re.compile(r"\s[\u0E31\u0E34-\u0E3A\u0E47-\u0E4E]")
+THAI_SUSPECT_MIN_THAI_CHARS = 50
+THAI_SUSPECT_MIN_HITS = 3
+THAI_SUSPECT_HITS_PER_1000 = 5.0
+
+
+def _thai_font_mapping_signals(text: str) -> dict[str, Any]:
+    thai_chars = sum(1 for char in text if "\u0E01" <= char <= "\u0E5B")
+    latin_inside = len(_THAI_LATIN_INSIDE_WORD.findall(text))
+    detached = len(_THAI_DETACHED_MARK.findall(text))
+    hits = latin_inside + detached
+    per_1000 = round(1000 * hits / thai_chars, 1) if thai_chars else 0.0
+    return {
+        "suspect": thai_chars >= THAI_SUSPECT_MIN_THAI_CHARS and hits >= THAI_SUSPECT_MIN_HITS
+        and per_1000 >= THAI_SUSPECT_HITS_PER_1000,
+        "thai_characters": thai_chars,
+        "latin_inside_word": latin_inside,
+        "detached_marks": detached,
+        "hits_per_1000": per_1000,
     }
 
 
@@ -532,6 +567,14 @@ def _extract_anydoc_pdf_document(
             page["page_number"] for page in pages if page.get("provider") == "text_layer"
         ],
         "text_layer_invalid_pages": invalid_text_layer_pages,
+        # Only pages whose final text came from the text layer: pages already
+        # re-read by OCR (repair enabled, or a forced engine) are not garbled.
+        "text_layer_thai_suspect_pages": sorted(
+            page_number for page_number, quality in text_layer_quality.items()
+            if quality["thai"]["suspect"] and page_number in {
+                int(page["page_number"]) for page in pages if page.get("provider") == "text_layer"
+            }
+        ),
         "text_layer_quality": text_layer_quality,
         "ocr_pages": sorted(
             set(ocr_pages) | {

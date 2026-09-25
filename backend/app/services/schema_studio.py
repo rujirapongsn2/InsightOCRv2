@@ -288,6 +288,45 @@ async def request_proposals(provider: Any, numbered_text: str, document_type: Op
     return proposals, meta
 
 
+async def suggest_fields(db: Any, samples: list[dict[str, str]], document_type: Optional[str]) -> dict[str, Any]:
+    """Propose and verify fields for the given sample texts.
+
+    Raises ValueError with a message fit for the user when no usable
+    suggestion comes back.
+    """
+    from app.services.ai_suggestion_service import AISuggestionService
+
+    texts = [sample["text"] for sample in samples]
+    ai_service = AISuggestionService(db)
+    provider = ai_service._get_ai_settings()
+    numbered_text, truncated_flags = number_samples(samples)
+    if provider.provider_type == "openai_compatible":
+        proposals, meta = await request_proposals(provider, numbered_text, document_type, any(truncated_flags))
+    else:
+        # Legacy providers own their prompt, so proposals arrive without
+        # evidence; verification still runs and marks them for review.
+        legacy = await ai_service.suggest_fields_from_ocr(ocr_content=texts[0], document_type=document_type)
+        proposals = proposals_from_legacy(legacy.suggested_fields)
+        meta = {"structured_output": "provider_prompt", "repaired": False, "repair_reason": None, "dropped": []}
+    fields, dropped = verify_proposals(proposals, texts)
+    if not fields:
+        raise ValueError("AI provider returned no field suggestions")
+    return {
+        "suggested_fields": fields,
+        "summary": summarize(fields),
+        "truncated": truncated_flags,
+        "raw_result": {
+            "source": "schema_studio",
+            "provider_used": provider.display_name,
+            "structured_output": meta["structured_output"],
+            "repaired": meta["repaired"],
+            "repair_reason": meta.get("repair_reason"),
+            "dropped": meta["dropped"] + dropped,
+            "document_truncated": any(truncated_flags),
+        },
+    }
+
+
 def proposals_from_legacy(suggested_fields: list[Any]) -> list[FieldProposal]:
     """Adapt fields from providers whose prompt we don't control (no evidence)."""
     return [

@@ -139,3 +139,38 @@ def _save_last_runs(schema_id: str, results: list[dict[str, Any]], version: Opti
                 "fields": (entry.get("comparison") or {}).get("fields", {}),
             }
         db.commit()
+
+
+SUGGESTION_FAILED = "Schema suggestion request failed. Check the active AI provider and try again."
+
+
+@celery_app.task(name="app.tasks.schema_studio_tasks.suggest_schema_task", soft_time_limit=600, time_limit=660)
+def suggest_schema_task(user_id: str, run_id: str, session_id: str, document_type: Optional[str] = None,
+                        extraction: Optional[list[dict[str, Any]]] = None) -> None:
+    """Ask AI for fields and verify them against the cached sample texts."""
+    import asyncio
+    import redis
+    from app.core.config import settings
+    from app.services import schema_studio
+
+    client = redis.from_url(settings.REDIS_URL)
+    key = run_key(user_id, run_id)
+    state: dict[str, Any] = {"status": "running", "kind": "suggestion", "total": 1, "done": 0,
+                             "samples": [], "error": None, "result": None}
+    try:
+        _write(client, key, state)
+        samples = schema_studio.load_samples(user_id, session_id)
+        if not samples:
+            raise ValueError("The uploaded samples have expired. Upload the files again.")
+        with SessionLocal() as db:
+            result = asyncio.run(schema_studio.suggest_fields(db, samples, document_type))
+        result["raw_result"]["extraction"] = extraction or []
+        state.update(status="completed", done=1, result=result)
+    except ValueError as exc:
+        state.update(status="failed", error=str(exc))
+    except Exception:  # noqa: BLE001 — the user sees a short message; details go to the log
+        logger.exception("Schema suggestion %s failed", run_id)
+        state.update(status="failed", error=SUGGESTION_FAILED)
+    finally:
+        _write(client, key, state)
+        client.close()

@@ -463,3 +463,35 @@ def test_auto_skips_unconfigured_softnix_and_fallback(monkeypatch, tmp_path):
     fallback.assert_not_called()
     message = str(raised.value)
     assert "skipped" in message.lower() or "not configured" in message.lower() or "disabled" in message.lower()
+
+
+GARBLED_THAI = ("บร ิษัท ดีทวิน จํากัด ภาษีมูลค่าเพิMม รวมทัeงสิeน เงืdอนไขการชําระเงิน ค่าใช้จ่ายอืMนๆ "
+                "เพืAอช่วยในการทํางาน และเชืAอมต่อกับระบบอืAนๆ ข ้อมูลขนาดใหญ่ ") * 2
+
+
+@pytest.mark.parametrize("repair,suspect_pages,tesseract_pages", [(False, [1], []), (True, [], [1])])
+def test_garbled_thai_is_reported_only_while_the_text_layer_is_used(monkeypatch, tmp_path, repair, suspect_pages,
+                                                                     tesseract_pages):
+    class TextLayerAnydoc(FakeAnydoc):
+        @staticmethod
+        def to_markdown_bytes(_data, _format):
+            return "Page two text"
+
+        @staticmethod
+        def to_markdown_with_ocr(_data, _format, _recognize):
+            return GARBLED_THAI + "\n\nPage two text"
+
+    monkeypatch.setattr(anydoc_pipeline.settings, "TEXT_LAYER_THAI_REPAIR", repair)
+    monkeypatch.setattr(anydoc_pipeline, "_load_anydoc", lambda: TextLayerAnydoc())
+    monkeypatch.setattr(anydoc_pipeline, "_pdf_text_pages", lambda _path: [
+        {"page_number": 1, "ocr_text": GARBLED_THAI}, {"page_number": 2, "ocr_text": "Page two text"}])
+    monkeypatch.setattr(anydoc_pipeline, "_single_pdf_page_bytes", lambda *_args: b"page")
+    monkeypatch.setattr(anydoc_pipeline, "_render_pdf_page", lambda *_args: "/tmp/page.png")
+    monkeypatch.setattr(anydoc_pipeline, "_cleanup_rendered_page", lambda _path: None)
+    monkeypatch.setattr(anydoc_pipeline, "process_tesseract_ocr", lambda *_args, **_kwargs: "บริษัท ดีทวิน จำกัด")
+
+    result = extract_anydoc_document(_write_pdf_placeholder(tmp_path), FakeDb(_setting()), _schema())
+
+    assert result.metadata["text_layer_quality"][1]["thai"]["suspect"] is True
+    assert result.metadata["text_layer_thai_suspect_pages"] == suspect_pages
+    assert result.metadata["tesseract_pages"] == tesseract_pages

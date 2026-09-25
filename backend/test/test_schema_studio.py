@@ -454,3 +454,92 @@ def test_accounting_negatives_read_as_negative_numbers():
     assert studio._normalize_amount("(1,250.00)") == "-1,250.00"
     assert studio._normalize_amount("1,250.00-") == "-1,250.00"
     assert studio._type_check("(1,250.00)", "currency", "total") == (True, "Reads as currency: -1250.0")
+
+
+def test_suggestion_task_stores_result_or_readable_error(monkeypatch):
+    import json
+    import redis
+    from app.tasks import schema_studio_tasks as tasks
+
+    fake = _FakeRedis()
+    monkeypatch.setattr(redis, "from_url", lambda *a, **k: fake)
+    monkeypatch.setattr(studio, "load_samples", lambda user_id, session_id: [{"filename": "a.pdf", "text": SAMPLE}])
+    monkeypatch.setattr(tasks, "SessionLocal", lambda: SimpleNamespace(__enter__=None))
+
+    class Session:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(tasks, "SessionLocal", Session)
+
+    async def ok(db, samples, document_type):
+        return {"suggested_fields": [{"name": "invoice_no"}], "summary": {"total": 1}, "raw_result": {}}
+
+    monkeypatch.setattr(studio, "suggest_fields", ok)
+    tasks.suggest_schema_task.run("u1", "r1", "s" * 32, "invoice", [{"filename": "a.pdf"}])
+    state = json.loads(fake.data[tasks.run_key("u1", "r1")])
+    assert state["status"] == "completed" and state["result"]["suggested_fields"][0]["name"] == "invoice_no"
+    assert state["result"]["raw_result"]["extraction"] == [{"filename": "a.pdf"}]
+
+    async def no_provider(db, samples, document_type):
+        raise ValueError("No active AI provider configured.")
+
+    monkeypatch.setattr(studio, "suggest_fields", no_provider)
+    tasks.suggest_schema_task.run("u1", "r2", "s" * 32)
+    assert json.loads(fake.data[tasks.run_key("u1", "r2")])["error"] == "No active AI provider configured."
+
+    async def crash(db, samples, document_type):
+        raise RuntimeError("socket closed")
+
+    monkeypatch.setattr(studio, "suggest_fields", crash)
+    tasks.suggest_schema_task.run("u1", "r3", "s" * 32)
+    state = json.loads(fake.data[tasks.run_key("u1", "r3")])
+    assert state["status"] == "failed" and "socket" not in state["error"]
+
+
+def test_suggest_endpoint_reads_files_and_queues_the_ai_step(monkeypatch):
+    import asyncio
+    from io import BytesIO
+    from fastapi import UploadFile
+    from starlette.datastructures import Headers
+    from app.api.v1.endpoints import schemas as ep
+    from app.tasks import schema_studio_tasks as tasks
+
+    monkeypatch.setattr(ep, "_extract_schema_sample_in_worker", lambda path: SimpleNamespace(
+        markdown=SAMPLE, metadata={"pipeline": "anydoc_hybrid", "text_layer_thai_suspect_pages": [1]}))
+    monkeypatch.setattr(studio, "store_samples", lambda user_id, samples: "d" * 32)
+    fake = _FakeRedis()
+    monkeypatch.setattr(studio, "_redis_client", lambda: fake)
+    queued = {}
+    monkeypatch.setattr(tasks.suggest_schema_task, "delay", lambda *args: queued.update(args=args))
+    upload = UploadFile(file=BytesIO(b"%PDF-1.4"), filename="a.pdf", headers=Headers({"content-type": "application/pdf"}))
+    out = asyncio.run(ep.suggest_schema_from_file(db=None, files=[upload], file=None, document_type="invoice",
+                                                  current_user=ADMIN))
+    assert out["session_id"] == "d" * 32 and out["samples"][0]["garbled_pages"] == [1]
+    assert queued["args"][1] == out["run_id"] and queued["args"][2] == "d" * 32
+    assert ep.read_sample_run(out["run_id"], current_user=ADMIN)["status"] == "queued"
+
+
+GARBLED = ("บร ิษัท ดีทวิน จํากัด ภาษีมูลค่าเพิMม รวมทัeงสิeน เงืdอนไขการชําระเงิน ค่าใช้จ่ายอืMนๆ "
+           "เพืAอช่วยในการทํางาน และเชืAอมต่อกับระบบอืAนๆ ข ้อมูลขนาดใหญ่ ") * 2
+CLEAN = ("บริษัท ดีทวิน จำกัด ภาษีมูลค่าเพิ่ม รวมทั้งสิ้น เงื่อนไขการชำระเงิน ค่าใช้จ่ายอื่นๆ "
+         "เพื่อช่วยในการทำงาน และเชื่อมต่อกับระบบ AI ของ Softnix OCR ขนาดใหญ่ ") * 2
+
+
+def test_thai_font_mapping_is_reported_without_rerouting_by_default(monkeypatch):
+    from app.core.config import settings
+    from app.services.anydoc_pipeline import _text_layer_quality
+
+    monkeypatch.setattr(settings, "TEXT_LAYER_THAI_REPAIR", False)
+    garbled = _text_layer_quality(GARBLED)
+    assert garbled["thai"]["suspect"] is True
+    assert garbled["warnings"] == ["thai_font_mapping"] and garbled["reasons"] == [] and garbled["usable"] is True
+    clean = _text_layer_quality(CLEAN)
+    assert clean["thai"]["suspect"] is False and clean["warnings"] == []
+
+    monkeypatch.setattr(settings, "TEXT_LAYER_THAI_REPAIR", True)
+    repaired = _text_layer_quality(GARBLED)
+    assert repaired["reasons"] == ["thai_font_mapping"] and repaired["usable"] is False

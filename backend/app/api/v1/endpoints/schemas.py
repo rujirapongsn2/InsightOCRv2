@@ -23,7 +23,6 @@ from app.schemas.schema import DocumentSchema as DocumentSchemaSchema
 from app.schemas.schema import DocumentSchemaCreate, DocumentSchemaUpdate, SchemaField, _validate_field_names
 from app.models.user import User
 from app.api.permissions import can_manage_group_resource
-from app.services.ai_suggestion_service import AISuggestionService
 from app.services import schema_studio, schema_versions
 from app.services.schema_suggestion_service import SchemaSuggestionService
 from app.services.anydoc_pipeline import (
@@ -246,7 +245,28 @@ def create_schema(
 SAMPLE_TEXT_RESPONSE_LIMIT = 200_000
 
 
-@router.post("/suggest-from-file")
+def _queue_suggestion(user_id: Any, session_id: str, document_type: str | None,
+                      extraction_meta: list[dict[str, Any]]) -> dict[str, Any]:
+    from uuid import uuid4
+    from app.tasks.schema_studio_tasks import RUN_TTL_SECONDS, initial_state, run_key, suggest_schema_task
+
+    run_id = uuid4().hex
+    try:
+        client = schema_studio._redis_client()
+        try:
+            client.set(run_key(user_id, run_id), json.dumps({**initial_state(1), "kind": "suggestion", "result": None}),
+                       ex=RUN_TTL_SECONDS)
+        finally:
+            client.close()
+        suggest_schema_task.delay(str(user_id), run_id, session_id, document_type, extraction_meta)
+    except Exception as exc:
+        logger.exception("Could not queue schema suggestion")
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            detail="The suggestion service is unavailable. Try again shortly.") from exc
+    return {"run_id": run_id}
+
+
+@router.post("/suggest-from-file", status_code=status.HTTP_202_ACCEPTED)
 async def suggest_schema_from_file(
     *,
     db: Session = Depends(deps.get_db),
@@ -256,11 +276,12 @@ async def suggest_schema_from_file(
     current_user: User = Depends(deps.get_current_active_user),
 ) -> Any:
     """
-    Suggest schema fields from one or more sample documents of the same kind.
+    Read one or more sample documents and start suggesting schema fields.
 
-    AnyDoc reads text-layer documents locally; scanned pages use TesseractOCR
-    and then the configured OCR fallback. One AI call proposes fields for all
-    samples, and each proposal is verified against every sample's text.
+    AnyDoc reads text-layer documents here; scanned pages use TesseractOCR and
+    then the configured OCR fallback. The AI call (one for all samples) and the
+    verification run in the background; poll ``GET /schemas/sample-runs/{run_id}``
+    until ``result`` holds the suggested fields.
     """
     _ensure_can_create_schema(current_user)
     uploads = [upload for upload in ([file] if file else []) + list(files) if upload is not None]
@@ -290,56 +311,35 @@ async def suggest_schema_from_file(
             samples.append({"filename": upload.filename or f"sample-{len(samples) + 1}", "text": extraction.markdown})
             extractions.append(extraction)
 
-        texts = [sample["text"] for sample in samples]
-        ai_service = AISuggestionService(db)
-        provider = ai_service._get_ai_settings()
-        numbered_text, truncated_flags = schema_studio.number_samples(samples)
-        if provider.provider_type == "openai_compatible":
-            proposals, studio_meta = await schema_studio.request_proposals(
-                provider, numbered_text, document_type, any(truncated_flags))
-        else:
-            # Legacy providers own their prompt, so proposals arrive without
-            # evidence; verification still runs and marks them for review.
-            legacy = await ai_service.suggest_fields_from_ocr(ocr_content=texts[0], document_type=document_type)
-            proposals = schema_studio.proposals_from_legacy(legacy.suggested_fields)
-            studio_meta = {"structured_output": "provider_prompt", "repaired": False, "repair_reason": None, "dropped": []}
-
-        suggested_fields, dropped = schema_studio.verify_proposals(proposals, texts)
-        if not suggested_fields:
-            raise ValueError("AI provider returned no field suggestions")
         session_id = schema_studio.store_samples(current_user.id, samples)
-
+        if not session_id:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                                detail="The suggestion service is unavailable. Try again shortly.")
+        _, truncated_flags = schema_studio.number_samples(samples)
+        extraction_meta = [
+            {
+                "filename": sample["filename"],
+                "pipeline": extraction.metadata.get("pipeline"),
+                "parser": extraction.metadata.get("parser"),
+                "page_count": extraction.metadata.get("page_count"),
+                "provider_counts": extraction.metadata.get("provider_counts", {}),
+                "garbled_pages": extraction.metadata.get("text_layer_thai_suspect_pages", []),
+            }
+            for sample, extraction in zip(samples, extractions)
+        ]
+        run = _queue_suggestion(current_user.id, session_id, document_type, extraction_meta)
         return {
-            "schema": _fields_to_schema(suggested_fields),
-            "suggested_fields": suggested_fields,
-            "summary": schema_studio.summarize(suggested_fields),
+            **run,
             "session_id": session_id,
-            "sample_ttl_seconds": schema_studio.SAMPLE_TTL_SECONDS if session_id else None,
+            "sample_ttl_seconds": schema_studio.SAMPLE_TTL_SECONDS,
             "sample_retention_days": settings.SCHEMA_SAMPLE_RETENTION_DAYS,
             "samples": [
                 {"index": index, "filename": sample["filename"], "truncated": truncated_flags[index],
-                 "text": sample["text"][:SAMPLE_TEXT_RESPONSE_LIMIT]}
-                for index, sample in enumerate(samples)
+                 "text": sample["text"][:SAMPLE_TEXT_RESPONSE_LIMIT],
+                 # Pages whose Thai text layer looks garbled by a broken font map.
+                 "garbled_pages": extraction.metadata.get("text_layer_thai_suspect_pages", [])}
+                for index, (sample, extraction) in enumerate(zip(samples, extractions))
             ],
-            "raw_result": {
-                "source": "schema_studio",
-                "provider_used": provider.display_name,
-                "structured_output": studio_meta["structured_output"],
-                "repaired": studio_meta["repaired"],
-                "repair_reason": studio_meta.get("repair_reason"),
-                "dropped": studio_meta["dropped"] + dropped,
-                "document_truncated": any(truncated_flags),
-                "extraction": [
-                    {
-                        "filename": sample["filename"],
-                        "pipeline": extraction.metadata.get("pipeline"),
-                        "parser": extraction.metadata.get("parser"),
-                        "page_count": extraction.metadata.get("page_count"),
-                        "provider_counts": extraction.metadata.get("provider_counts", {}),
-                    }
-                    for sample, extraction in zip(samples, extractions)
-                ],
-            },
         }
     except HTTPException:
         raise
@@ -740,39 +740,6 @@ async def preview_fixed_position_fields(
                 os.unlink(tmp_path)
             except OSError:
                 logger.warning("Failed to remove temporary fixed-position sample: %s", tmp_path)
-
-def _fields_to_schema(fields: list[dict[str, Any]]) -> dict[str, Any]:
-    properties: dict[str, Any] = {}
-    required: list[str] = []
-
-    for field in fields:
-        name = field["name"]
-        properties[name] = {
-            "type": _field_type_to_json_schema(field.get("type")),
-            "description": field.get("description", ""),
-        }
-        if field.get("example_value") is not None:
-            properties[name]["example"] = field["example_value"]
-        if field.get("required"):
-            required.append(name)
-
-    schema: dict[str, Any] = {
-        "type": "object",
-        "properties": properties,
-    }
-    if required:
-        schema["required"] = required
-    return schema
-
-
-def _field_type_to_json_schema(field_type: str | None) -> str:
-    if field_type in {"number", "currency"}:
-        return "number"
-    if field_type == "boolean":
-        return "boolean"
-    if field_type == "array":
-        return "array"
-    return "string"
 
 class ImportSchemaRequest(BaseModel):
     json_schema: str  # Raw JSON text from user
