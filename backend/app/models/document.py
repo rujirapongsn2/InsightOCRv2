@@ -44,6 +44,7 @@ class Document(Base):
     processed_at = Column(DateTime(timezone=True), nullable=True)
     
     schema_id = Column(UUID(as_uuid=True), ForeignKey("document_schemas.id"), nullable=True, index=True)
+    schema_version_id = Column(UUID(as_uuid=True), ForeignKey("schema_versions.id", ondelete="SET NULL"), nullable=True, index=True)
     task_id = Column(String, nullable=True)
     # Hash of an MCP action key. Manual/UI uploads leave this empty.
     mcp_idempotency_key = Column(String(64), nullable=True, unique=True, index=True)

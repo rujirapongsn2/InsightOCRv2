@@ -376,7 +376,8 @@ def auto_mapping_routes(setting: Any, db: Any) -> tuple[list[str], list[dict]]:
 
 
 def map_fields(text: str, schema: Any, db: Any, file_path: str | None = None,
-               *, engine: str | None = None, field_names: list[str] | None = None) -> tuple[dict, dict]:
+               *, engine: str | None = None, field_names: list[str] | None = None,
+               budget_seconds: float | None = None) -> tuple[dict, dict]:
     # Kept here to share the existing schema coercion contract with legacy callers.
     from app.tasks.document_tasks import (
         build_schema_json, _normalise_fixed_position_value,
@@ -384,7 +385,7 @@ def map_fields(text: str, schema: Any, db: Any, file_path: str | None = None,
     )
 
     started = time.monotonic()
-    deadline = started + settings.MAPPING_TOTAL_TIMEOUT_SECONDS
+    deadline = started + (budget_seconds or settings.MAPPING_TOTAL_TIMEOUT_SECONDS)
     fields = [f for f in schema.fields or [] if f.get("name")]
     policy = db.query(Setting).first() if hasattr(db, "query") else None
     engine = engine or getattr(policy, "mapping_engine", None) or "auto"

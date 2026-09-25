@@ -2,11 +2,12 @@ import logging
 import os
 import tempfile
 import json
+import re
 from typing import List, Any, Literal
 from urllib.parse import urlparse, urlencode
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Response, status
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
@@ -14,15 +15,16 @@ from starlette.concurrency import run_in_threadpool
 import requests
 from app.api import deps
 from app.db.session import SessionLocal
-from app.models.schema import DocumentSchema
+from app.models.schema import DocumentSchema, SchemaSample, SchemaVersion
 from app.models.document import Document
 from app.models.job import Job
 from app.models.setting import Setting
 from app.schemas.schema import DocumentSchema as DocumentSchemaSchema
-from app.schemas.schema import DocumentSchemaCreate, DocumentSchemaUpdate, SchemaField
+from app.schemas.schema import DocumentSchemaCreate, DocumentSchemaUpdate, SchemaField, _validate_field_names
 from app.models.user import User
 from app.api.permissions import can_manage_group_resource
 from app.services.ai_suggestion_service import AISuggestionService
+from app.services import schema_studio, schema_versions
 from app.services.schema_suggestion_service import SchemaSuggestionService
 from app.services.anydoc_pipeline import (
     AnydocFallbackToLegacy,
@@ -222,6 +224,8 @@ def create_schema(
         created_by=current_user.id,
     )
     db.add(db_schema)
+    db.flush()
+    schema_versions.ensure_current_version(db, db_schema, current_user.id, "Created")
     db.commit()
     db.refresh(db_schema)
 
@@ -238,77 +242,107 @@ def create_schema(
     return db_schema
 
 
+# Sample text shown back to the browser for evidence highlighting.
+SAMPLE_TEXT_RESPONSE_LIMIT = 200_000
+
+
 @router.post("/suggest-from-file")
 async def suggest_schema_from_file(
     *,
     db: Session = Depends(deps.get_db),
-    file: UploadFile = File(...),
+    files: List[UploadFile] = File(default=[]),
+    file: UploadFile | None = File(default=None),
     document_type: str | None = None,
     current_user: User = Depends(deps.get_current_active_user),
 ) -> Any:
     """
-    Suggest JSON schema fields from an uploaded document.
-    AnyDoc reads text-layer documents locally. Scanned pages use TesseractOCR
-    and then the configured OCR fallback before the active AI provider suggests
-    editable fields.
+    Suggest schema fields from one or more sample documents of the same kind.
+
+    AnyDoc reads text-layer documents locally; scanned pages use TesseractOCR
+    and then the configured OCR fallback. One AI call proposes fields for all
+    samples, and each proposal is verified against every sample's text.
     """
     _ensure_can_create_schema(current_user)
+    uploads = [upload for upload in ([file] if file else []) + list(files) if upload is not None]
+    if not uploads:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Choose at least one file")
+    if len(uploads) > settings.SCHEMA_SAMPLE_MAX_FILES:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            detail=f"Upload up to {settings.SCHEMA_SAMPLE_MAX_FILES} sample files")
+    for upload in uploads:
+        _validate_suggestion_upload(upload)
 
-    _validate_suggestion_upload(file)
-
-    file_bytes = await file.read()
-    if not file_bytes:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Uploaded file is empty")
-
-    suffix = os.path.splitext(file.filename)[1]
-    tmp_path = ""
+    tmp_paths: list[str] = []
     try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
-            tmp_file.write(file_bytes)
-            tmp_path = tmp_file.name
+        samples: list[dict[str, Any]] = []
+        extractions = []
+        for upload in uploads:
+            file_bytes = await upload.read()
+            if not file_bytes:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                                    detail=f"{upload.filename} is empty")
+            with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(upload.filename)[1]) as tmp_file:
+                tmp_file.write(file_bytes)
+                tmp_paths.append(tmp_file.name)
+            extraction = await run_in_threadpool(_extract_schema_sample_in_worker, tmp_paths[-1])
+            if not extraction.markdown.strip():
+                raise ValueError(f"No text could be extracted from {upload.filename}")
+            samples.append({"filename": upload.filename or f"sample-{len(samples) + 1}", "text": extraction.markdown})
+            extractions.append(extraction)
 
-        extraction = await run_in_threadpool(_extract_schema_sample_in_worker, tmp_path)
-        if not extraction.markdown.strip():
-            raise ValueError("No text could be extracted from the document")
-
+        texts = [sample["text"] for sample in samples]
         ai_service = AISuggestionService(db)
-        suggestion = await ai_service.suggest_fields_from_ocr(
-            ocr_content=extraction.markdown,
-            document_type=document_type,
-        )
+        provider = ai_service._get_ai_settings()
+        numbered_text, truncated_flags = schema_studio.number_samples(samples)
+        if provider.provider_type == "openai_compatible":
+            proposals, studio_meta = await schema_studio.request_proposals(
+                provider, numbered_text, document_type, any(truncated_flags))
+        else:
+            # Legacy providers own their prompt, so proposals arrive without
+            # evidence; verification still runs and marks them for review.
+            legacy = await ai_service.suggest_fields_from_ocr(ocr_content=texts[0], document_type=document_type)
+            proposals = schema_studio.proposals_from_legacy(legacy.suggested_fields)
+            studio_meta = {"structured_output": "provider_prompt", "repaired": False, "repair_reason": None, "dropped": []}
 
-        suggested_fields = [
-            {
-                "name": field.name,
-                "type": field.type,
-                "description": field.description,
-                "required": False,
-                "confidence": field.confidence,
-                "example_value": field.example_value,
-            }
-            for field in suggestion.suggested_fields
-        ]
-
+        suggested_fields, dropped = schema_studio.verify_proposals(proposals, texts)
         if not suggested_fields:
             raise ValueError("AI provider returned no field suggestions")
+        session_id = schema_studio.store_samples(current_user.id, samples)
 
         return {
             "schema": _fields_to_schema(suggested_fields),
             "suggested_fields": suggested_fields,
+            "summary": schema_studio.summarize(suggested_fields),
+            "session_id": session_id,
+            "sample_ttl_seconds": schema_studio.SAMPLE_TTL_SECONDS if session_id else None,
+            "sample_retention_days": settings.SCHEMA_SAMPLE_RETENTION_DAYS,
+            "samples": [
+                {"index": index, "filename": sample["filename"], "truncated": truncated_flags[index],
+                 "text": sample["text"][:SAMPLE_TEXT_RESPONSE_LIMIT]}
+                for index, sample in enumerate(samples)
+            ],
             "raw_result": {
-                "source": "anydoc_schema_sample",
-                "provider_used": suggestion.provider_used,
-                "confidence_score": suggestion.confidence_score,
-                "document_preview": suggestion.document_preview,
-                "extraction": {
-                    "pipeline": extraction.metadata.get("pipeline"),
-                    "parser": extraction.metadata.get("parser"),
-                    "page_count": extraction.metadata.get("page_count"),
-                    "page_sources": extraction.metadata.get("page_sources", []),
-                    "provider_counts": extraction.metadata.get("provider_counts", {}),
-                },
+                "source": "schema_studio",
+                "provider_used": provider.display_name,
+                "structured_output": studio_meta["structured_output"],
+                "repaired": studio_meta["repaired"],
+                "repair_reason": studio_meta.get("repair_reason"),
+                "dropped": studio_meta["dropped"] + dropped,
+                "document_truncated": any(truncated_flags),
+                "extraction": [
+                    {
+                        "filename": sample["filename"],
+                        "pipeline": extraction.metadata.get("pipeline"),
+                        "parser": extraction.metadata.get("parser"),
+                        "page_count": extraction.metadata.get("page_count"),
+                        "provider_counts": extraction.metadata.get("provider_counts", {}),
+                    }
+                    for sample, extraction in zip(samples, extractions)
+                ],
             },
         }
+    except HTTPException:
+        raise
     except (AnydocFallbackToLegacy, AnydocTerminalError, ValueError) as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
     except Exception as exc:
@@ -318,11 +352,324 @@ async def suggest_schema_from_file(
             detail="Schema suggestion request failed. Check the active AI provider and try again.",
         ) from exc
     finally:
-        if tmp_path:
+        for tmp_path in tmp_paths:
             try:
                 os.unlink(tmp_path)
             except OSError:
                 logger.warning("Failed to remove temporary schema suggestion file: %s", tmp_path)
+
+
+class SampleDryRunRequest(BaseModel):
+    session_id: str
+    fields: List[SchemaField]
+    engine: Literal["auto", "softnix", "jev", "llm"] | None = None
+
+    @model_validator(mode="after")
+    def _validate_fields(self) -> "SampleDryRunRequest":
+        _validate_field_names(self.fields)
+        return self
+
+
+def _test_fields(fields: List[SchemaField]) -> list[dict[str, Any]]:
+    # Fixed-position fields need the original file, which a test run on text cannot use.
+    selected = [field.model_dump(exclude_none=True) for field in fields if not field.locator]
+    if not selected:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Add at least one field to test")
+    return selected
+
+
+def _start_sample_run(user_id: Any, samples: list[dict[str, Any]], fields: list[dict[str, Any]],
+                      engine: str | None, schema_id: str | None = None,
+                      schema_version: int | None = None) -> dict[str, Any]:
+    from uuid import uuid4
+    from app.tasks.schema_studio_tasks import RUN_TTL_SECONDS, initial_state, run_key, run_schema_samples_task
+
+    run_id = uuid4().hex
+    try:
+        # Written before queueing so a missing key later means "not found", not "not started yet".
+        client = schema_studio._redis_client()
+        try:
+            client.set(run_key(user_id, run_id), json.dumps(initial_state(len(samples))), ex=RUN_TTL_SECONDS)
+        finally:
+            client.close()
+        run_schema_samples_task.delay(str(user_id), run_id, samples, fields, engine, schema_id, schema_version)
+    except Exception as exc:
+        logger.exception("Could not queue schema test run")
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            detail="The test service is unavailable. Try again shortly.") from exc
+    return {"run_id": run_id, "total": len(samples)}
+
+
+@router.post("/sample-dry-run", status_code=status.HTTP_202_ACCEPTED)
+def dry_run_schema_on_samples(
+    *,
+    payload: SampleDryRunRequest,
+    current_user: User = Depends(deps.get_current_active_user),
+) -> Any:
+    """Start extracting the draft fields from the uploaded samples with the real engines.
+
+    Poll ``GET /schemas/sample-runs/{run_id}`` for progress and results.
+    """
+    _ensure_can_create_schema(current_user)
+    fields = _test_fields(payload.fields)
+    try:
+        samples = schema_studio.load_samples(current_user.id, payload.session_id)
+    except Exception as exc:
+        logger.exception("Could not read schema samples for dry run")
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            detail="The test service is unavailable. Try again shortly.") from exc
+    if not samples:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail="The samples have expired. Upload the files again to test.")
+    run_samples = [{"index": index, "filename": sample.get("filename"), "text": sample.get("text", "")}
+                   for index, sample in enumerate(samples)]
+    return _start_sample_run(current_user.id, run_samples, fields, payload.engine)
+
+
+@router.get("/sample-runs/{run_id}")
+def read_sample_run(run_id: str, current_user: User = Depends(deps.get_current_active_user)) -> Any:
+    from app.tasks.schema_studio_tasks import run_key
+
+    if not re.fullmatch(r"[0-9a-f]{32}", run_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Test run not found")
+    try:
+        client = schema_studio._redis_client()
+        try:
+            raw = client.get(run_key(current_user.id, run_id))
+        finally:
+            client.close()
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            detail="The test service is unavailable. Try again shortly.") from exc
+    if not raw:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail="This test run was not found or has expired. Run the test again.")
+    return json.loads(raw)
+
+
+def _parse_id(value: str, what: str) -> UUID:
+    try:
+        return UUID(str(value))
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"{what} not found") from exc
+
+
+def _get_managed_schema(db: Session, schema_id: str, current_user: User) -> DocumentSchema:
+    schema = db.query(DocumentSchema).filter(DocumentSchema.id == _parse_id(schema_id, "Schema")).first()
+    if not schema:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schema not found")
+    _ensure_can_manage(schema, current_user)
+    return schema
+
+
+def _sample_summary(row: SchemaSample) -> dict[str, Any]:
+    return {
+        "id": str(row.id),
+        "filename": row.filename,
+        "mime_type": row.mime_type,
+        "confirmed_fields": sorted((row.expected or {}).keys()),
+        "last_run": row.last_run,
+        "created_at": row.created_at,
+        "expires_at": row.expires_at,
+    }
+
+
+@router.post("/{schema_id}/samples", status_code=status.HTTP_201_CREATED)
+async def store_schema_samples(
+    *,
+    db: Session = Depends(deps.get_db),
+    schema_id: str,
+    files: List[UploadFile] = File(...),
+    expected: str = Form("[]"),
+    session_id: str | None = Form(None),
+    consent: bool = Form(False),
+    current_user: User = Depends(deps.get_current_active_user),
+) -> Any:
+    """Keep sample files as the schema's test set.
+
+    Requires explicit consent: files and their text are stored for
+    SCHEMA_SAMPLE_RETENTION_DAYS and are visible only to schema managers.
+    ``expected`` is a JSON list aligned with ``files``: confirmed values per field.
+    """
+    from datetime import datetime, timedelta, timezone
+    from io import BytesIO
+    from uuid import uuid4
+    from app.services.storage import get_storage_service
+
+    schema = _get_managed_schema(db, schema_id, current_user)
+    if not consent:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            detail="Confirm that the sample files may be stored before keeping them")
+    existing = db.query(SchemaSample).filter(SchemaSample.schema_id == schema.id).count()
+    if not files or existing + len(files) > settings.SCHEMA_SAMPLE_MAX_FILES:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            detail=f"A schema can keep up to {settings.SCHEMA_SAMPLE_MAX_FILES} sample files")
+    try:
+        expected_values = json.loads(expected or "[]")
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Invalid confirmed values") from exc
+    if not isinstance(expected_values, list):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Invalid confirmed values")
+    field_names = {field.get("name") for field in schema.fields or []}
+
+    cached: list[dict[str, Any]] = []
+    if session_id:
+        try:
+            cached = schema_studio.load_samples(current_user.id, session_id) or []
+        except Exception:  # noqa: BLE001 — fall back to reading the files again
+            cached = []
+
+    storage = get_storage_service()
+    expires_at = datetime.now(timezone.utc) + timedelta(days=settings.SCHEMA_SAMPLE_RETENTION_DAYS)
+    stored_paths: list[str] = []
+    rows: list[SchemaSample] = []
+    try:
+        for index, upload in enumerate(files):
+            _validate_suggestion_upload(upload)
+            data = await upload.read()
+            cached_sample = cached[index] if index < len(cached) else None
+            if cached_sample and cached_sample.get("filename") == upload.filename:
+                text = cached_sample.get("text", "")
+            else:
+                with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(upload.filename)[1]) as tmp:
+                    tmp.write(data)
+                    tmp_path = tmp.name
+                try:
+                    text = (await run_in_threadpool(_extract_schema_sample_in_worker, tmp_path)).markdown
+                finally:
+                    os.unlink(tmp_path)
+            path = f"schema-samples/{schema.id}/{uuid4().hex}{os.path.splitext(upload.filename)[1].lower()}"
+            storage.upload_file(BytesIO(data), path, content_type=upload.content_type)
+            stored_paths.append(path)
+            confirmed = expected_values[index] if index < len(expected_values) and isinstance(expected_values[index], dict) else {}
+            rows.append(SchemaSample(
+                schema_id=schema.id, filename=upload.filename, mime_type=upload.content_type,
+                storage_path=path, text=text,
+                expected={name: value for name, value in confirmed.items() if name in field_names},
+                created_by=current_user.id, expires_at=expires_at,
+            ))
+        db.add_all(rows)
+        db.commit()
+    except Exception:
+        db.rollback()
+        from app.tasks.maintenance_tasks import delete_schema_sample_files
+        delete_schema_sample_files(stored_paths)
+        raise
+    log_activity(db=db, user_id=current_user.id, action=Actions.UPDATE_SCHEMA, resource_type="schema",
+                 resource_id=schema.id, details={"schema_name": schema.name, "samples_stored": len(rows)})
+    return [_sample_summary(row) for row in rows]
+
+
+@router.get("/{schema_id}/samples")
+def list_schema_samples(
+    *,
+    db: Session = Depends(deps.get_db),
+    schema_id: str,
+    current_user: User = Depends(deps.get_current_active_user),
+) -> Any:
+    schema = _get_managed_schema(db, schema_id, current_user)
+    rows = (db.query(SchemaSample).filter(SchemaSample.schema_id == schema.id)
+            .order_by(SchemaSample.created_at).all())
+    return {"retention_days": settings.SCHEMA_SAMPLE_RETENTION_DAYS, "samples": [_sample_summary(row) for row in rows]}
+
+
+@router.delete("/{schema_id}/samples/{sample_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_schema_sample(
+    *,
+    db: Session = Depends(deps.get_db),
+    schema_id: str,
+    sample_id: str,
+    current_user: User = Depends(deps.get_current_active_user),
+) -> Response:
+    from app.tasks.maintenance_tasks import delete_schema_sample_files
+
+    schema = _get_managed_schema(db, schema_id, current_user)
+    row = db.query(SchemaSample).filter(SchemaSample.id == _parse_id(sample_id, "Sample"),
+                                        SchemaSample.schema_id == schema.id).first()
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Sample not found")
+    delete_schema_sample_files([row.storage_path])
+    db.delete(row)
+    db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+class SampleExpectedUpdate(BaseModel):
+    expected: dict[str, Any]
+
+
+@router.put("/{schema_id}/samples/{sample_id}/expected")
+def update_schema_sample_expected(
+    *,
+    db: Session = Depends(deps.get_db),
+    schema_id: str,
+    sample_id: str,
+    payload: SampleExpectedUpdate,
+    current_user: User = Depends(deps.get_current_active_user),
+) -> Any:
+    """Replace the confirmed values of one stored sample (unknown field names are ignored)."""
+    schema = _get_managed_schema(db, schema_id, current_user)
+    row = db.query(SchemaSample).filter(SchemaSample.id == _parse_id(sample_id, "Sample"),
+                                        SchemaSample.schema_id == schema.id).first()
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Sample not found")
+    field_names = {field.get("name") for field in schema.fields or []}
+    row.expected = {name: value for name, value in payload.expected.items() if name in field_names}
+    db.commit()
+    return _sample_summary(row)
+
+
+class SampleRunRequest(BaseModel):
+    engine: Literal["auto", "softnix", "jev", "llm"] | None = None
+
+
+@router.post("/{schema_id}/samples/run", status_code=status.HTTP_202_ACCEPTED)
+def run_schema_test_set(
+    *,
+    db: Session = Depends(deps.get_db),
+    schema_id: str,
+    payload: SampleRunRequest,
+    current_user: User = Depends(deps.get_current_active_user),
+) -> Any:
+    """Re-run the current fields on the stored samples and compare with confirmed values."""
+    schema = _get_managed_schema(db, schema_id, current_user)
+    rows = (db.query(SchemaSample).filter(SchemaSample.schema_id == schema.id)
+            .order_by(SchemaSample.created_at).all())
+    if not rows:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="This schema has no test set yet")
+    fields = _test_fields([SchemaField.model_validate(field) for field in schema.fields or []])
+    version = schema_versions.ensure_current_version(db, schema, current_user.id)
+    db.commit()
+    samples = [{"index": index, "filename": row.filename, "sample_id": str(row.id)} for index, row in enumerate(rows)]
+    return _start_sample_run(current_user.id, samples, fields, payload.engine, str(schema.id), version.version)
+
+
+@router.get("/{schema_id}/versions")
+def list_schema_versions(
+    *,
+    db: Session = Depends(deps.get_db),
+    schema_id: str,
+    current_user: User = Depends(deps.get_current_active_user),
+) -> Any:
+    schema = db.query(DocumentSchema).filter(DocumentSchema.id == _parse_id(schema_id, "Schema")).first()
+    if not schema:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schema not found")
+    rows = (db.query(SchemaVersion).filter(SchemaVersion.schema_id == schema.id)
+            .order_by(SchemaVersion.version.desc()).all())
+    return {
+        "current_version": schema.current_version,
+        "versions": [
+            {
+                "version": row.version,
+                "note": row.note,
+                "field_names": [field.get("name") for field in row.fields or []],
+                "created_at": row.created_at,
+                "created_by_name": row.creator.full_name if row.creator else None,
+                "fields": row.fields,
+            }
+            for row in rows
+        ],
+    }
 
 
 @router.post("/preview-fixed-fields")
@@ -770,6 +1117,7 @@ def update_schema(
         setattr(schema, field, value)
 
     db.add(schema)
+    schema_versions.ensure_current_version(db, schema, current_user.id, "Edited")
     db.commit()
     db.refresh(schema)
 
@@ -829,6 +1177,9 @@ def delete_schema(
         synchronize_session=False,
     )
 
+    # Sample rows go with the schema (ON DELETE CASCADE); their files must be removed too.
+    sample_paths = [row.storage_path for row in
+                    db.query(SchemaSample).filter(SchemaSample.schema_id == schema.id).all()]
     db.delete(schema)
     try:
         db.commit()
@@ -838,4 +1189,7 @@ def delete_schema(
             status_code=status.HTTP_409_CONFLICT,
             detail="Cannot delete schema because it is still referenced by related records.",
         )
+    if sample_paths:
+        from app.tasks.maintenance_tasks import delete_schema_sample_files
+        delete_schema_sample_files(sample_paths)
     return schema

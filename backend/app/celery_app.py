@@ -14,6 +14,7 @@ celery_app = Celery(
         "app.tasks.workflow_tasks",
         "app.tasks.maintenance_tasks",
         "app.tasks.agent_tasks",
+        "app.tasks.schema_studio_tasks",
     ]
 )
 
@@ -45,6 +46,7 @@ celery_app.conf.update(
     # independently without changing routing.
     task_routes={
         "app.tasks.document_tasks.*": {"queue": "documents"},
+        "app.tasks.schema_studio_tasks.*": {"queue": "documents"},
         "app.tasks.workflow_tasks.*": {"queue": "workflows"},
         "app.tasks.maintenance_tasks.*": {"queue": "workflows"},
         "app.tasks.agent_tasks.*": {"queue": "workflows"},
@@ -60,6 +62,10 @@ celery_app.conf.update(
         },
         "prune-old-data": {
             "task": "app.tasks.maintenance_tasks.prune_old_data",
+            "schedule": 24 * 3600.0,  # daily
+        },
+        "purge-expired-schema-samples": {
+            "task": "app.tasks.maintenance_tasks.purge_expired_schema_samples",
             "schedule": 24 * 3600.0,  # daily
         },
     },

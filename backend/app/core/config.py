@@ -26,6 +26,9 @@ class Settings(BaseSettings):
 
     # Data retention (workflow run history, output files, job logs)
     RETENTION_DAYS: int = 30
+    # Sample documents kept as a schema's test set (Schema Studio), with consent.
+    SCHEMA_SAMPLE_RETENTION_DAYS: int = 180
+    SCHEMA_SAMPLE_MAX_FILES: int = 5
     
     # MinIO / S3 Common
     MINIO_ENDPOINT: str = "localhost:9000"

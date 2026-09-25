@@ -108,6 +108,8 @@ def remap_document_task(document_id: str, token: str, engine: str, field_names: 
                     report["fields"].setdefault(name, {})["retained_previous_value"] = True
             previous.update(values)
             document.extracted_data = previous
+            from app.services.schema_versions import record_document_version
+            record_document_version(db, document, schema)
             old_report = metadata.get("mapping")
             if field_names and isinstance(old_report, dict):
                 unresolved = [name for name in old_report.get("unresolved_fields", []) if name not in field_names]
@@ -647,8 +649,14 @@ def _normalize_schema_value(value: Any, field_schema: dict[str, Any], field_name
             except ValueError as exc:
                 raise ValueError(f"Field '{field_name}' must use ISO date format") from exc
         pattern = field_schema.get("pattern")
-        if pattern and not re.fullmatch(str(pattern), value):
-            raise ValueError(f"Field '{field_name}' does not match its validation rule")
+        if pattern:
+            try:
+                matched = re.fullmatch(str(pattern), value)
+            except re.error as exc:
+                # A broken rule must degrade one field to review, not abort mapping.
+                raise ValueError(f"Field '{field_name}' has an invalid format rule") from exc
+            if not matched:
+                raise ValueError(f"Field '{field_name}' does not match its validation rule")
         return value
 
     if expected_type == "number":
@@ -906,6 +914,9 @@ def apply_schema_mapping(
         extraction_metadata["mapping"] = {"status": "failed", "provider": "hybrid", "reason": str(exc)}
         return str(exc)
     document.extracted_data = values or None
+    if isinstance(db, Session):
+        from app.services.schema_versions import record_document_version
+        record_document_version(db, document, schema)
     attach_page_evidence(report, getattr(document, "ocr_pages", None))
     extraction_metadata["mapping"] = report
     extraction_metadata["field_evidence"] = report["fields"]

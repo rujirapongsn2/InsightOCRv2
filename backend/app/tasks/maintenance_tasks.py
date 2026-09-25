@@ -280,3 +280,39 @@ def prune_old_data():
             "Retention pass: deleted %s workflow runs, %s output dirs, %s log files",
             deleted_runs, removed_outputs, removed_logs,
         )
+
+
+def delete_schema_sample_files(paths: list[str]) -> int:
+    """Remove stored sample files; a missing object is not an error."""
+    from app.services.storage import get_storage_service
+
+    storage = get_storage_service()
+    removed = 0
+    for path in paths:
+        try:
+            storage.delete_file(path)
+            removed += 1
+        except Exception:  # noqa: BLE001 — keep going; the row is removed regardless
+            logger.warning("Could not delete schema sample file %s", path, exc_info=True)
+    return removed
+
+
+@celery_app.task
+def purge_expired_schema_samples():
+    """Delete schema test-set samples past their retention date (PDPA)."""
+    from app.models.schema import SchemaSample
+
+    now = datetime.now(timezone.utc)
+    db = SessionLocal()
+    try:
+        expired = db.query(SchemaSample).filter(SchemaSample.expires_at.isnot(None),
+                                                SchemaSample.expires_at < now).all()
+        if not expired:
+            return
+        delete_schema_sample_files([row.storage_path for row in expired])
+        for row in expired:
+            db.delete(row)
+        db.commit()
+        logger.info("Purged %s expired schema samples", len(expired))
+    finally:
+        db.close()
