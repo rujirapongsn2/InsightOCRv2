@@ -519,3 +519,14 @@ def test_garbled_thai_is_reported_only_while_the_text_layer_is_used(monkeypatch,
     assert result.metadata["text_layer_quality"][1]["thai"]["suspect"] is True
     assert result.metadata["text_layer_thai_suspect_pages"] == suspect_pages
     assert result.metadata["tesseract_pages"] == tesseract_pages
+
+
+def test_tesseract_word_positions_are_kept_on_the_page(monkeypatch, tmp_path):
+    def tesseract(*_args, words_out=None, **_kwargs):
+        words_out.append({"text": "INV-1", "x": 10.0, "y": 5.0, "width": 8.0, "height": 1.5})
+        return "Invoice INV-1"
+
+    monkeypatch.setattr(anydoc_pipeline, "process_tesseract_ocr", tesseract)
+    result = extract_anydoc_document(_write_image(tmp_path), FakeDb(_setting()), None)
+
+    assert result.pages[0]["words"] == [{"text": "INV-1", "x": 10.0, "y": 5.0, "width": 8.0, "height": 1.5}]

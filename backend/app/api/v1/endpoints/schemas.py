@@ -743,6 +743,68 @@ def apply_schema_improvements(
     return schema
 
 
+SAMPLE_WORDS_MAX_PAGES = 5
+
+
+def _sample_words_in_worker(file_path: str, is_pdf: bool) -> dict[int, list[dict[str, Any]]]:
+    """Tesseract word positions (percent of the page) for the first pages of a sample."""
+    from app.services.anydoc_pipeline import _cleanup_rendered_page, _render_pdf_page
+    from app.services.ocr import count_pdf_pages
+    from app.services.tesseract_ocr import TesseractOcrError, process_tesseract_ocr
+
+    pages: dict[int, list[dict[str, Any]]] = {}
+    total = min(count_pdf_pages(file_path), SAMPLE_WORDS_MAX_PAGES) if is_pdf else 1
+    for page_number in range(1, total + 1):
+        image_path = _render_pdf_page(file_path, page_number) if is_pdf else file_path
+        try:
+            words: list[dict[str, Any]] = []
+            process_tesseract_ocr(image_path, language=settings.TESSERACT_OCR_LANGUAGE,
+                                  timeout=settings.TESSERACT_OCR_TIMEOUT_SECONDS, words_out=words)
+            pages[page_number] = words
+        except TesseractOcrError:
+            pages[page_number] = []
+        finally:
+            if is_pdf:
+                _cleanup_rendered_page(image_path)
+    return pages
+
+
+@router.post("/sample-words")
+async def read_sample_words(
+    *,
+    file: UploadFile = File(...),
+    current_user: User = Depends(deps.get_current_active_user),
+) -> Any:
+    """Word positions read by local Tesseract, for finding values on a scanned sample form.
+
+    Used when the sample has no text layer to search in the browser. Nothing is
+    stored and no external provider is called.
+    """
+    _ensure_can_create_schema(current_user)
+    _validate_suggestion_upload(file)
+    file_bytes = await file.read()
+    if not file_bytes:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Uploaded file is empty")
+    suffix = os.path.splitext(file.filename or "")[1].lower()
+    tmp_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
+            tmp_file.write(file_bytes)
+            tmp_path = tmp_file.name
+        pages = await run_in_threadpool(_sample_words_in_worker, tmp_path, suffix == ".pdf")
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Could not read sample word positions")
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            detail="The sample could not be read for word positions") from exc
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+    return {"pages": pages, "max_pages": SAMPLE_WORDS_MAX_PAGES, "coordinate_unit": "percent"}
+
+
 @router.post("/preview-fixed-fields")
 async def preview_fixed_position_fields(
     *,

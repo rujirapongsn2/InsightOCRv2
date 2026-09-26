@@ -4,7 +4,7 @@ import { useState, useEffect, useMemo, useRef } from "react"
 import { Document, Page, pdfjs } from "react-pdf"
 import { ZoomIn, ZoomOut, RotateCw, ChevronLeft, ChevronRight, SearchX } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { findTextBox, type Box, type Highlight, type TextItemLike } from "@/lib/evidence-search"
+import { findTextBox, findWordBox, type Box, type Highlight, type PageWord, type TextItemLike } from "@/lib/evidence-search"
 import "react-pdf/dist/Page/AnnotationLayer.css"
 import "react-pdf/dist/Page/TextLayer.css"
 
@@ -15,6 +15,8 @@ interface PDFViewerProps {
   fileUrl: string
   className?: string
   highlight?: Highlight | null
+  /** OCR word positions per page, used where a page has no text layer (scans). */
+  pageWords?: Record<number, PageWord[]>
 }
 
 type PdfProxy = {
@@ -25,7 +27,7 @@ type PdfProxy = {
   }>
 }
 
-export function PDFViewer({ fileUrl, className = "", highlight }: PDFViewerProps) {
+export function PDFViewer({ fileUrl, className = "", highlight, pageWords }: PDFViewerProps) {
   const [numPages, setNumPages] = useState<number>(0)
   const [pageNumber, setPageNumber] = useState<number>(1)
   const [scale, setScale] = useState<number>(1.0)
@@ -73,6 +75,7 @@ export function PDFViewer({ fileUrl, className = "", highlight }: PDFViewerProps
         const items = content.items.filter((item): item is TextItemLike =>
           typeof item.str === "string" && Array.isArray(item.transform) && typeof item.width === "number")
         const bbox = findTextBox(items, proxy.getViewport({ scale: 1 }), texts)
+          ?? (pageWords?.[page]?.length ? findWordBox(pageWords[page], texts) : null)
         if (cancelled) return
         if (bbox) {
           setLocated({ page, bbox })
@@ -85,7 +88,7 @@ export function PDFViewer({ fileUrl, className = "", highlight }: PDFViewerProps
       if (!cancelled) setSearchState("not_found")
     })().catch(() => { if (!cancelled) setSearchState("not_found") })
     return () => { cancelled = true }
-  }, [highlight, numPages])
+  }, [highlight, numPages, pageWords])
 
   // Bring the box into view once per new result; later re-renders (zoom, status) must not pull the view back.
   useEffect(() => {
@@ -222,7 +225,7 @@ export function PDFViewer({ fileUrl, className = "", highlight }: PDFViewerProps
           <span role="status" className={`inline-flex items-center gap-1 text-xs ${searchState === "not_found" ? "text-amber-700" : "text-slate-500"}`}>
             {searchState === "searching" ? "Finding the value in the document..." : <>
               <SearchX className="h-3.5 w-3.5" />
-              {highlight.label ? `${highlight.label}: ` : ""}not found in this PDF&apos;s text (scanned pages have no text to search)
+              {highlight.label ? `${highlight.label}: ` : ""}not found in this document&apos;s text
             </>}
           </span>
         )}

@@ -3,11 +3,20 @@
 import { useEffect, useState, useMemo } from "react"
 import { useParams, useRouter } from "next/navigation"
 import Link from "next/link"
-import { ArrowLeft, Save, CheckCircle, AlertTriangle, FileText, Image as ImageIcon } from "lucide-react"
+import dynamic from "next/dynamic"
+import { ArrowLeft, Save, CheckCircle, AlertTriangle, FileText, Image as ImageIcon, LocateFixed } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { getApiBaseUrl } from "@/lib/api"
 import { editableText, parseTypedValue } from "@/lib/schema-studio"
+import { evidenceSearchTexts, pageWordsFrom, type Highlight } from "@/lib/evidence-search"
+
+const PDFViewer = dynamic(
+    () => import("@/components/document/PDFViewer").then(mod => mod.PDFViewer),
+    { ssr: false, loading: () => <div className="flex h-full items-center justify-center text-sm text-slate-400">Loading document...</div> }
+)
+
+type FieldEvidence = { page?: number; bbox?: Highlight["bbox"]; quote?: string; raw_text?: string }
 
 interface Document {
     id: string
@@ -19,6 +28,8 @@ interface Document {
     job_id: string
     mime_type?: string
     schema_id?: string | null
+    ocr_pages?: unknown
+    extraction_metadata?: { mapping?: { fields?: Record<string, FieldEvidence> } | string } | null
 }
 type ExtractedEntry = Record<string, any>
 type SchemaFieldInfo = { name: string; type: string; required?: boolean; description?: string | null }
@@ -44,6 +55,7 @@ export default function ReviewDocumentPage() {
     // Text being edited per field (single-record documents); converted back to typed values on save.
     const [drafts, setDrafts] = useState<Record<string, string>>({})
     const [formError, setFormError] = useState<string | null>(null)
+    const [highlight, setHighlight] = useState<Highlight | null>(null)
 
     const normalizeExtractedData = (data: any): ExtractedEntry[] => {
         if (!data) return []
@@ -111,6 +123,8 @@ export default function ReviewDocumentPage() {
     // Fetch file with authentication and create object URL
     useEffect(() => {
         if (!document) return
+        // PDFs are loaded by PDFViewer itself; only images need an object URL here.
+        if (document.mime_type === "application/pdf" || document.filename.toLowerCase().endsWith(".pdf")) return
 
         const fetchFile = async () => {
             try {
@@ -238,6 +252,17 @@ export default function ReviewDocumentPage() {
         }
     }
 
+    // Show where a field's value is on the PDF (stored box, or a search of the page text).
+    const locateField = (field: FormField) => {
+        const mapping = document?.extraction_metadata?.mapping
+        const evidence = typeof mapping === "object" ? mapping?.fields?.[field.name] : undefined
+        const value = record?.[field.name] ?? drafts[field.name]
+        setHighlight({ page: evidence?.page, bbox: evidence?.bbox, label: field.name,
+                       texts: evidenceSearchTexts(value, evidence, field.type) })
+    }
+
+    const pageWords = useMemo(() => pageWordsFrom(document?.ocr_pages), [document?.ocr_pages])
+
     const isPDF = useMemo(() => {
         return document?.mime_type === 'application/pdf' || document?.filename.toLowerCase().endsWith('.pdf')
     }, [document])
@@ -289,7 +314,11 @@ export default function ReviewDocumentPage() {
                     <div className="h-full flex flex-col">
                         {/* Document Display */}
                         <div className="flex-1 overflow-auto bg-slate-900 flex items-center justify-center p-4">
-                            {!fileObjectUrl ? (
+                            {isPDF ? (
+                                <div className="w-full h-full bg-white">
+                                    <PDFViewer fileUrl={`${getApiBaseUrl()}/documents/${documentId}/file`} highlight={highlight} pageWords={pageWords} />
+                                </div>
+                            ) : !fileObjectUrl ? (
                                 <div className="text-center text-slate-400">
                                     <FileText className="h-16 w-16 mx-auto mb-4 opacity-50 animate-pulse" />
                                     <p className="text-sm">Loading document...</p>
@@ -303,14 +332,6 @@ export default function ReviewDocumentPage() {
                                         console.error('Failed to load image:', e)
                                     }}
                                 />
-                            ) : isPDF ? (
-                                <div className="w-full h-full bg-white">
-                                    <iframe
-                                        src={fileObjectUrl}
-                                        className="w-full h-full border-0"
-                                        title={document.filename}
-                                    />
-                                </div>
                             ) : (
                                 <div className="text-center text-slate-400">
                                     <FileText className="h-16 w-16 mx-auto mb-4 opacity-50" />
@@ -357,6 +378,13 @@ export default function ReviewDocumentPage() {
                                             {field.required && <span className="rounded bg-red-50 px-1.5 py-0.5 text-xs text-red-700">Required</span>}
                                             {field.inSchema && missing && <span className="rounded bg-amber-50 px-1.5 py-0.5 text-xs text-amber-800">Not found — type the value if the document has it</span>}
                                             {!field.inSchema && schemaFields.length > 0 && <span className="rounded bg-slate-100 px-1.5 py-0.5 text-xs text-slate-600">Not in schema</span>}
+                                            {isPDF && !field.structured && text.trim() && (
+                                                <button type="button" onClick={(event) => { event.preventDefault(); locateField(field) }}
+                                                    className="ml-auto inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs font-normal text-blue-700 hover:bg-blue-50"
+                                                    title={`Show where ${field.name} is in the document`}>
+                                                    <LocateFixed className="h-3.5 w-3.5" /> Show in document
+                                                </button>
+                                            )}
                                         </label>
                                         {field.description && <p className="text-xs text-slate-500">{field.description}</p>}
                                         {field.structured ? (

@@ -104,3 +104,50 @@ export function findTextBox(items: TextItemLike[], viewport: ViewportLike, texts
     }
     return null
 }
+
+/** A recognised word on a scanned page (Tesseract), in percent of the page. */
+export type PageWord = { text: string; x: number; y: number; width: number; height: number }
+
+/** Word positions per page number, from a document's ``ocr_pages[].words``. */
+export function pageWordsFrom(ocrPages: unknown): Record<number, PageWord[]> {
+    const result: Record<number, PageWord[]> = {}
+    if (!Array.isArray(ocrPages)) return result
+    for (const page of ocrPages) {
+        if (!page || typeof page !== "object") continue
+        const { page_number: number, words } = page as { page_number?: unknown; words?: unknown }
+        if (typeof number !== "number" || !Array.isArray(words)) continue
+        result[number] = words.filter((word): word is PageWord =>
+            !!word && typeof word.text === "string" && typeof word.x === "number" && typeof word.y === "number"
+            && typeof word.width === "number" && typeof word.height === "number")
+    }
+    return result
+}
+
+/** Same matching as ``findTextBox`` but over OCR words, whose boxes are already in percent. */
+export function findWordBox(words: PageWord[], texts: string[]): Box | null {
+    let joined = ""
+    const owner: number[] = []
+    words.forEach((word, index) => {
+        for (const char of word.text) {
+            if (/\s/.test(char)) continue
+            joined += char.toLowerCase()
+            owner.push(index)
+        }
+    })
+    for (const text of texts) {
+        const needle = compact(text)
+        if (needle.length < MIN_SEARCH_LENGTH) continue
+        const start = joined.indexOf(needle)
+        if (start < 0) continue
+        const span = words.slice(owner[start], owner[start + needle.length - 1] + 1)
+        const left = Math.min(...span.map((word) => word.x))
+        const top = Math.min(...span.map((word) => word.y))
+        const right = Math.max(...span.map((word) => word.x + word.width))
+        const bottom = Math.max(...span.map((word) => word.y + word.height))
+        const pad = 0.4
+        const x = Math.max(0, left - pad)
+        const y = Math.max(0, top - pad)
+        return { x, y, width: Math.min(100 - x, right - left + pad * 2), height: Math.min(100 - y, bottom - top + pad * 2) }
+    }
+    return null
+}

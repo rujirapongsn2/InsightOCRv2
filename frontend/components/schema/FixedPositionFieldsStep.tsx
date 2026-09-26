@@ -2,12 +2,13 @@
 
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type PointerEvent } from "react"
 import { Document, Page, pdfjs } from "react-pdf"
-import { AlertCircle, ChevronLeft, ChevronRight, FileText, Loader2, Plus, ScanLine, Sparkles, Trash2, ZoomIn, ZoomOut } from "lucide-react"
+import { AlertCircle, ChevronLeft, ChevronRight, FileText, Loader2, LocateFixed, Plus, ScanLine, Sparkles, Trash2, ZoomIn, ZoomOut } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { useSchemaWizard } from "@/contexts/SchemaWizardContext"
 import type { ArrayColumn, ArrayConfig, BboxLocator, SchemaField } from "@/types/schema"
 import { getApiBaseUrl } from "@/lib/api"
 import { isValidFieldName } from "@/lib/schema-validation"
+import { evidenceSearchTexts, findTextBox, findWordBox, type Box, type PageWord, type TextItemLike } from "@/lib/evidence-search"
 import "react-pdf/dist/Page/AnnotationLayer.css"
 import "react-pdf/dist/Page/TextLayer.css"
 
@@ -17,6 +18,19 @@ const genId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
 const BASE_PAGE_WIDTH = 760
 
 type Selection = { x: number; y: number; width: number; height: number } | null
+type PdfProxy = {
+  numPages: number
+  getPage: (page: number) => Promise<{
+    getViewport: (options: { scale: number }) => { width: number; height: number; convertToViewportRectangle: (rect: number[]) => number[] }
+    getTextContent: () => Promise<{ items: Array<Partial<TextItemLike>> }>
+  }>
+}
+
+/** Room for longer values than the sample's: widen to the right, keep the line height. */
+function widenForValues(box: Box): Selection {
+  const width = Math.min(100 - box.x, Math.max(box.width * 1.5, box.width + 4))
+  return { x: Number(box.x.toFixed(2)), y: Number(box.y.toFixed(2)), width: Number(width.toFixed(2)), height: Number(box.height.toFixed(2)) }
+}
 type PreviewValue = string | number | boolean | null | Array<Record<string, unknown>>
 
 const defaultArrayConfig = (): ArrayConfig => ({
@@ -71,6 +85,15 @@ export function FixedPositionFieldsStep() {
   const [zoom, setZoom] = useState(1)
   const [draggingColumnBoundary, setDraggingColumnBoundary] = useState<{ fieldId: string; boundaryIndex: number } | null>(null)
   const surfaceRef = useRef<HTMLDivElement>(null)
+  const pdfRef = useRef<PdfProxy | null>(null)
+  // Find a value in the sample and propose its box.
+  const [findValue, setFindValue] = useState("")
+  const [findName, setFindName] = useState("")
+  const [findType, setFindType] = useState<SchemaField["type"]>("text")
+  const [finding, setFinding] = useState(false)
+  const [findMessage, setFindMessage] = useState<string | null>(null)
+  const [pendingField, setPendingField] = useState<{ name: string; type: SchemaField["type"] } | null>(null)
+  const ocrWords = useRef<Record<number, PageWord[]> | null>(null)
 
   const fileUrl = useMemo(() => file ? URL.createObjectURL(file) : null, [file])
   useEffect(() => () => { if (fileUrl) URL.revokeObjectURL(fileUrl) }, [fileUrl])
@@ -83,6 +106,9 @@ export function FixedPositionFieldsStep() {
       return
     }
     setFile(selected)
+    ocrWords.current = null
+    setPendingField(null)
+    setFindMessage(null)
     setFields([])
     setPreviewValues({})
     setRawPreviewValues({})
@@ -107,6 +133,7 @@ export function FixedPositionFieldsStep() {
     const point = toPercent(event)
     if (!point) return
     event.currentTarget.setPointerCapture(event.pointerId)
+    setPendingField(null) // a box drawn by hand is a new field, not the value that was searched for
     setDragStart(point)
     setSelection({ ...point, width: 0, height: 0 })
   }
@@ -140,15 +167,71 @@ export function FixedPositionFieldsStep() {
       width: Number(selection.width.toFixed(2)),
       height: Number(selection.height.toFixed(2)),
     }
+    const type = pendingField?.type || "text"
     addField({
       id: genId(),
-      name: `field_${fields.length + 1}`,
-      type: "text",
+      name: pendingField?.name || `field_${fields.length + 1}`,
+      type,
       description: "",
       required: false,
       locator: { ...locator, clean_placeholders: true },
+      array_config: type === "array" ? defaultArrayConfig() : undefined,
     })
     setSelection(null)
+    setPendingField(null)
+  }
+
+  const readOcrWords = async (): Promise<Record<number, PageWord[]>> => {
+    if (ocrWords.current) return ocrWords.current
+    const token = localStorage.getItem("token")
+    const formData = new FormData()
+    formData.append("file", file!)
+    const response = await fetch(`${getApiBaseUrl()}/schemas/sample-words`, {
+      method: "POST", headers: token ? { Authorization: `Bearer ${token}` } : {}, body: formData,
+    })
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(typeof data.detail === "string" ? data.detail : "Could not read the scanned sample")
+    ocrWords.current = Object.fromEntries(Object.entries(data.pages || {}).map(([page, words]) => [Number(page), words as PageWord[]]))
+    return ocrWords.current
+  }
+
+  // Look for the typed value in the PDF text first, then in words read by OCR (scanned forms).
+  const findInForm = async () => {
+    const pdf = pdfRef.current
+    const texts = evidenceSearchTexts(findValue, null, findType)
+    if (!pdf || !texts.length) return
+    setFinding(true)
+    setFindMessage(null)
+    try {
+      let found: { page: number; box: Box } | null = null
+      for (let page = 1; page <= pdf.numPages && !found; page += 1) {
+        const proxy = await pdf.getPage(page)
+        const content = await proxy.getTextContent()
+        const items = content.items.filter((item): item is TextItemLike =>
+          typeof item.str === "string" && Array.isArray(item.transform) && typeof item.width === "number")
+        const box = findTextBox(items, proxy.getViewport({ scale: 1 }), texts)
+        if (box) found = { page, box }
+      }
+      if (!found) {
+        const words = await readOcrWords()
+        for (const [page, pageWords] of Object.entries(words)) {
+          const box = findWordBox(pageWords, texts)
+          if (box) { found = { page: Number(page), box }; break }
+        }
+      }
+      if (!found) {
+        setFindMessage(`"${findValue}" was not found in this form. Check the spelling, or draw the box yourself.`)
+        return
+      }
+      setPageNumber(found.page)
+      setSelection(widenForValues(found.box))
+      setPendingField({ name: findName.trim(), type: findType })
+      setFindMessage(`Found on page ${found.page}. The box is widened so longer values fit; adjust it if needed, then choose Add field.`)
+    } catch (err) {
+      setFindMessage(err instanceof Error ? err.message : "Could not search the form")
+    } finally {
+      setFinding(false)
+    }
   }
 
   const addCoordinateField = () => {
@@ -358,7 +441,7 @@ export function FixedPositionFieldsStep() {
                   onPointerMove={handlePointerMove}
                   onPointerUp={handlePointerUp}
                 >
-                  {fileUrl && <Document file={fileUrl} loading={<div className="grid h-72 w-[760px] place-items-center"><Loader2 className="h-5 w-5 animate-spin" /></div>} onLoadSuccess={({ numPages: pages }) => setNumPages(pages)}>
+                  {fileUrl && <Document file={fileUrl} loading={<div className="grid h-72 w-[760px] place-items-center"><Loader2 className="h-5 w-5 animate-spin" /></div>} onLoadSuccess={(pdf) => { pdfRef.current = pdf as unknown as PdfProxy; setNumPages(pdf.numPages) }}>
                     <Page pageNumber={pageNumber} width={Math.round(BASE_PAGE_WIDTH * zoom)} renderTextLayer={false} renderAnnotationLayer={false} />
                   </Document>}
                   {fields.filter((field) => field.locator?.page === pageNumber).map((field) => field.locator && (
@@ -409,6 +492,25 @@ export function FixedPositionFieldsStep() {
             </section>
 
             <section className="min-w-0 space-y-2 lg:max-h-[68vh] lg:overflow-y-auto lg:pr-1">
+              <form className="space-y-2 rounded-lg border border-blue-100 bg-blue-50/50 p-3" onSubmit={(event) => { event.preventDefault(); findInForm() }}>
+                <p className="flex items-center gap-2 text-sm font-medium text-slate-700"><LocateFixed className="h-4 w-4 text-blue-600" />Find a value in this form</p>
+                <p className="text-xs text-slate-600">Type a value exactly as it appears in the sample, and the box is placed for you.</p>
+                <input id="fixed-find-value" aria-label="Value in the sample" placeholder="e.g. 0105558076541" value={findValue}
+                  onChange={(event) => setFindValue(event.target.value)} className="w-full rounded border border-slate-300 px-2 py-1.5 text-sm" />
+                <div className="flex gap-2">
+                  <input id="fixed-find-name" aria-label="Field name for the value" placeholder="Field name, e.g. tax_id" value={findName}
+                    onChange={(event) => setFindName(event.target.value)} className="min-w-0 flex-1 rounded border border-slate-300 px-2 py-1.5 text-sm" />
+                  <select id="fixed-find-type" aria-label="Field type for the value" value={findType} onChange={(event) => setFindType(event.target.value as SchemaField["type"])}
+                    className="rounded border border-slate-300 px-2 py-1.5 text-sm">
+                    <option value="text">Text</option><option value="number">Number</option><option value="date">Date</option><option value="currency">Currency</option>
+                  </select>
+                </div>
+                <Button type="submit" size="sm" variant="outline" disabled={finding || !findValue.trim() || !numPages}>
+                  {finding ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" /> : <LocateFixed className="mr-1.5 h-4 w-4" />}
+                  {finding ? "Searching (scanned forms take a few seconds)..." : "Find in form"}
+                </Button>
+                {findMessage && <p role="status" className="text-xs text-slate-700">{findMessage}</p>}
+              </form>
               <div className="sticky top-0 z-10 flex items-center justify-between gap-2 bg-white pb-2 text-sm font-medium text-slate-700"><span className="flex items-center gap-2"><ScanLine className="h-4 w-4 text-emerald-600" />Fields</span><span className="text-xs font-normal text-slate-500">{fields.length} selected</span></div>
               {fields.length === 0 ? <div className="rounded-lg border border-dashed border-slate-300 p-4 text-sm text-slate-500">Draw a box, or add a field by coordinates.</div> : fields.map((field) => {
                 const locator = field.locator

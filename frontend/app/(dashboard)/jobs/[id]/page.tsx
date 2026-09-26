@@ -13,7 +13,7 @@ import { useAuth } from "@/components/auth-provider"
 import LlmResultRenderer from "@/components/LlmResultRenderer"
 import AgentPanel from "@/components/agent/AgentPanel"
 import { MappingPanel, type MappingReport } from "@/components/document/MappingPanel"
-import { evidenceSearchTexts, type Highlight } from "@/lib/evidence-search"
+import { evidenceSearchTexts, pageWordsFrom, type Highlight, type PageWord } from "@/lib/evidence-search"
 import { generateExportHtml, generateExportText } from "@/lib/exportReportHtml"
 
 const PDFViewer = dynamic(
@@ -153,6 +153,9 @@ export default function JobDetailPage() {
     const [documentRetryEngines, setDocumentRetryEngines] = useState<Record<string, OcrEngine>>({})
     const [retryingDocId, setRetryingDocId] = useState<string | null>(null)
     const [mappingHighlight, setMappingHighlight] = useState<Highlight | null>(null)
+    // OCR word positions of the document under review (the job list omits ocr_pages).
+    const [reviewPageWords, setReviewPageWords] = useState<Record<number, PageWord[]>>({})
+    const reviewDocId = useRef<string | null>(null)
     const fileInputRef = useRef<HTMLInputElement>(null)
     const pollingIntervalsRef = useRef<Map<string, AbortController>>(new Map())
     const [showIntegrationModal, setShowIntegrationModal] = useState(false)
@@ -753,6 +756,17 @@ export default function JobDetailPage() {
 
     const handleReview = (doc: Document) => {
         setMappingHighlight(null)
+        setReviewPageWords({})
+        reviewDocId.current = doc.id
+        const token = typeof window !== "undefined" ? localStorage.getItem("token") : null
+        fetch(`${apiBase}/documents/${doc.id}`, { headers: token ? { Authorization: `Bearer ${token}` } : {} })
+            .then((res) => res.ok ? res.json() : null)
+            .then((detail) => {
+                // Ignore a slow answer for a document the reviewer has already left.
+                if (!detail || reviewDocId.current !== doc.id) return
+                setReviewPageWords(pageWordsFrom(detail.ocr_pages))
+            })
+            .catch(() => { /* positions are optional; the text layer is still searched */ })
         setReviewDoc(doc)
         setRejectConfirm(false)
         setEditedOcrText(doc.ocr_text || "")
@@ -1554,6 +1568,7 @@ export default function JobDetailPage() {
                                             <PDFViewer
                                                 fileUrl={pdfFileUrl}
                                                 highlight={mappingHighlight}
+                                                pageWords={reviewPageWords}
                                             />
                                         )
                                     }

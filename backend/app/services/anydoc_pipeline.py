@@ -311,6 +311,7 @@ def _ocr_page_with_providers(
     schema design remains independent from the legacy external OCR endpoint.
     """
     def run_tesseract() -> dict[str, Any]:
+        words: list[dict[str, Any]] = []
         text = process_tesseract_ocr(
             image_path,
             language=settings.TESSERACT_OCR_LANGUAGE,
@@ -318,10 +319,15 @@ def _ocr_page_with_providers(
                 deadline_monotonic,
                 settings.TESSERACT_OCR_TIMEOUT_SECONDS,
             ),
+            words_out=words,
         )
         if not text:
             raise TesseractOcrError("TesseractOCR returned no text")
-        return {"page_number": page_number, "ocr_text": text, "provider": "tesseract_ocr"}
+        page = {"page_number": page_number, "ocr_text": text, "provider": "tesseract_ocr"}
+        if words:
+            # Word positions (percent of the page) let reviewers see values on scanned pages.
+            page["words"] = words
+        return page
 
     def run_softnix() -> dict[str, Any]:
         if not allow_softnix_ocr:
