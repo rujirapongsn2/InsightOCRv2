@@ -1,9 +1,10 @@
 "use client"
 
-import { useState, useEffect, useMemo } from "react"
+import { useState, useEffect, useMemo, useRef } from "react"
 import { Document, Page, pdfjs } from "react-pdf"
-import { ZoomIn, ZoomOut, RotateCw, ChevronLeft, ChevronRight } from "lucide-react"
+import { ZoomIn, ZoomOut, RotateCw, ChevronLeft, ChevronRight, SearchX } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import { findTextBox, type Box, type Highlight, type TextItemLike } from "@/lib/evidence-search"
 import "react-pdf/dist/Page/AnnotationLayer.css"
 import "react-pdf/dist/Page/TextLayer.css"
 
@@ -13,7 +14,15 @@ pdfjs.GlobalWorkerOptions.workerSrc = `//unpkg.com/pdfjs-dist@${pdfjs.version}/b
 interface PDFViewerProps {
   fileUrl: string
   className?: string
-  highlight?: { page?: number; bbox?: { x: number; y: number; width: number; height: number } } | null
+  highlight?: Highlight | null
+}
+
+type PdfProxy = {
+  numPages: number
+  getPage: (page: number) => Promise<{
+    getViewport: (options: { scale: number }) => { width: number; height: number; convertToViewportRectangle: (rect: number[]) => number[] }
+    getTextContent: () => Promise<{ items: Array<Partial<TextItemLike>> }>
+  }>
 }
 
 export function PDFViewer({ fileUrl, className = "", highlight }: PDFViewerProps) {
@@ -24,12 +33,67 @@ export function PDFViewer({ fileUrl, className = "", highlight }: PDFViewerProps
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [pdfData, setPdfData] = useState<Uint8Array | null>(null)
+  const pdfRef = useRef<PdfProxy | null>(null)
+  // Where the highlighted text was found: a stored bbox, or one located in the text layer.
+  const [located, setLocated] = useState<{ page: number; bbox: Box } | null>(null)
+  const [searchState, setSearchState] = useState<"idle" | "searching" | "not_found">("idle")
+  const boxRef = useRef<HTMLDivElement | null>(null)
+
   useEffect(() => {
-    if (highlight?.page && highlight.page <= numPages) {
-      setPageNumber(highlight.page)
+    let cancelled = false
+    setLocated(null)
+    setSearchState("idle")
+    if (!highlight || !numPages) return
+    const pageExists = !!highlight.page && highlight.page >= 1 && highlight.page <= numPages
+    if (pageExists) {
+      setPageNumber(highlight.page!)
       setRotation(0)
     }
+    // A stored box is only usable on a page that exists; otherwise search the text instead.
+    if (pageExists && highlight.bbox) {
+      setLocated({ page: highlight.page!, bbox: highlight.bbox })
+      return
+    }
+    if (!highlight.texts?.length || !pdfRef.current) {
+      if (highlight.bbox) setSearchState("not_found")
+      return
+    }
+    const pdf = pdfRef.current
+    const texts = highlight.texts
+    // The page the evidence names first, then every other page.
+    const order = [
+      ...(pageExists ? [highlight.page!] : []),
+      ...Array.from({ length: numPages }, (_, index) => index + 1).filter((page) => page !== highlight.page),
+    ]
+    setSearchState("searching")
+    ;(async () => {
+      for (const page of order) {
+        const proxy = await pdf.getPage(page)
+        const content = await proxy.getTextContent()
+        const items = content.items.filter((item): item is TextItemLike =>
+          typeof item.str === "string" && Array.isArray(item.transform) && typeof item.width === "number")
+        const bbox = findTextBox(items, proxy.getViewport({ scale: 1 }), texts)
+        if (cancelled) return
+        if (bbox) {
+          setLocated({ page, bbox })
+          setPageNumber(page)
+          setRotation(0)
+          setSearchState("idle")
+          return
+        }
+      }
+      if (!cancelled) setSearchState("not_found")
+    })().catch(() => { if (!cancelled) setSearchState("not_found") })
+    return () => { cancelled = true }
   }, [highlight, numPages])
+
+  // Bring the box into view once per new result; later re-renders (zoom, status) must not pull the view back.
+  useEffect(() => {
+    if (!located) return
+    const frame = window.requestAnimationFrame(() =>
+      boxRef.current?.scrollIntoView({ block: "center", inline: "center", behavior: "smooth" }))
+    return () => window.cancelAnimationFrame(frame)
+  }, [located])
 
   // Fetch PDF with auth headers
   useEffect(() => {
@@ -84,8 +148,9 @@ export function PDFViewer({ fileUrl, className = "", highlight }: PDFViewerProps
     return pdfData ? { data: pdfData } : null
   }, [pdfData])
 
-  const onDocumentLoadSuccess = ({ numPages }: { numPages: number }) => {
-    setNumPages(numPages)
+  const onDocumentLoadSuccess = (pdf: { numPages: number }) => {
+    pdfRef.current = pdf as unknown as PdfProxy
+    setNumPages(pdf.numPages)
     setLoading(false)
     setError(null)
   }
@@ -153,6 +218,15 @@ export function PDFViewer({ fileUrl, className = "", highlight }: PDFViewerProps
           </Button>
         </div>
 
+        {highlight && searchState !== "idle" && (
+          <span role="status" className={`inline-flex items-center gap-1 text-xs ${searchState === "not_found" ? "text-amber-700" : "text-slate-500"}`}>
+            {searchState === "searching" ? "Finding the value in the document..." : <>
+              <SearchX className="h-3.5 w-3.5" />
+              {highlight.label ? `${highlight.label}: ` : ""}not found in this PDF&apos;s text (scanned pages have no text to search)
+            </>}
+          </span>
+        )}
+
         {/* Page Navigation */}
         {numPages > 1 && (
           <div className="flex items-center gap-2">
@@ -217,10 +291,11 @@ export function PDFViewer({ fileUrl, className = "", highlight }: PDFViewerProps
                 renderAnnotationLayer={true}
                 className="shadow-lg"
               />
-              {highlight?.page === pageNumber && highlight.bbox && rotation === 0 && <div
-                aria-label="Source evidence region"
-                className="pointer-events-none absolute border-2 border-amber-500 bg-amber-300/20"
-                style={{ left: `${highlight.bbox.x}%`, top: `${highlight.bbox.y}%`, width: `${highlight.bbox.width}%`, height: `${highlight.bbox.height}%` }}
+              {located?.page === pageNumber && rotation === 0 && <div
+                ref={boxRef}
+                aria-label={highlight?.label ? `Source of ${highlight.label}` : "Source evidence region"}
+                className="pointer-events-none absolute rounded-sm border-2 border-amber-500 bg-amber-300/25"
+                style={{ left: `${located.bbox.x}%`, top: `${located.bbox.y}%`, width: `${located.bbox.width}%`, height: `${located.bbox.height}%` }}
               />}
               </div>
             </Document>

@@ -11,7 +11,7 @@ export type MappingReport = { status?: string; fields?: Record<string, Evidence>
 
 export function MappingPanel({ documentId, report, onEvidence, onProposal }: {
     documentId: string; report?: MappingReport;
-    onEvidence: (evidence: Evidence) => void;
+    onEvidence: (name: string, evidence: Evidence) => void;
     onProposal: (values: Record<string, unknown>) => void;
 }) {
     const [engine, setEngine] = useState("auto")
@@ -91,7 +91,8 @@ export function MappingPanel({ documentId, report, onEvidence, onProposal }: {
                             {item.status === "source_matched" ? <Check className="h-3 w-3" /> : <AlertTriangle className="h-3 w-3" />}
                             {({ source_matched: "Source matched", needs_review: "Needs review", missing: "Not returned", failed: "Failed" } as Record<string, string>)[item.status || ""] || "Needs review"}
                         </span>
-                        {item.page && <button type="button" title={`Show source page ${item.page}`} aria-label={`Show evidence for ${name}`} onClick={() => onEvidence(item)}><Search className="h-4 w-4" /></button>}
+                        {(item.page || item.bbox || item.quote || item.raw_text || item.status === "source_matched") &&
+                            <button type="button" title="Show where this value is in the document" aria-label={`Show evidence for ${name}`} onClick={() => onEvidence(name, item)}><Search className="h-4 w-4" /></button>}
                         <button type="button" disabled={busy} title="Retry this field" aria-label={`Retry mapping ${name}`} onClick={() => retry(name)}><RefreshCw className="h-3.5 w-3.5" /></button>
                     </div>
                     <p className="mt-1 text-slate-500">{item.reason}</p>

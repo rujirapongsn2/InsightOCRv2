@@ -3,7 +3,7 @@
 import { useEffect, useState, useRef, useMemo } from "react"
 import { useParams, useRouter } from "next/navigation"
 import Link from "next/link"
-import { ArrowLeft, Upload, FileText, Loader2, Eye, X, Trash2, AlertTriangle, Bot, ChevronDown, Pencil, Check, Plug, Workflow, Cloud, Send, Braces, RefreshCw } from "lucide-react"
+import { ArrowLeft, Upload, FileText, Loader2, Eye, X, Trash2, AlertTriangle, Bot, ChevronDown, Pencil, Check, Plug, Workflow, Cloud, Send, Braces, RefreshCw, LocateFixed } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Modal } from "@/components/ui/modal"
 import { Input } from "@/components/ui/input"
@@ -13,6 +13,7 @@ import { useAuth } from "@/components/auth-provider"
 import LlmResultRenderer from "@/components/LlmResultRenderer"
 import AgentPanel from "@/components/agent/AgentPanel"
 import { MappingPanel, type MappingReport } from "@/components/document/MappingPanel"
+import { evidenceSearchTexts, type Highlight } from "@/lib/evidence-search"
 import { generateExportHtml, generateExportText } from "@/lib/exportReportHtml"
 
 const PDFViewer = dynamic(
@@ -151,7 +152,7 @@ export default function JobDetailPage() {
     const [retryEngine, setRetryEngine] = useState<OcrEngine>("tesseract_ocr")
     const [documentRetryEngines, setDocumentRetryEngines] = useState<Record<string, OcrEngine>>({})
     const [retryingDocId, setRetryingDocId] = useState<string | null>(null)
-    const [mappingHighlight, setMappingHighlight] = useState<{ page?: number; bbox?: { x: number; y: number; width: number; height: number } } | null>(null)
+    const [mappingHighlight, setMappingHighlight] = useState<Highlight | null>(null)
     const fileInputRef = useRef<HTMLInputElement>(null)
     const pollingIntervalsRef = useRef<Map<string, AbortController>>(new Map())
     const [showIntegrationModal, setShowIntegrationModal] = useState(false)
@@ -1023,6 +1024,19 @@ export default function JobDetailPage() {
         return reviewDoc ? `${apiBase}/documents/${reviewDoc.id}/file` : ""
     }, [reviewDoc?.id, apiBase])
 
+    // Show where a field's value is on the PDF: the stored box for fixed-position
+    // fields, otherwise the page text is searched for the quote or the value.
+    const locateField = (name: string, value: unknown, type?: string,
+                         given?: { page?: number; bbox?: Highlight["bbox"]; quote?: string; raw_text?: string }) => {
+        const evidence = given ?? (reviewDoc?.extraction_metadata?.mapping as MappingReport | undefined)?.fields?.[name]
+        setMappingHighlight({
+            page: evidence?.page, bbox: evidence?.bbox, label: name,
+            texts: evidenceSearchTexts(value, evidence, type),
+        })
+    }
+    const reviewIsPdf = !!reviewDoc && !(previewImageExtensions.has(reviewDoc.filename.toLowerCase().split('.').pop() || '')
+        || reviewDoc.mime_type?.startsWith('image/'))
+
     if (loading) return <div>Loading...</div>
     if (!job) return <div>Job not found</div>
 
@@ -1650,7 +1664,9 @@ export default function JobDetailPage() {
                                         </div>
                                         <MappingPanel key={reviewDoc.id} documentId={reviewDoc.id}
                                             report={typeof reviewDoc.extraction_metadata?.mapping === "object" ? reviewDoc.extraction_metadata.mapping as MappingReport : undefined}
-                                            onEvidence={setMappingHighlight}
+                                            onEvidence={(name, evidence) => locateField(name,
+                                                editedStructuredData && !Array.isArray(editedStructuredData) ? editedStructuredData[name] : undefined,
+                                                reviewSchema?.fields.find((field) => field.name === name)?.type, evidence)}
                                             onProposal={(values) => {
                                                 setEditedStructuredData(values)
                                                 setArrayDrafts({})
@@ -1711,7 +1727,16 @@ export default function JobDetailPage() {
                                                     const inputType = field.type === "date" ? "date" : field.type === "number" || field.type === "currency" ? "number" : "text"
                                                     return (
                                                         <label key={field.name} className="block text-sm font-medium text-slate-700">
-                                                            {label}
+                                                            <span className="flex items-center justify-between gap-2">
+                                                                {label}
+                                                                {reviewIsPdf && stringValue && (
+                                                                    <button type="button" onClick={(event) => { event.preventDefault(); locateField(field.name, value, field.type) }}
+                                                                        className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs font-normal text-blue-700 hover:bg-blue-50"
+                                                                        title={`Show where ${field.name} is in the document`}>
+                                                                        <LocateFixed className="h-3.5 w-3.5" /> Show in document
+                                                                    </button>
+                                                                )}
+                                                            </span>
                                                             <Input
                                                                 type={inputType}
                                                                 value={stringValue}
