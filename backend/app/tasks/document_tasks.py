@@ -45,7 +45,10 @@ logger = logging.getLogger(__name__)
 @celery_app.task(name="app.tasks.document_tasks.test_mapping_providers_task", soft_time_limit=300, time_limit=330)
 def test_mapping_providers_task(user_id: str, run_id: str):
     from types import SimpleNamespace
-    from app.services.field_mapping import map_fields
+    from app.models.setting import Setting
+    from app.services.field_mapping import (
+        llm_mapping_configured, map_fields, softnix_structure_configured, typesafe_is_configured,
+    )
     client = redis_lib.from_url(settings.REDIS_URL)
     key = f"mapping_test:{user_id}:{run_id}"
     checks = []
@@ -56,9 +59,27 @@ def test_mapping_providers_task(user_id: str, run_id: str):
                 {"name": "reference", "type": "text", "required": True},
                 {"name": "total", "type": "currency", "required": True},
             ])
+            setting = db.query(Setting).first()
+            configured = {
+                "softnix": softnix_structure_configured(setting),
+                "jev": typesafe_is_configured(setting),
+                "llm": llm_mapping_configured(db, setting),
+            }
             for engine in ("softnix", "jev", "llm"):
+                if not configured[engine]:
+                    # An engine nobody set up is not a failure; say so instead of calling it.
+                    checks.append({"engine": engine, "passed": None, "skipped": True, "reason": "not_configured",
+                                   "attempts": [], "elapsed_seconds": 0})
+                    client.set(key, json.dumps({"status": "running", "checks": checks}), ex=1800)
+                    continue
                 values, report = map_fields("Reference: MAP-42\nTotal: 25", sample, db, engine=engine)
-                checks.append({"engine": engine, "passed": values == {"reference": "MAP-42", "total": 25},
+                expected = {"reference": "MAP-42", "total": 25}
+                # Which probe fields did not come back as expected, and why (no provider bodies).
+                problems = [{"field": name, "value": values.get(name),
+                             "status": (report["fields"].get(name) or {}).get("status"),
+                             "reason": (report["fields"].get(name) or {}).get("reason")}
+                            for name, want in expected.items() if values.get(name) != want]
+                checks.append({"engine": engine, "passed": values == expected, "problems": problems,
                                "attempts": report["attempts"], "elapsed_seconds": report["elapsed_seconds"]})
                 client.set(key, json.dumps({"status": "running", "checks": checks}), ex=1800)
         client.set(key, json.dumps({"status": "completed", "checks": checks}), ex=1800)

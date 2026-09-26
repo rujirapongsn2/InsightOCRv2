@@ -21,6 +21,7 @@ import logging
 import re
 import os
 import socket
+import time
 from contextlib import ExitStack
 from io import BytesIO
 from datetime import datetime, timezone
@@ -171,6 +172,7 @@ NODE_TYPES: List[Dict[str, Any]] = [
             {"name": "status", "label": "สถานะรวมทุกเอกสาร (ยึดฉบับที่แย่ที่สุด)"},
             {"name": "first_document_status", "label": "สถานะของเอกสารแรก"},
             {"name": "incomplete_documents", "label": "เอกสารที่ดึงข้อมูลไม่ครบ"},
+            {"name": "skipped_documents", "label": "เอกสารที่ยังไม่ได้ดึง (หมดเวลา)"},
             {"name": "evidence", "label": "หลักฐานของแต่ละฟิลด์ (เอกสารแรก)"},
             {"name": "review_fields", "label": "ฟิลด์ที่ควรตรวจซ้ำ (เอกสารแรก)"},
             {"name": "unresolved_fields", "label": "ฟิลด์ที่ดึงไม่ได้ (เอกสารแรก)"},
@@ -2246,6 +2248,48 @@ def _jev_decision_timeout() -> float:
     return float(app_settings.JEV_DECISION_TIMEOUT_SECONDS)
 
 
+SCORE_SCALE_RANGE = {"0_100": (0.0, 100.0), "0_10": (0.0, 10.0), "1_5": (1.0, 5.0)}
+
+
+def jev_threshold_issues(ntype: str, config: dict) -> List[tuple]:
+    """(field, message) for thresholds outside the range the node can produce.
+
+    A Score threshold of 80 on a 1–5 scale, or a probability of 70 instead of
+    0.7, would make ``threshold_met`` always false (or always true) without any
+    error. Blank values are allowed (no threshold); templated values are checked at run time.
+    """
+    checks: List[tuple] = []
+    if ntype == "jev_score":
+        scale = config.get("scale") or "0_100"
+        low, high = SCORE_SCALE_RANGE.get(scale, (0.0, 100.0))
+        checks.append(("threshold", low, high, f"คะแนนขั้นต่ำต้องอยู่ในช่วงคะแนน {low:g}–{high:g}"))
+    elif ntype == "jev_choice":
+        if (config.get("pick_rule") or "highest") == "first_above_threshold":
+            checks.append(("probability_threshold", 0.0, 1.0, "โอกาสขั้นต่ำต้องอยู่ระหว่าง 0 ถึง 1 (เช่น 0.7)"))
+        checks.append(("min_confidence", 0.0, 1.0, "ความมั่นใจขั้นต่ำต้องอยู่ระหว่าง 0 ถึง 1 (เช่น 0.6)"))
+    elif ntype == "jev_noul":
+        checks.append(("threshold", 0.0, 1.0, "เกณฑ์ต้องอยู่ระหว่าง 0 ถึง 1 (เช่น 0.7)"))
+    issues: List[tuple] = []
+    for name, low, high, message in checks:
+        value = config.get(name)
+        if value is None or (isinstance(value, str) and (not value.strip() or "{{" in value)):
+            continue
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            issues.append((name, "ต้องเป็นตัวเลข — " + message))
+            continue
+        if not (low <= number <= high):
+            issues.append((name, message))
+    return issues
+
+
+def _check_jev_thresholds(ntype: str, label: str, config: dict) -> None:
+    issues = jev_threshold_issues(ntype, config)
+    if issues:
+        raise NodeExecutionError(f"{label}: " + "; ".join(message for _field, message in issues))
+
+
 def _jev_score_scale_index(scale: str) -> int:
     """Number of API levels backing each UI scale."""
     return len(SCORE_SCALES.get(scale) or SCORE_SCALES["0_100"])
@@ -2352,6 +2396,8 @@ def _exec_jev_score(db: Session, config: dict, context: dict, log: Callable[[str
     Single outbound; downstream Condition reads `score` / `threshold_met`.
     """
     from app.services import typesafe as ts_mod
+
+    _check_jev_thresholds("jev_score", "Score", config)
 
     score_name = str(config.get("score_name") or "").strip()
     if not score_name:
@@ -2465,6 +2511,8 @@ def _exec_jev_choice(db: Session, config: dict, context: dict, log: Callable[[st
     """
     from app.services import typesafe as ts_mod
 
+    _check_jev_thresholds("jev_choice", "Choice", config)
+
     choice_name = str(config.get("choice_name") or "").strip()
     if not choice_name:
         raise NodeExecutionError("ต้องระบุชื่อการเลือก (choice_name)")
@@ -2571,6 +2619,8 @@ def _exec_jev_noul(db: Session, config: dict, context: dict, log: Callable[[str]
     branching belongs to the downstream Condition node.
     """
     from app.services import typesafe as ts_mod
+
+    _check_jev_thresholds("jev_noul", "Noul", config)
 
     noul_name = str(config.get("noul_name") or "").strip()
     if not noul_name:
@@ -2708,7 +2758,20 @@ def _exec_field_mapping(db: Session, config: dict, context: dict, log: Callable[
     storage = get_storage_service()
     mapped: List[Dict[str, Any]] = []
     warnings: List[str] = []
-    for doc in docs:
+    skipped_documents: List[str] = []
+    # Each document may take up to MAPPING_TOTAL_TIMEOUT_SECONDS; without a node budget
+    # 50 documents could run for hours and the whole workflow task would be killed.
+    deadline = time.monotonic() + settings.WORKFLOW_FIELD_MAPPING_BUDGET_SECONDS
+    for position, doc in enumerate(docs):
+        remaining = deadline - time.monotonic()
+        if remaining < settings.WORKFLOW_FIELD_MAPPING_MIN_DOCUMENT_SECONDS:
+            skipped_documents = [d.filename for d in docs[position:]]
+            warnings.append(
+                f"หมดเวลาของ node ({settings.WORKFLOW_FIELD_MAPPING_BUDGET_SECONDS} วินาที) — ยังไม่ได้ดึงข้อมูล "
+                f"{len(skipped_documents)} เอกสาร ลดจำนวนเอกสารต่อรอบแล้วรันใหม่"
+            )
+            log(f"budget exhausted; skipped {len(skipped_documents)} document(s)")
+            break
         text = doc.ocr_text or ""
         if not text.strip():
             warnings.append(f"ข้าม '{doc.filename}': ไม่มีข้อความ OCR")
@@ -2720,7 +2783,8 @@ def _exec_field_mapping(db: Session, config: dict, context: dict, log: Callable[
                     file_path = stack.enter_context(storage.get_local_path(doc.file_path))
                 except Exception:  # noqa: BLE001 — file is optional (bbox fields only)
                     file_path = None
-            values, report = map_fields(text, schema, db, file_path, engine=engine, field_names=field_names)
+            values, report = map_fields(text, schema, db, file_path, engine=engine, field_names=field_names,
+                                        budget_seconds=min(settings.MAPPING_TOTAL_TIMEOUT_SECONDS, remaining))
         for attempt in report.get("attempts") or []:
             if attempt.get("status") == "skipped":
                 warnings.append(
@@ -2752,7 +2816,9 @@ def _exec_field_mapping(db: Session, config: dict, context: dict, log: Callable[
     # a batch whose later documents failed.
     severity = {"completed": 0, "partial": 1, "failed": 2}
     overall_status = max((d["status"] or "failed" for d in mapped), key=lambda s: severity.get(s, 2))
-    incomplete = [d["filename"] for d in mapped if d["status"] != "completed"]
+    if skipped_documents and overall_status == "completed":
+        overall_status = "partial"
+    incomplete = [d["filename"] for d in mapped if d["status"] != "completed"] + skipped_documents
     if len(mapped) > 1:
         warnings.append(
             f"values/evidence/review_fields เป็นของเอกสารแรก ('{first['filename']}') — ผลของทุกเอกสารอยู่ใน documents"
@@ -2763,6 +2829,7 @@ def _exec_field_mapping(db: Session, config: dict, context: dict, log: Callable[
         "status": overall_status,
         "first_document_status": first["status"],
         "incomplete_documents": incomplete,
+        "skipped_documents": skipped_documents,
         "evidence": first["fields"],
         "review_fields": first["review_fields"],
         "unresolved_fields": first["unresolved_fields"],

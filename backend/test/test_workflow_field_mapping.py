@@ -102,7 +102,7 @@ def test_stored_file_stays_available_during_mapping(monkeypatch, tmp_path):
     monkeypatch.setattr("app.services.storage.get_storage_service", lambda: FakeRemoteStorage())
     seen = {}
 
-    def fake_map_fields(text, schema, db_, file_path, engine=None, field_names=None):
+    def fake_map_fields(text, schema, db_, file_path, engine=None, field_names=None, budget_seconds=None):
         seen["path"] = file_path
         seen["exists"] = os.path.exists(file_path)
         return ({"id": "R-9"}, {"status": "completed", "engine": "auto",
@@ -124,7 +124,7 @@ def test_success_outputs_values_and_review_fields(monkeypatch):
         {"name": "id", "type": "text"}, {"name": "total", "type": "currency"}))
     monkeypatch.setattr(we, "_field_mapping_documents", lambda db, cfg, ctx, limit: [_doc()])
 
-    def fake_map_fields(text, schema, db_, file_path, engine=None, field_names=None):
+    def fake_map_fields(text, schema, db_, file_path, engine=None, field_names=None, budget_seconds=None):
         assert engine == "jev"
         return ({"id": "R-9"},
                 {"status": "partial", "engine": "jev",
@@ -150,3 +150,31 @@ def test_no_upstream_documents_fails(monkeypatch):
     monkeypatch.setattr(we, "_field_mapping_documents", lambda db, cfg, ctx, limit: [])
     with pytest.raises(we.NodeExecutionError, match="OCR"):
         we._exec_field_mapping(db, {"schema_id": "s", "engine": "auto"}, {"_node_id": "n1"}, lambda m: None)
+
+
+def test_node_budget_stops_before_the_workflow_time_limit(monkeypatch):
+    """Later documents are reported as skipped instead of the run being killed."""
+    db = Mock()
+    monkeypatch.setattr(we, "_field_mapping_setting", lambda db: None)
+    monkeypatch.setattr(we, "_field_mapping_schema", lambda db, sid: _schema({"name": "id", "type": "text"}))
+    docs = [_doc(f"d{i}", f"{i}.pdf") for i in range(4)]
+    docs = [SimpleNamespace(**{**vars(d), "file_path": None}) for d in docs]
+    monkeypatch.setattr(we, "_field_mapping_documents", lambda db, cfg, ctx, limit: docs)
+    monkeypatch.setattr(we.settings, "WORKFLOW_FIELD_MAPPING_BUDGET_SECONDS", 100)
+    monkeypatch.setattr(we.settings, "WORKFLOW_FIELD_MAPPING_MIN_DOCUMENT_SECONDS", 30)
+    clock = {"now": 0.0}
+    monkeypatch.setattr(we.time, "monotonic", lambda: clock["now"])
+    budgets = []
+
+    def fake_map_fields(text, schema, db, file_path, **kwargs):
+        budgets.append(kwargs["budget_seconds"])
+        clock["now"] += 40  # each document takes 40 s
+        return {"id": "x"}, {"status": "completed", "attempts": [], "fields": {}, "review_fields": [],
+                             "unresolved_fields": [], "missing_fields": [], "engine": "auto"}
+
+    monkeypatch.setattr("app.services.field_mapping.map_fields", fake_map_fields)
+    out = we._exec_field_mapping(db, {"schema_id": "s", "engine": "auto"}, {"_node_id": "n1"}, lambda m: None)
+
+    assert out["count"] == 2 and budgets == [100, 60]
+    assert out["skipped_documents"] == ["2.pdf", "3.pdf"]
+    assert out["status"] == "partial" and out["incomplete_documents"] == ["2.pdf", "3.pdf"]

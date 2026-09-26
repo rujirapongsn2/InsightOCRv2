@@ -1,11 +1,12 @@
 "use client"
 
 import { useEffect, useRef, useState } from "react"
-import { Check, AlertTriangle, Loader2, Play, Save } from "lucide-react"
+import { Check, AlertTriangle, Loader2, MinusCircle, Play, Save } from "lucide-react"
 import { getApiBaseUrl } from "@/lib/api"
 
 type Policy = { engine: string; fallback_provider_id: string | null; fallback_enabled: boolean }
-type CheckResult = { engine: string; passed: boolean; elapsed_seconds: number }
+type CheckProblem = { field: string; status?: string | null; reason?: string | null }
+type CheckResult = { engine: string; passed: boolean | null; skipped?: boolean; elapsed_seconds: number; problems?: CheckProblem[] }
 
 export function MappingSettings({ providers }: { providers: Array<{ id: string; display_name: string; is_active: boolean; provider_type?: string }> }) {
     const [policy, setPolicy] = useState<Policy>({ engine: "auto", fallback_provider_id: null, fallback_enabled: true })
@@ -90,9 +91,21 @@ export function MappingSettings({ providers }: { providers: Array<{ id: string; 
             {dirty && <span className="self-center text-xs text-amber-700">มีการแก้ไขที่ยังไม่บันทึก — กด Save mapping settings ก่อนทดสอบ</span>}
         </div>
         {message && <p role="status" className="text-sm">{message}</p>}
-        {checks.map(check => <div key={check.engine} className={`flex items-center gap-2 text-sm ${check.passed ? "text-green-700" : "text-red-700"}`}>
-            {check.passed ? <Check className="h-4 w-4" /> : <AlertTriangle className="h-4 w-4" />}
-            {check.engine}: {check.passed ? "Passed" : "Failed"} ({check.elapsed_seconds}s)
-        </div>)}
+        {checks.map(check => check.skipped
+            ? <div key={check.engine} className="flex items-center gap-2 text-sm text-slate-500">
+                <MinusCircle className="h-4 w-4" />
+                {check.engine}: ยังไม่ได้ตั้งค่า — ข้ามการทดสอบ
+            </div>
+            : <div key={check.engine} className={`flex items-center gap-2 text-sm ${check.passed ? "text-green-700" : "text-red-700"}`}>
+                {check.passed ? <Check className="h-4 w-4" /> : <AlertTriangle className="h-4 w-4" />}
+                <span>
+                    {check.engine}: {check.passed ? "Passed" : "Failed"} ({check.elapsed_seconds}s)
+                    {!check.passed && check.problems?.length ? (
+                        <span className="block text-xs text-slate-600">
+                            {check.problems.map(p => `${p.field}: ${p.status === "needs_review" ? "ต้องตรวจทาน" : "ไม่ได้ค่า"}${p.reason ? ` — ${p.reason}` : ""}`).join(" · ")}
+                        </span>
+                    ) : null}
+                </span>
+            </div>)}
     </section>
 }

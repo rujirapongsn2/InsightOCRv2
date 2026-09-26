@@ -31,6 +31,7 @@ from app.services.workflow_engine import (
     JEV_CHOICE_FALLBACK_HANDLE,
     NODE_TYPES,
     TEMPLATE_RE,
+    jev_threshold_issues,
     NodeExecutionError,
     _normalize_jev_criteria,
     _normalize_jev_options,
@@ -242,6 +243,8 @@ def validate_workflow_definition(
 
         if ntype in {"jev_score", "jev_choice"}:
             issues.extend(_validate_jev_node(nid, ntype, config, edges))
+        if ntype in {"jev_score", "jev_choice", "jev_noul"}:
+            issues.extend(_issue(nid, "error", field, message) for field, message in jev_threshold_issues(ntype, config))
 
         # Referenced Integration must exist, be owned, and match provider type.
         provider = _INTEGRATION_FIELDS.get(ntype)

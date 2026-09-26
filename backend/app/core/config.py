@@ -88,6 +88,11 @@ class Settings(BaseSettings):
     MAPPING_SOFTNIX_REQUEST_TIMEOUT_SECONDS: int = 240
     MAPPING_LLM_REQUEST_TIMEOUT_SECONDS: int = 120
     MAPPING_TOTAL_TIMEOUT_SECONDS: int = 300
+    # Total time one workflow Field Mapping node may spend across its documents.
+    # Must stay well under the workflow task's soft limit (1800 s) so the run can
+    # finish its remaining nodes instead of being killed.
+    WORKFLOW_FIELD_MAPPING_BUDGET_SECONDS: int = 1200
+    WORKFLOW_FIELD_MAPPING_MIN_DOCUMENT_SECONDS: int = 30
     # TypeSafe (Jev) mapping engine: per-request timeout and the confidence
     # under which a mapped value is marked needs_review instead of accepted.
     MAPPING_JEV_REQUEST_TIMEOUT_SECONDS: int = 90
