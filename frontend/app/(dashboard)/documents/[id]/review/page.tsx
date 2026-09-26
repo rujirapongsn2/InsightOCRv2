@@ -7,6 +7,7 @@ import { ArrowLeft, Save, CheckCircle, AlertTriangle, FileText, Image as ImageIc
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { getApiBaseUrl } from "@/lib/api"
+import { editableText, parseTypedValue } from "@/lib/schema-studio"
 
 interface Document {
     id: string
@@ -17,8 +18,18 @@ interface Document {
     reviewed_data: any
     job_id: string
     mime_type?: string
+    schema_id?: string | null
 }
 type ExtractedEntry = Record<string, any>
+type SchemaFieldInfo = { name: string; type: string; required?: boolean; description?: string | null }
+type FormField = SchemaFieldInfo & { inSchema: boolean; structured: boolean }
+
+const STRUCTURED_TYPES = new Set(["array", "object", "table"])
+
+/** A single record, or the legacy one-item list, becomes the object that is edited and saved. */
+function singleRecord(entries: ExtractedEntry[]): ExtractedEntry | null {
+    return entries.length <= 1 ? (entries[0] || {}) : null
+}
 
 export default function ReviewDocumentPage() {
     const params = useParams()
@@ -29,6 +40,10 @@ export default function ReviewDocumentPage() {
     const [loading, setLoading] = useState(true)
     const [saving, setSaving] = useState(false)
     const [fileObjectUrl, setFileObjectUrl] = useState<string | null>(null)
+    const [schemaFields, setSchemaFields] = useState<SchemaFieldInfo[]>([])
+    // Text being edited per field (single-record documents); converted back to typed values on save.
+    const [drafts, setDrafts] = useState<Record<string, string>>({})
+    const [formError, setFormError] = useState<string | null>(null)
 
     const normalizeExtractedData = (data: any): ExtractedEntry[] => {
         if (!data) return []
@@ -66,7 +81,23 @@ export default function ReviewDocumentPage() {
                     const data = await res.json()
                     setDocument(data)
                     // Initialize form data with reviewed data if exists, else extracted data
-                    setFormData(normalizeExtractedData(data.reviewed_data || data.extracted_data))
+                    const entries = normalizeExtractedData(data.reviewed_data || data.extracted_data)
+                    setFormData(entries)
+                    const record = singleRecord(entries)
+                    if (record) {
+                        setDrafts(Object.fromEntries(Object.entries(record).map(([key, value]) => [
+                            key, value !== null && typeof value === "object" ? JSON.stringify(value, null, 2) : editableText(value),
+                        ])))
+                    }
+                    if (data.schema_id) {
+                        const schemaRes = await fetch(`${getApiBaseUrl()}/schemas/${data.schema_id}`, {
+                            headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+                        })
+                        if (schemaRes.ok) {
+                            const schema = await schemaRes.json()
+                            setSchemaFields((schema.fields || []).filter((field: SchemaFieldInfo) => field?.name))
+                        }
+                    }
                 }
             } catch (error) {
                 console.error("Failed to fetch document", error)
@@ -116,11 +147,66 @@ export default function ReviewDocumentPage() {
         })
     }
 
+    const record = useMemo(() => singleRecord(formData), [formData])
+
+    // Every Schema field in Schema order (so values the engine missed can be typed in),
+    // then any other keys the document already has.
+    const formFields = useMemo<FormField[]>(() => {
+        if (!record) return []
+        const known = new Set(schemaFields.map((field) => field.name))
+        const extra = Object.keys(record).filter((key) => !known.has(key)).map((key) => {
+            const value = record[key]
+            const structured = value !== null && typeof value === "object"
+            return { name: key, type: structured ? "array" : typeof value === "number" ? "number" : "text", inSchema: false, structured }
+        })
+        return [
+            ...schemaFields.map((field) => ({
+                ...field, inSchema: true,
+                structured: STRUCTURED_TYPES.has(field.type) || (record[field.name] !== null && typeof record[field.name] === "object"),
+            })),
+            ...extra,
+        ]
+    }, [record, schemaFields])
+
+    const buildRecord = (): ExtractedEntry | null => {
+        // Nothing extracted and no schema to fill in: keep what was saved before ([]).
+        if (!record || formFields.length === 0) return null
+        const out: ExtractedEntry = { ...record }
+        for (const field of formFields) {
+            const text = drafts[field.name] ?? ""
+            if (field.structured) {
+                if (!text.trim()) { out[field.name] = null; continue }
+                try {
+                    out[field.name] = JSON.parse(text)
+                } catch {
+                    throw new Error(`${field.name}: ข้อมูลตาราง/รายการต้องเป็น JSON ที่ถูกต้อง`)
+                }
+            } else {
+                const typed = parseTypedValue(text, field.type)
+                // parseTypedValue keeps unparseable text as-is; a number field must not store "1,2OO".
+                if ((field.type === "number" || field.type === "currency") && typed !== undefined && typeof typed !== "number") {
+                    throw new Error(`${field.name}: ต้องเป็นตัวเลข เช่น 1250 หรือ 1,250.00`)
+                }
+                out[field.name] = typed === undefined ? null : typed
+            }
+        }
+        return out
+    }
+
     const handleSave = async (markAsReviewed: boolean = false) => {
+        let reviewed: ExtractedEntry | ExtractedEntry[]
+        try {
+            reviewed = buildRecord() ?? formData
+        } catch (error) {
+            setFormError(error instanceof Error ? error.message : "ข้อมูลไม่ถูกต้อง")
+            return
+        }
+        setFormError(null)
         setSaving(true)
         try {
             const payload = {
-                reviewed_data: formData,
+                // Saved as one object, like the Jobs review, so accuracy reports can read it.
+                reviewed_data: reviewed,
                 status: markAsReviewed ? "reviewed" : undefined
             }
 
@@ -257,7 +343,36 @@ export default function ReviewDocumentPage() {
                 <div className="w-1/2 bg-white p-6 overflow-auto">
                     <h3 className="font-semibold mb-6">Extracted Data</h3>
 
-                    {formData.length === 0 ? (
+                    {formError && <p role="alert" className="mb-4 rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">{formError}</p>}
+                    {record && formFields.length > 0 ? (
+                        <div className="space-y-4">
+                            {formFields.map((field) => {
+                                const inputId = `review-field-${field.name}`
+                                const text = drafts[field.name] ?? ""
+                                const missing = !(field.name in record) || record[field.name] === null || record[field.name] === ""
+                                return (
+                                    <div key={field.name} className="space-y-1">
+                                        <label htmlFor={inputId} className="flex flex-wrap items-center gap-2 text-sm font-medium">
+                                            {field.name}
+                                            {field.required && <span className="rounded bg-red-50 px-1.5 py-0.5 text-xs text-red-700">Required</span>}
+                                            {field.inSchema && missing && <span className="rounded bg-amber-50 px-1.5 py-0.5 text-xs text-amber-800">Not found — type the value if the document has it</span>}
+                                            {!field.inSchema && schemaFields.length > 0 && <span className="rounded bg-slate-100 px-1.5 py-0.5 text-xs text-slate-600">Not in schema</span>}
+                                        </label>
+                                        {field.description && <p className="text-xs text-slate-500">{field.description}</p>}
+                                        {field.structured ? (
+                                            <textarea id={inputId} value={text} rows={Math.min(12, Math.max(3, text.split("\n").length))}
+                                                onChange={(e) => setDrafts((prev) => ({ ...prev, [field.name]: e.target.value }))}
+                                                className="w-full rounded-md border border-slate-300 px-3 py-2 font-mono text-xs" />
+                                        ) : (
+                                            <Input id={inputId} value={text}
+                                                inputMode={field.type === "number" || field.type === "currency" ? "decimal" : undefined}
+                                                onChange={(e) => setDrafts((prev) => ({ ...prev, [field.name]: e.target.value }))} />
+                                        )}
+                                    </div>
+                                )
+                            })}
+                        </div>
+                    ) : formData.length === 0 ? (
                         <div className="flex flex-col items-center justify-center p-8 text-slate-500 border border-dashed rounded-lg">
                             <AlertTriangle className="h-8 w-8 mb-2 text-amber-500" />
                             <p>No data extracted yet.</p>
