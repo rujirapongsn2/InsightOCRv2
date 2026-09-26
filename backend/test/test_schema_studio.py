@@ -500,7 +500,7 @@ def test_suggestion_task_stores_result_or_readable_error(monkeypatch):
     assert state["status"] == "failed" and "socket" not in state["error"]
 
 
-def test_suggest_endpoint_reads_files_and_queues_the_ai_step(monkeypatch):
+def test_suggest_endpoint_only_stores_the_files_and_queues_reading(monkeypatch):
     import asyncio
     from io import BytesIO
     from fastapi import UploadFile
@@ -508,19 +508,66 @@ def test_suggest_endpoint_reads_files_and_queues_the_ai_step(monkeypatch):
     from app.api.v1.endpoints import schemas as ep
     from app.tasks import schema_studio_tasks as tasks
 
-    monkeypatch.setattr(ep, "_extract_schema_sample_in_worker", lambda path: SimpleNamespace(
-        markdown=SAMPLE, metadata={"pipeline": "anydoc_hybrid", "text_layer_thai_suspect_pages": [1]}))
-    monkeypatch.setattr(studio, "store_samples", lambda user_id, samples: "d" * 32)
+    class Storage:
+        def __init__(self):
+            self.files = {}
+
+        def upload_file(self, file_obj, path, content_type=None):
+            self.files[path] = file_obj.read()
+
+    storage = Storage()
+    monkeypatch.setattr("app.services.storage.get_storage_service", lambda: storage)
     fake = _FakeRedis()
     monkeypatch.setattr(studio, "_redis_client", lambda: fake)
     queued = {}
-    monkeypatch.setattr(tasks.suggest_schema_task, "delay", lambda *args: queued.update(args=args))
+    monkeypatch.setattr(tasks.extract_and_suggest_task, "delay", lambda *args: queued.update(args=args))
     upload = UploadFile(file=BytesIO(b"%PDF-1.4"), filename="a.pdf", headers=Headers({"content-type": "application/pdf"}))
-    out = asyncio.run(ep.suggest_schema_from_file(db=None, files=[upload], file=None, document_type="invoice",
-                                                  current_user=ADMIN))
-    assert out["session_id"] == "d" * 32 and out["samples"][0]["garbled_pages"] == [1]
-    assert queued["args"][1] == out["run_id"] and queued["args"][2] == "d" * 32
-    assert ep.read_sample_run(out["run_id"], current_user=ADMIN)["status"] == "queued"
+    out = asyncio.run(ep.suggest_schema_from_file(files=[upload], file=None, document_type="invoice", current_user=ADMIN))
+
+    path = f"schema-suggest-tmp/{out['run_id']}/0.pdf"
+    assert storage.files == {path: b"%PDF-1.4"}
+    assert queued["args"][1:] == (out["run_id"], [{"path": path, "filename": "a.pdf"}], "invoice")
+    state = ep.read_sample_run(out["run_id"], current_user=ADMIN)
+    assert (state["status"], state["stage"], state["total"]) == ("queued", "reading", 1)
+
+
+def test_reading_task_caches_samples_then_runs_the_ai_step(monkeypatch):
+    import json
+    import redis
+    from contextlib import contextmanager
+    from app.tasks import schema_studio_tasks as tasks
+    from app.tasks import maintenance_tasks
+
+    fake = _FakeRedis()
+    monkeypatch.setattr(redis, "from_url", lambda *a, **k: fake)
+
+    class Storage:
+        @contextmanager
+        def get_local_path(self, path):
+            yield "/tmp/" + path.rsplit("/", 1)[-1]
+
+    monkeypatch.setattr("app.services.storage.get_storage_service", lambda: Storage())
+    deleted = []
+    monkeypatch.setattr(maintenance_tasks, "delete_schema_sample_files", lambda paths: deleted.extend(paths))
+    monkeypatch.setattr(tasks, "_extract_file", lambda storage, item: SimpleNamespace(
+        markdown=SAMPLE, metadata={"pipeline": "anydoc_hybrid", "text_layer_thai_suspect_pages": [1]}))
+    monkeypatch.setattr(studio, "store_samples", lambda user_id, samples: "d" * 32)
+    handed_over = {}
+    monkeypatch.setattr(tasks.suggest_schema_task, "delay", lambda *args: handed_over.update(args=args))
+
+    tasks.extract_and_suggest_task.run("u1", "r1", [{"path": "schema-suggest-tmp/r1/0.pdf", "filename": "a.pdf"}], "invoice")
+
+    state = json.loads(fake.data[tasks.run_key("u1", "r1")])
+    assert (state["stage"], state["session_id"], state["done"]) == ("suggesting", "d" * 32, 1)
+    assert state["samples"][0]["filename"] == "a.pdf" and state["samples"][0]["garbled_pages"] == [1]
+    assert handed_over["args"][:4] == ("u1", "r1", "d" * 32, "invoice")
+    assert deleted == ["schema-suggest-tmp/r1/0.pdf"]
+
+    monkeypatch.setattr(tasks, "_extract_file", lambda storage, item: SimpleNamespace(markdown=" ", metadata={}))
+    tasks.extract_and_suggest_task.run("u1", "r2", [{"path": "p/0.pdf", "filename": "scan.pdf"}], None)
+    failed = json.loads(fake.data[tasks.run_key("u1", "r2")])
+    assert failed["status"] == "failed" and "scan.pdf" in failed["error"]
+    assert "p/0.pdf" in deleted
 
 
 GARBLED = ("บร ิษัท ดีทวิน จํากัด ภาษีมูลค่าเพิMม รวมทัeงสิeน เงืdอนไขการชําระเงิน ค่าใช้จ่ายอืMนๆ "

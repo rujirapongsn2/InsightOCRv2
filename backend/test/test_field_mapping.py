@@ -369,3 +369,23 @@ def test_jev_candidate_extraction_stays_fast_on_large_documents(monkeypatch):
     mapping.map_fields(text, schema(*fields, {"name": "amount", "type": "number"}), _jev_db(), engine="jev")
     # Previous per-candidate x per-line matching took ~0.6s per text field here (~3.6s total).
     assert time.monotonic() - started < 1.5
+
+
+def test_keyless_local_llm_counts_as_configured():
+    from types import SimpleNamespace
+    from app.services import field_mapping as mapping
+
+    provider = SimpleNamespace(api_key=None, api_url="http://ollama:11434/v1")
+
+    class Query:
+        def filter(self, *args):
+            return self
+
+        def first(self):
+            return provider
+
+    db = SimpleNamespace(query=lambda model: Query())
+    setting = SimpleNamespace(mapping_fallback_provider_id=None)
+    assert mapping.llm_mapping_configured(db, setting) is True
+    provider.api_url = ""
+    assert mapping.llm_mapping_configured(db, setting) is False

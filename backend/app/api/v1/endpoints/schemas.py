@@ -242,47 +242,32 @@ def create_schema(
 
 
 # Sample text shown back to the browser for evidence highlighting.
-SAMPLE_TEXT_RESPONSE_LIMIT = 200_000
-
-
-def _queue_suggestion(user_id: Any, session_id: str, document_type: str | None,
-                      extraction_meta: list[dict[str, Any]]) -> dict[str, Any]:
-    from uuid import uuid4
-    from app.tasks.schema_studio_tasks import RUN_TTL_SECONDS, initial_state, run_key, suggest_schema_task
-
-    run_id = uuid4().hex
-    try:
-        client = schema_studio._redis_client()
-        try:
-            client.set(run_key(user_id, run_id), json.dumps({**initial_state(1), "kind": "suggestion", "result": None}),
-                       ex=RUN_TTL_SECONDS)
-        finally:
-            client.close()
-        suggest_schema_task.delay(str(user_id), run_id, session_id, document_type, extraction_meta)
-    except Exception as exc:
-        logger.exception("Could not queue schema suggestion")
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                            detail="The suggestion service is unavailable. Try again shortly.") from exc
-    return {"run_id": run_id}
 
 
 @router.post("/suggest-from-file", status_code=status.HTTP_202_ACCEPTED)
 async def suggest_schema_from_file(
     *,
-    db: Session = Depends(deps.get_db),
     files: List[UploadFile] = File(default=[]),
     file: UploadFile | None = File(default=None),
     document_type: str | None = None,
     current_user: User = Depends(deps.get_current_active_user),
 ) -> Any:
     """
-    Read one or more sample documents and start suggesting schema fields.
+    Start reading one or more sample documents and suggesting schema fields.
 
-    AnyDoc reads text-layer documents here; scanned pages use TesseractOCR and
-    then the configured OCR fallback. The AI call (one for all samples) and the
-    verification run in the background; poll ``GET /schemas/sample-runs/{run_id}``
-    until ``result`` holds the suggested fields.
+    The request only stores the uploads. A worker then reads them (AnyDoc text
+    layer; scanned pages use TesseractOCR and then the configured OCR fallback,
+    which can take minutes), asks AI once for all samples and verifies the
+    answer. Poll ``GET /schemas/sample-runs/{run_id}``: ``stage`` is
+    ``reading`` then ``suggesting``; ``session_id`` and ``samples`` appear once
+    the files are read, and ``result`` holds the suggested fields at the end.
     """
+    from io import BytesIO
+    from uuid import uuid4
+    from app.services.storage import get_storage_service
+    from app.tasks.maintenance_tasks import delete_schema_sample_files
+    from app.tasks.schema_studio_tasks import RUN_TTL_SECONDS, extract_and_suggest_task, run_key, suggestion_state
+
     _ensure_can_create_schema(current_user)
     uploads = [upload for upload in ([file] if file else []) + list(files) if upload is not None]
     if not uploads:
@@ -293,70 +278,38 @@ async def suggest_schema_from_file(
     for upload in uploads:
         _validate_suggestion_upload(upload)
 
-    tmp_paths: list[str] = []
+    run_id = uuid4().hex
+    storage = get_storage_service()
+    stored: list[dict[str, Any]] = []
     try:
-        samples: list[dict[str, Any]] = []
-        extractions = []
-        for upload in uploads:
+        for index, upload in enumerate(uploads):
             file_bytes = await upload.read()
             if not file_bytes:
-                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
-                                    detail=f"{upload.filename} is empty")
-            with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(upload.filename)[1]) as tmp_file:
-                tmp_file.write(file_bytes)
-                tmp_paths.append(tmp_file.name)
-            extraction = await run_in_threadpool(_extract_schema_sample_in_worker, tmp_paths[-1])
-            if not extraction.markdown.strip():
-                raise ValueError(f"No text could be extracted from {upload.filename}")
-            samples.append({"filename": upload.filename or f"sample-{len(samples) + 1}", "text": extraction.markdown})
-            extractions.append(extraction)
-
-        session_id = schema_studio.store_samples(current_user.id, samples)
-        if not session_id:
-            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                                detail="The suggestion service is unavailable. Try again shortly.")
-        _, truncated_flags = schema_studio.number_samples(samples)
-        extraction_meta = [
-            {
-                "filename": sample["filename"],
-                "pipeline": extraction.metadata.get("pipeline"),
-                "parser": extraction.metadata.get("parser"),
-                "page_count": extraction.metadata.get("page_count"),
-                "provider_counts": extraction.metadata.get("provider_counts", {}),
-                "garbled_pages": extraction.metadata.get("text_layer_thai_suspect_pages", []),
-            }
-            for sample, extraction in zip(samples, extractions)
-        ]
-        run = _queue_suggestion(current_user.id, session_id, document_type, extraction_meta)
-        return {
-            **run,
-            "session_id": session_id,
-            "sample_ttl_seconds": schema_studio.SAMPLE_TTL_SECONDS,
-            "sample_retention_days": settings.SCHEMA_SAMPLE_RETENTION_DAYS,
-            "samples": [
-                {"index": index, "filename": sample["filename"], "truncated": truncated_flags[index],
-                 "text": sample["text"][:SAMPLE_TEXT_RESPONSE_LIMIT],
-                 # Pages whose Thai text layer looks garbled by a broken font map.
-                 "garbled_pages": extraction.metadata.get("text_layer_thai_suspect_pages", [])}
-                for index, (sample, extraction) in enumerate(zip(samples, extractions))
-            ],
-        }
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"{upload.filename} is empty")
+            # Workers run in other containers, so the files go through object storage.
+            path = f"schema-suggest-tmp/{run_id}/{index}{os.path.splitext(upload.filename or '')[1].lower()}"
+            storage.upload_file(BytesIO(file_bytes), path, content_type=upload.content_type)
+            stored.append({"path": path, "filename": upload.filename or f"sample-{index + 1}"})
+        client = schema_studio._redis_client()
+        try:
+            client.set(run_key(current_user.id, run_id), json.dumps(suggestion_state(len(stored))), ex=RUN_TTL_SECONDS)
+        finally:
+            client.close()
+        extract_and_suggest_task.delay(str(current_user.id), run_id, stored, document_type)
     except HTTPException:
+        delete_schema_sample_files([item["path"] for item in stored])
         raise
-    except (AnydocFallbackToLegacy, AnydocTerminalError, ValueError) as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
     except Exception as exc:
-        logger.exception("Schema suggestion failed")
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Schema suggestion request failed. Check the active AI provider and try again.",
-        ) from exc
-    finally:
-        for tmp_path in tmp_paths:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                logger.warning("Failed to remove temporary schema suggestion file: %s", tmp_path)
+        delete_schema_sample_files([item["path"] for item in stored])
+        logger.exception("Could not queue schema suggestion")
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            detail="The suggestion service is unavailable. Try again shortly.") from exc
+    return {
+        "run_id": run_id,
+        "total": len(stored),
+        "sample_ttl_seconds": schema_studio.SAMPLE_TTL_SECONDS,
+        "sample_retention_days": settings.SCHEMA_SAMPLE_RETENTION_DAYS,
+    }
 
 
 class SampleDryRunRequest(BaseModel):

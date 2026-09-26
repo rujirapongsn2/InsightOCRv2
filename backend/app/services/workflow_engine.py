@@ -2182,6 +2182,12 @@ def _jev_decision_input(config: dict, context: dict) -> str:
     parsed = source
     if isinstance(source, str):
         stripped = source.strip()
+        if wanted and stripped in {"null", "None"}:
+            # An upstream value that was empty renders as "None"/"null"; say that
+            # instead of "fields_to_use does not work with plain text".
+            raise NodeExecutionError(
+                "input_source ว่าง (None) — node ก่อนหน้าไม่ได้ส่งข้อมูลมา จึงเลือกฟิลด์ตาม fields_to_use ไม่ได้"
+            )
         if stripped.startswith(("{", "[")):
             try:
                 parsed = json.loads(stripped)
@@ -2203,6 +2209,10 @@ def _jev_decision_input(config: dict, context: dict) -> str:
         text = json.dumps(parsed, ensure_ascii=False)
     elif isinstance(parsed, list):
         if wanted:
+            # Records that are None (e.g. a document with nothing extracted) have no fields to pick.
+            parsed = [item for item in parsed if item is not None]
+            if not parsed:
+                raise NodeExecutionError("input_source (list) ไม่มีข้อมูลเลย — ทุกรายการเป็น None")
             if all(isinstance(item, dict) for item in parsed):
                 missing = sorted({k for item in parsed for k in wanted if k not in item})
                 if missing:

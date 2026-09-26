@@ -282,21 +282,120 @@ def queue_engine_change_tests_task() -> None:
 
 
 SUGGESTION_FAILED = "Schema suggestion request failed. Check the active AI provider and try again."
+READ_FAILED = "The sample files could not be read. Try again, or upload clearer files."
+SAMPLE_TEXT_RESPONSE_LIMIT = 200_000
+
+
+def suggestion_state(total: int) -> dict[str, Any]:
+    return {"status": "queued", "kind": "suggestion", "stage": "reading", "total": total, "done": 0,
+            "samples": [], "session_id": None, "error": None, "result": None}
+
+
+def _extract_file(storage: Any, item: dict[str, Any]) -> Any:
+    from app.services.anydoc_pipeline import extract_schema_sample
+
+    with storage.get_local_path(item["path"]) as file_path, SessionLocal() as db:
+        return extract_schema_sample(file_path, db)
+
+
+@celery_app.task(name="app.tasks.schema_studio_tasks.extract_and_suggest_task", soft_time_limit=1500, time_limit=1560)
+def extract_and_suggest_task(user_id: str, run_id: str, files: list[dict[str, Any]],
+                             document_type: Optional[str] = None) -> None:
+    """Read the uploaded samples (OCR for scans), cache their text, then suggest fields.
+
+    ``files`` items: {path, filename} in object storage; they are deleted when done.
+    """
+    from app.services import schema_studio
+    from app.services.anydoc_pipeline import AnydocFallbackToLegacy, AnydocTerminalError
+    from app.services.storage import get_storage_service
+    from app.tasks.maintenance_tasks import delete_schema_sample_files
+
+    client = _redis()
+    key = run_key(user_id, run_id)
+    state = suggestion_state(len(files))
+    state["status"] = "running"
+    try:
+        _write(client, key, state)
+        storage = get_storage_service()
+        samples: list[dict[str, Any]] = []
+        extraction_meta: list[dict[str, Any]] = []
+        for item in files:
+            try:
+                extraction = _extract_file(storage, item)
+            except (AnydocFallbackToLegacy, AnydocTerminalError, ValueError) as exc:
+                raise ValueError(f"Could not read {item['filename']}: {exc}") from exc
+            if not extraction.markdown.strip():
+                raise ValueError(f"No text could be extracted from {item['filename']}")
+            samples.append({"filename": item["filename"], "text": extraction.markdown})
+            extraction_meta.append({
+                "filename": item["filename"],
+                "pipeline": extraction.metadata.get("pipeline"),
+                "parser": extraction.metadata.get("parser"),
+                "page_count": extraction.metadata.get("page_count"),
+                "provider_counts": extraction.metadata.get("provider_counts", {}),
+                "garbled_pages": extraction.metadata.get("text_layer_thai_suspect_pages", []),
+            })
+            state["done"] += 1
+            _write(client, key, state)
+
+        session_id = schema_studio.store_samples(user_id, samples)
+        if not session_id:
+            raise RuntimeError("Could not cache the sample texts")
+        _, truncated = schema_studio.number_samples(samples)
+        state.update(stage="suggesting", session_id=session_id, samples=[
+            {"index": index, "filename": sample["filename"], "truncated": truncated[index],
+             "text": sample["text"][:SAMPLE_TEXT_RESPONSE_LIMIT],
+             # Pages whose Thai text layer looks garbled by a broken font map.
+             "garbled_pages": meta["garbled_pages"]}
+            for index, (sample, meta) in enumerate(zip(samples, extraction_meta))
+        ])
+        _write(client, key, state)
+    except ValueError as exc:
+        state.update(status="failed", error=str(exc))
+        _write(client, key, state)
+        return
+    except Exception:  # noqa: BLE001 — the user sees a short message; details go to the log
+        logger.exception("Reading schema samples for %s failed", run_id)
+        state.update(status="failed", error=READ_FAILED)
+        _write(client, key, state)
+        return
+    finally:
+        client.close()
+        delete_schema_sample_files([item["path"] for item in files])
+
+    # A separate task, so the AI step gets its own time limit however long reading took.
+    try:
+        suggest_schema_task.delay(user_id, run_id, state["session_id"], document_type, extraction_meta)
+    except Exception:  # noqa: BLE001
+        logger.exception("Could not queue the suggestion step for %s", run_id)
+        client = _redis()
+        try:
+            state.update(status="failed", error=SUGGESTION_FAILED)
+            _write(client, key, state)
+        finally:
+            client.close()
 
 
 @celery_app.task(name="app.tasks.schema_studio_tasks.suggest_schema_task", soft_time_limit=600, time_limit=660)
 def suggest_schema_task(user_id: str, run_id: str, session_id: str, document_type: Optional[str] = None,
                         extraction: Optional[list[dict[str, Any]]] = None) -> None:
-    """Ask AI for fields and verify them against the cached sample texts."""
+    """Ask AI for fields and verify them against the cached sample texts.
+
+    Keeps what the run state already holds (stage, samples, session) and adds the result.
+    """
     import asyncio
-    import redis
-    from app.core.config import settings
     from app.services import schema_studio
 
-    client = redis.from_url(settings.REDIS_URL)
+    client = _redis()
     key = run_key(user_id, run_id)
-    state: dict[str, Any] = {"status": "running", "kind": "suggestion", "total": 1, "done": 0,
-                             "samples": [], "error": None, "result": None}
+    try:
+        raw = client.get(key)
+        state: dict[str, Any] = json.loads(raw) if raw else {}
+    except Exception:  # noqa: BLE001
+        state = {}
+    state.update({"status": "running", "kind": "suggestion", "stage": "suggesting", "error": None, "result": None})
+    state.setdefault("samples", [])
+    state.setdefault("session_id", session_id)
     try:
         _write(client, key, state)
         samples = schema_studio.load_samples(user_id, session_id)
@@ -305,7 +404,7 @@ def suggest_schema_task(user_id: str, run_id: str, session_id: str, document_typ
         with SessionLocal() as db:
             result = asyncio.run(schema_studio.suggest_fields(db, samples, document_type))
         result["raw_result"]["extraction"] = extraction or []
-        state.update(status="completed", done=1, result=result)
+        state.update(status="completed", result=result)
     except ValueError as exc:
         state.update(status="failed", error=str(exc))
     except Exception:  # noqa: BLE001 — the user sees a short message; details go to the log

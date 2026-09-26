@@ -29,7 +29,12 @@ type RunSample = { index: number; filename: string; report?: { fields: Record<st
 type RunState = { status: "queued" | "running" | "completed" | "failed"; total: number | null; done: number; samples: RunSample[]; error?: string | null }
 type Focus = { sample: number; line?: number; quote?: string }
 type SuggestionResult = { suggested_fields: SuggestedFieldResponse[]; summary: Summary }
-type SuggestionState = { status: "queued" | "running" | "completed" | "failed"; error?: string | null; result?: SuggestionResult | null }
+type SuggestionState = {
+    status: "queued" | "running" | "completed" | "failed"; error?: string | null; result?: SuggestionResult | null
+    // Files are read in the background first (OCR for scans), then AI suggests fields.
+    stage?: "reading" | "suggesting"; done?: number; total?: number
+    session_id?: string | null; samples?: StudioSample[]
+}
 
 const STATUS: Record<FieldEvidenceStatus, { label: string; cls: string; Icon: typeof CheckCircle2 }> = {
     verified: { label: "Verified", cls: "border-emerald-200 bg-emerald-50 text-emerald-700", Icon: CheckCircle2 },
@@ -234,6 +239,7 @@ export function AIFieldsStep() {
     const [runError, setRunError] = useState<string | null>(null)
     const [suggestRunId, setSuggestRunId] = useState<string | null>(null)
     const [analyzeStage, setAnalyzeStage] = useState<"reading" | "suggesting">("reading")
+    const [readProgress, setReadProgress] = useState<{ done: number; total: number } | null>(null)
     const pendingStudio = useRef<StudioSession | null>(null)
     const [editing, setEditing] = useState<{ key: string; text: string } | null>(null)
 
@@ -252,7 +258,17 @@ export function AIFieldsStep() {
     })
 
     usePolledRun<SuggestionState>(suggestRunId, (state) => {
-        if (state.status === "running") setAnalyzeStage("suggesting")
+        if (state.stage) setAnalyzeStage(state.stage)
+        if (typeof state.done === "number" && typeof state.total === "number") setReadProgress({ done: state.done, total: state.total })
+        if (state.session_id && pendingStudio.current && !pendingStudio.current.sessionId) {
+            pendingStudio.current = {
+                ...pendingStudio.current,
+                sessionId: state.session_id,
+                samples: (state.samples || []).map((s) => ({
+                    filename: s.filename, text: s.text, truncated: s.truncated, garbled_pages: s.garbled_pages || [],
+                })),
+            }
+        }
         if (state.status === "completed" && state.result) {
             applySuggestion(state.result)
             setSuggestRunId(null)
@@ -305,6 +321,7 @@ export function AIFieldsStep() {
         if (!pendingFiles.length) return
         setIsAnalyzing(true)
         setAnalyzeStage("reading")
+        setReadProgress(null)
         setAiError(null)
         try {
             const token = localStorage.getItem("token")
@@ -324,17 +341,16 @@ export function AIFieldsStep() {
             }
             const data = await res.json()
             // Kept aside until the suggestion finishes, so a failed run leaves no half-set state.
+            // The session and sample texts arrive with the run's progress once the files are read.
             pendingStudio.current = {
-                sessionId: data.session_id || null,
+                sessionId: null,
                 files: pendingFiles,
-                samples: (data.samples || []).map((s: StudioSample) => ({
-                    filename: s.filename, text: s.text, truncated: s.truncated, garbled_pages: s.garbled_pages || [],
-                })),
+                samples: [],
                 expected: {},
                 keepSamples: false,
                 retentionDays: data.sample_retention_days || 180,
             }
-            setAnalyzeStage("suggesting")
+            setReadProgress({ done: 0, total: data.total || pendingFiles.length })
             setSuggestRunId(data.run_id)
         } catch (err: unknown) {
             setAiError(err instanceof Error ? err.message : "Analysis failed")
@@ -494,7 +510,9 @@ export function AIFieldsStep() {
                             {isAnalyzing ? (
                                 <><Loader2 className="h-4 w-4 mr-2 animate-spin" />
                                     {analyzeStage === "reading"
-                                        ? `Reading ${pendingFiles.length > 1 ? `${pendingFiles.length} documents` : "the document"}...`
+                                        ? (readProgress && readProgress.total > 1
+                                            ? `Reading documents (${readProgress.done} of ${readProgress.total} done). Scanned pages can take a few minutes...`
+                                            : "Reading the document. Scanned pages can take a few minutes...")
                                         : "AI is suggesting and checking fields. This usually takes 1–3 minutes..."}
                                 </>
                             ) : (

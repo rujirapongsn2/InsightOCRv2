@@ -946,36 +946,8 @@ def apply_schema_mapping(
     return None
 
 
-def extract_job_id(payload: dict[str, Any]) -> str | None:
-    for key in ("job_id", "task_id", "id", "request_id"):
-        value = payload.get(key)
-        if value:
-            return str(value)
-
-    nested = payload.get("data")
-    if isinstance(nested, dict):
-        for key in ("job_id", "task_id", "id", "request_id"):
-            value = nested.get(key)
-            if value:
-                return str(value)
-
-    return None
-
-
-def extract_status(payload: dict[str, Any]) -> str:
-    for key in ("status", "state"):
-        value = payload.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip().lower()
-
-    nested = payload.get("data")
-    if isinstance(nested, dict):
-        for key in ("status", "state"):
-            value = nested.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip().lower()
-
-    return ""
+# Kept importable from here for existing callers; the implementation lives with the OCR client.
+from app.services.ocr import extract_job_id, extract_status  # noqa: E402
 
 
 def extract_ai_text(result_payload: dict[str, Any]) -> str:
@@ -1459,81 +1431,32 @@ def process_document_task(
                 raise ValueError("External OCR submit failed after retry attempts")
 
             if external_job_id:
-                _ocr_base = ocr_endpoint.rstrip('/')
-                status_url = f"{_ocr_base}/{external_job_id}/status"
-                result_url = f"{_ocr_base}/{external_job_id}/result"
-                job_timeout = max(30, settings.OCR_EXTERNAL_JOB_TIMEOUT_SECONDS)
-                queue_timeout = max(10, settings.OCR_EXTERNAL_QUEUE_TIMEOUT_SECONDS)
-                poll_interval = max(1, settings.OCR_STATUS_POLL_INTERVAL_SECONDS)
-                request_timeout = max(5, settings.OCR_STATUS_REQUEST_TIMEOUT_SECONDS)
-                deadline = time.monotonic() + job_timeout
-                queued_since: float | None = None
-                completed = False
+                from app.services.ocr import _wait_for_ocr_result
+
+                def _report_progress(progress: dict) -> None:
+                    percent = int(progress.get("percent", 15) or 15)
+                    stage = str(progress.get("stage") or "processing")
+                    _set_progress(percent, stage)
+                    self.update_state(state="PROGRESS", meta={
+                        "percent": percent, "stage": stage, "message": str(progress.get("message") or "")})
 
                 # Polling is deliberate. The upstream SSE endpoint can remain open
                 # without emitting an event, which previously left documents at a
                 # misleading 95% until Celery's 30-minute task limit intervened.
-                job_logger.info(
-                    "Polling external OCR job %s every %ss (deadline %ss)",
-                    external_job_id,
-                    poll_interval,
-                    job_timeout,
-                )
-                while time.monotonic() < deadline:
-                    remaining = max(1, int(deadline - time.monotonic()))
-                    status_response = requests.get(
-                        status_url,
-                        headers=headers,
-                        timeout=min(request_timeout, remaining),
-                        verify=verify_ssl,
-                    )
-                    status_response.raise_for_status()
-                    status_payload = status_response.json()
-                    current_status = extract_status(status_payload)
-                    ext_progress = status_payload.get("progress") if isinstance(status_payload, dict) else None
-                    if isinstance(ext_progress, dict):
-                        percent = int(ext_progress.get("percent", 15) or 15)
-                        stage = str(ext_progress.get("stage") or "processing")
-                        message = str(ext_progress.get("message") or "")
-                        _set_progress(percent, stage)
-                        self.update_state(
-                            state="PROGRESS",
-                            meta={"percent": percent, "stage": stage, "message": message},
-                        )
-
-                    if current_status in {"queued", "queueing", "pending"}:
-                        queued_since = queued_since or time.monotonic()
-                        queue_wait = time.monotonic() - queued_since
-                        _set_progress(15, "queued")
-                        if queue_wait >= queue_timeout:
-                            raise TimeoutError(
-                                "External OCR job remained queued for more than "
-                                f"{queue_timeout} seconds"
-                            )
-                    else:
-                        queued_since = None
-
-                    if current_status in {"completed", "success", "done"}:
-                        completed = True
-                        break
-                    if current_status in failed_statuses:
-                        raise ValueError(f"External OCR processing failed: {status_payload}")
-                    time.sleep(min(poll_interval, max(0, deadline - time.monotonic())))
-
-                if not completed:
-                    raise TimeoutError(
-                        f"External OCR job did not complete within {job_timeout} seconds"
-                    )
-
-                remaining = max(1, int(deadline - time.monotonic()))
-                result_response = requests.get(
-                    result_url,
+                job_timeout = max(30, settings.OCR_EXTERNAL_JOB_TIMEOUT_SECONDS)
+                job_logger.info("Polling external OCR job %s (deadline %ss)", external_job_id, job_timeout)
+                final_result = _wait_for_ocr_result(
+                    submit_payload,
+                    ocr_api_url=ocr_endpoint,
                     headers=headers,
-                    timeout=min(60, remaining),
-                    verify=verify_ssl,
+                    verify_ssl=verify_ssl,
+                    timeout=job_timeout,
+                    queue_timeout=max(10, settings.OCR_EXTERNAL_QUEUE_TIMEOUT_SECONDS),
+                    on_progress=_report_progress,
+                    # While the provider still queues the job, show that instead of a stale percentage.
+                    on_status=lambda job_status: _set_progress(15, "queued") if job_status in {"queued", "queueing", "pending"} else None,
+                    poll_status=True,
                 )
-                result_response.raise_for_status()
-                final_result = result_response.json()
 
             from app.services.ocr_result import validate_ocr_result
             validate_ocr_result(final_result)

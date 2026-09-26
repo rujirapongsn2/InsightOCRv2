@@ -237,7 +237,8 @@ def llm_mapping(text: str, schema: dict, db: Any, timeout: float) -> tuple[Any, 
     provider = query.filter(AISettings.id == provider_id).first() if provider_id else query.filter(AISettings.is_default.is_(True)).first()
     if provider is None:
         raise ValueError("No active OpenAI-compatible mapping provider configured")
-    with OpenAI(api_key=provider.api_key, base_url=_normalize_openai_base_url(provider.api_url),
+    # The OpenAI client refuses an empty key; keyless local servers ignore the placeholder.
+    with OpenAI(api_key=provider.api_key or "not-needed", base_url=_normalize_openai_base_url(provider.api_url),
                 timeout=timeout, max_retries=0) as client:
         response = client.chat.completions.create(
             model=provider.model,
@@ -352,7 +353,8 @@ def llm_mapping_configured(db: Any, setting: Any) -> bool:
     )
     if provider is None:
         return False
-    return bool(str(getattr(provider, "api_key", None) or "").strip() and str(getattr(provider, "api_url", None) or "").strip())
+    # Self-hosted servers (vLLM, Ollama, LM Studio) often need no API key; the URL is what matters.
+    return bool(str(getattr(provider, "api_url", None) or "").strip())
 
 
 def auto_mapping_routes(setting: Any, db: Any) -> tuple[list[str], list[dict]]:

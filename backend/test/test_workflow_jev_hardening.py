@@ -102,3 +102,14 @@ def test_field_mapping_status_is_worst_case_across_documents(monkeypatch):
     assert out["first_document_status"] == "completed"
     assert out["incomplete_documents"] == ["1.pdf", "2.pdf"]
     assert any("เอกสารแรก" in w for w in out["warnings"])
+
+
+def test_fields_to_use_skips_none_records_and_explains_empty_input():
+    from app.services import workflow_engine as we
+
+    text = we._jev_decision_input({"input_source": '[{"total": 1, "x": 2}, null]', "fields_to_use": "total"}, {})
+    assert text == '[{"total": 1}]'
+    with pytest.raises(we.NodeExecutionError, match="ทุกรายการเป็น None"):
+        we._jev_decision_input({"input_source": "[null, null]", "fields_to_use": "total"}, {})
+    with pytest.raises(we.NodeExecutionError, match="ว่าง \\(None\\)"):
+        we._jev_decision_input({"input_source": "None", "fields_to_use": "total"}, {})

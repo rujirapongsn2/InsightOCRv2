@@ -4,6 +4,7 @@ import requests
 import os
 import logging
 import time
+from typing import Callable
 from urllib.parse import quote, urlsplit, urljoin
 from sqlalchemy.orm import Session
 from app.models.setting import Setting
@@ -35,6 +36,30 @@ def _has_ocr_payload(result: object) -> bool:
     return bool(extract_ocr_text(result))
 
 
+def extract_job_id(payload: dict) -> str | None:
+    """The provider's job id, at the top level or under ``data``."""
+    for container in (payload, payload.get("data") if isinstance(payload.get("data"), dict) else {}):
+        for key in ("job_id", "task_id", "id", "request_id"):
+            value = container.get(key)
+            if value:
+                return str(value)
+    return None
+
+
+def extract_status(payload: dict) -> str:
+    """The provider's job status, lower-cased, at the top level or under ``data``."""
+    for container in (payload, payload.get("data") if isinstance(payload.get("data"), dict) else {}):
+        for key in ("status", "state"):
+            value = container.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip().lower()
+    return ""
+
+
+_QUEUED_STATUSES = {"queued", "queueing", "pending"}
+_COMPLETED_STATUSES = {"completed", "success", "done"}
+
+
 def _wait_for_ocr_result(
     submitted_result: dict,
     *,
@@ -42,32 +67,49 @@ def _wait_for_ocr_result(
     headers: dict[str, str],
     verify_ssl: bool,
     timeout: int | float,
+    queue_timeout: int | float | None = None,
+    on_progress: Callable[[dict], None] | None = None,
+    on_status: Callable[[str], None] | None = None,
+    poll_status: bool = False,
 ) -> dict:
     """Wait for an asynchronous Softnix OCR job and return its final payload.
 
-    The provider acknowledges uploads immediately and exposes the final result
-    at ``get_result``. Returning that acknowledgement as OCR output caused the
-    caller to see an empty extraction and unnecessarily advance to fallback.
+    The one implementation for both OCR routes (per-page AnyDoc OCR and the
+    legacy whole-file route). The provider acknowledges uploads immediately;
+    the job's status is polled at ``check_status`` (or ``{endpoint}/{job_id}/status``
+    with ``poll_status``, as the legacy route always has), otherwise the result
+    URL itself is polled until it stops answering 202 / processing. The final
+    payload is read from ``get_result`` or ``{endpoint}/{job_id}/result``.
+    Transient errors (timeouts, 429/502/503/504) are retried until ``timeout``;
+    a job still queued after ``queue_timeout`` fails early. ``on_progress``
+    receives the provider's ``progress`` object from status responses.
     """
-    status = str(submitted_result.get("status") or "").lower()
+    status = extract_status(submitted_result)
     if status in _FAILED_STATUSES:
         raise RuntimeError("Softnix OCR submission failed")
     if status not in _PROCESSING_STATUSES and _has_ocr_payload(submitted_result):
         return submitted_result
 
+    job_id = extract_job_id(submitted_result)
+    base = ocr_api_url.rstrip("/")
     result_path = submitted_result.get("get_result")
-    if not result_path and submitted_result.get("job_id"):
-        result_path = f"{ocr_api_url.rstrip('/')}/{quote(str(submitted_result['job_id']), safe='')}/result"
+    if not result_path and job_id:
+        result_path = f"{base}/{quote(job_id, safe='')}/result"
     if not isinstance(result_path, str) or not result_path.strip():
         raise ValueError("OCR submit response contains neither readable text nor a result reference")
 
     result_url = _result_url(ocr_api_url, result_path)
     status_path = submitted_result.get("check_status")
+    if not (isinstance(status_path, str) and status_path) and job_id and poll_status:
+        status_path = f"{base}/{quote(job_id, safe='')}/status"
     status_url = _result_url(ocr_api_url, status_path) if isinstance(status_path, str) and status_path else None
     deadline = time.monotonic() + max(0, timeout)
     poll_interval = max(1, settings.OCR_STATUS_POLL_INTERVAL_SECONDS)
     request_timeout = max(1, settings.OCR_STATUS_REQUEST_TIMEOUT_SECONDS)
-    job_id = submitted_result.get("job_id")
+    queued_since: float | None = None
+
+    def pause() -> None:
+        time.sleep(min(poll_interval, max(0, deadline - time.monotonic())))
 
     while time.monotonic() < deadline:
         remaining = max(1, int(deadline - time.monotonic()))
@@ -80,15 +122,15 @@ def _wait_for_ocr_result(
                 allow_redirects=False,
             )
         except (requests.Timeout, requests.ConnectionError):
-            time.sleep(min(poll_interval, max(0, deadline - time.monotonic())))
+            pause()
             continue
         if response.status_code in {429, 502, 503, 504}:
-            time.sleep(min(poll_interval, max(0, deadline - time.monotonic())))
+            pause()
             continue
         if 300 <= response.status_code < 400:
             raise ValueError("OCR result redirects are not supported")
         if response.status_code == 202:
-            time.sleep(min(poll_interval, max(0, deadline - time.monotonic())))
+            pause()
             continue
 
         response.raise_for_status()
@@ -96,14 +138,29 @@ def _wait_for_ocr_result(
         if not isinstance(result, dict):
             raise ValueError("OCR result response is not a JSON object")
 
-        status = str(result.get("status") or "").lower()
+        status = extract_status(result)
+        if on_status and status:
+            on_status(status)
+        if on_progress and isinstance(result.get("progress"), dict):
+            on_progress(result["progress"])
         if status in _FAILED_STATUSES:
             raise RuntimeError(f"Softnix OCR job {job_id or 'unknown'} failed")
+        if status in _QUEUED_STATUSES and queue_timeout is not None:
+            queued_since = queued_since or time.monotonic()
+            if time.monotonic() - queued_since >= queue_timeout:
+                raise TimeoutError(f"Softnix OCR job {job_id or 'unknown'} stayed queued for more than {queue_timeout} seconds")
+        elif status not in _QUEUED_STATUSES:
+            queued_since = None
         if status in _PROCESSING_STATUSES:
-            time.sleep(min(poll_interval, max(0, deadline - time.monotonic())))
+            pause()
             continue
         if status_url:
-            if status not in {"completed", "success", "done"}:
+            if status not in _COMPLETED_STATUSES:
+                if poll_status:
+                    # The legacy route has always waited through statuses it does not
+                    # know ("started", "uploading", ...) until the deadline.
+                    pause()
+                    continue
                 raise ValueError("Softnix OCR returned an unrecognized job status")
             status_url = None
             continue
@@ -114,6 +171,7 @@ def _wait_for_ocr_result(
     raise TimeoutError(
         f"Softnix OCR job {job_id or 'unknown'} did not complete within {timeout} seconds"
     )
+
 
 def count_pdf_pages(file_path: str) -> int:
     """

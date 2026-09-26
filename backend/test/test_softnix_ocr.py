@@ -183,3 +183,51 @@ def test_v3_retries_transient_result_get_without_resubmitting(monkeypatch, setti
     monkeypatch.setattr(ocr.time, "sleep", lambda seconds: None)
     assert ocr.process_ocr(document, FakeDb(setting))["ocr_text"] == "ready"
     assert len(submissions) == 1
+
+
+def test_legacy_route_polls_status_reports_progress_and_times_out_in_queue(monkeypatch):
+    """The legacy whole-file route shares the AnyDoc waiter: status polling, progress and queue timeout."""
+    from app.services import ocr as ocr_module
+
+    monkeypatch.setattr(ocr_module.settings, "OCR_STATUS_POLL_INTERVAL_SECONDS", 1)
+    monkeypatch.setattr(ocr_module.time, "sleep", lambda _seconds: None)
+    responses = iter([
+        {"status": "processing", "progress": {"percent": 40, "stage": "ocr"}},
+        {"status": "started"},  # unknown to us: keep waiting, as the legacy route always did
+        {"status": "completed"},
+        {"status": "completed", "results": {"pages": [{"page_number": 1, "ocr_text": "done"}]}},
+    ])
+    urls, progress, statuses = [], [], []
+
+    class Response:
+        status_code = 200
+
+        def __init__(self, payload):
+            self.payload = payload
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self.payload
+
+    def fake_get(url, **_kwargs):
+        urls.append(url)
+        return Response(next(responses))
+
+    monkeypatch.setattr(ocr_module.requests, "get", fake_get)
+    result = ocr_module._wait_for_ocr_result(
+        {"data": {"job_id": "j1", "status": "queued"}}, ocr_api_url="https://ocr.example.test/v1/ocr",
+        headers={}, verify_ssl=True, timeout=60, on_progress=progress.append, on_status=statuses.append,
+        poll_status=True)
+    assert result["results"]["pages"][0]["ocr_text"] == "done"
+    assert urls == ["https://ocr.example.test/v1/ocr/j1/status"] * 3 + ["https://ocr.example.test/v1/ocr/j1/result"]
+    assert progress == [{"percent": 40, "stage": "ocr"}]
+    assert statuses == ["processing", "started", "completed", "completed"]
+
+    clock = {"now": 0.0}
+    monkeypatch.setattr(ocr_module.time, "monotonic", lambda: clock.__setitem__("now", clock["now"] + 5) or clock["now"])
+    monkeypatch.setattr(ocr_module.requests, "get", lambda url, **_k: Response({"status": "queued"}))
+    with pytest.raises(TimeoutError, match="stayed queued"):
+        ocr_module._wait_for_ocr_result({"job_id": "j2", "status": "queued"}, ocr_api_url="https://ocr.example.test/v1/ocr",
+                                        headers={}, verify_ssl=True, timeout=600, queue_timeout=20, poll_status=True)
