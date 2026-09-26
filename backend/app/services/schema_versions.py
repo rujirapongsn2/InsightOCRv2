@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import uuid
 from typing import Any, Optional
 
 from sqlalchemy.exc import IntegrityError
@@ -96,3 +97,71 @@ def record_document_version(db: Any, document: Any, schema: DocumentSchema) -> N
     except Exception:  # noqa: BLE001 — traceability must not fail document processing
         logger.warning("Could not record schema version for document %s", getattr(document, "id", None),
                        exc_info=True)
+
+
+MAX_TEST_RUNS = 10
+
+
+def summarize_test_run(results: list[dict[str, Any]], *, engine: str, trigger: str, run_at: str) -> dict[str, Any]:
+    """Aggregate one test-set run (``run_schema_samples_task`` entries) per field."""
+    fields: dict[str, dict[str, int]] = {}
+    checked = matched = errors = 0
+    for entry in results:
+        if entry.get("error"):
+            errors += 1
+            continue
+        comparison = entry.get("comparison") or {}
+        checked += comparison.get("checked", 0)
+        matched += comparison.get("matched", 0)
+        for name, detail in (comparison.get("fields") or {}).items():
+            stats = fields.setdefault(name, {"checked": 0, "matched": 0})
+            stats["checked"] += 1
+            stats["matched"] += int(bool(detail.get("match")))
+    return {"run_at": run_at, "engine": engine, "trigger": trigger, "samples": len(results),
+            "errors": errors, "checked": checked, "matched": matched, "fields": fields}
+
+
+def append_test_run(db: Any, schema_id: Any, version: int, summary: dict[str, Any]) -> None:
+    """Keep the latest runs on the tested version (row-locked so parallel runs don't overwrite)."""
+    schema_uuid = schema_id if isinstance(schema_id, uuid.UUID) else uuid.UUID(str(schema_id))
+    row = (db.query(SchemaVersion)
+           .filter(SchemaVersion.schema_id == schema_uuid, SchemaVersion.version == version)
+           .with_for_update().first())
+    if row is None:
+        return
+    row.test_runs = (list(row.test_runs or []) + [summary])[-MAX_TEST_RUNS:]
+
+
+def compare_test_runs(previous: Optional[dict[str, Any]], current: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    """Fields whose match rate went up or down between two runs, for fields tested in both."""
+    if not previous or not current:
+        return None
+    improved, regressed = [], []
+    for name, now in (current.get("fields") or {}).items():
+        before = (previous.get("fields") or {}).get(name)
+        if not before or not before.get("checked") or not now.get("checked"):
+            continue
+        delta = now["matched"] / now["checked"] - before["matched"] / before["checked"]
+        if delta > 1e-9:
+            improved.append(name)
+        elif delta < -1e-9:
+            regressed.append(name)
+    return {"previous_run_at": previous.get("run_at"), "previous_engine": previous.get("engine"),
+            "previous_matched": previous.get("matched"), "previous_checked": previous.get("checked"),
+            "improved": sorted(improved), "regressed": sorted(regressed)}
+
+
+def version_test_history(versions: list[SchemaVersion]) -> dict[int, dict[str, Any]]:
+    """Latest run per version and its comparison with the run just before it (any version)."""
+    runs = sorted(((run.get("run_at") or "", row.version, run) for row in versions for run in (row.test_runs or [])),
+                  key=lambda item: (item[0], item[1]))
+    history: dict[int, dict[str, Any]] = {}
+    for position, (_run_at, version, run) in enumerate(runs):
+        previous = runs[position - 1] if position else None
+        history[version] = {
+            "latest": run,
+            "runs": sum(1 for _at, other, _run in runs if other == version),
+            "compared_with_version": previous[1] if previous else None,
+            "comparison": compare_test_runs(previous[2] if previous else None, run),
+        }
+    return history

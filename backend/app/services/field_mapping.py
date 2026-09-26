@@ -375,6 +375,37 @@ def auto_mapping_routes(setting: Any, db: Any) -> tuple[list[str], list[dict]]:
     return routes, skipped
 
 
+def label_value(text: str, labels: Any) -> str | None:
+    """The value after ``label:`` when exactly one line of the text has one of the labels."""
+    if not isinstance(labels, list) or not labels or not all(isinstance(label, str) and label.strip() for label in labels):
+        return None
+    pattern = r"^\s*(?:" + "|".join(re.escape(label) for label in labels) + r")\s*[:：]\s*(.+?)\s*$"
+    matches = list(re.finditer(pattern, text, flags=re.MULTILINE))
+    return matches[0].group(1) if len(matches) == 1 else None
+
+
+def field_property(field: dict) -> dict:
+    """The JSON-schema property ``map_fields`` validates this field's values against."""
+    from app.tasks.document_tasks import build_schema_json
+
+    return json.loads(build_schema_json(None, [field]))["properties"][field["name"]]
+
+
+def normalize_field_value(raw: Any, field: dict, prop: dict | None = None) -> Any:
+    """Normalise a text value the way ``map_fields`` accepts a label or provider value.
+
+    Raises ValueError when the field would reject it (type or format rule).
+    Pass ``prop`` (from ``field_property``) when normalising many values.
+    """
+    from app.tasks.document_tasks import _normalise_fixed_position_value, _normalize_schema_value
+
+    name = field["name"]
+    prop = prop if prop is not None else field_property(field)
+    if isinstance(raw, str) and prop.get("format") == "date":
+        return _normalise_fixed_position_value(raw, prop, name)
+    return _normalize_schema_value(raw, prop, name)
+
+
 def map_fields(text: str, schema: Any, db: Any, file_path: str | None = None,
                *, engine: str | None = None, field_names: list[str] | None = None,
                budget_seconds: float | None = None) -> tuple[dict, dict]:
@@ -466,13 +497,9 @@ def map_fields(text: str, schema: Any, db: Any, file_path: str | None = None,
             name = field["name"]
             if name in values:
                 continue
-            labels = (field.get("validation_rules") or {}).get("source_labels", [])
-            if not isinstance(labels, list) or not labels or not all(isinstance(label, str) and label.strip() for label in labels):
-                continue
-            pattern = r"^\s*(?:" + "|".join(re.escape(label) for label in labels) + r")\s*[:：]\s*(.+?)\s*$"
-            matches = list(re.finditer(pattern, text, flags=re.MULTILINE))
-            if len(matches) == 1:
-                accept(name, matches[0].group(1), "label")
+            raw = label_value(text, (field.get("validation_rules") or {}).get("source_labels", []))
+            if raw is not None:
+                accept(name, raw, "label")
 
     skipped_routes: list[dict] = []
     if engine == "auto":

@@ -1,4 +1,5 @@
 import json
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Optional, Literal
@@ -31,6 +32,7 @@ from app.utils.redact import is_masked, mask_secret
 from app.utils.secret_store import SecretStoreError, encrypt_secret
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 BUILD_INFO_PATH = Path(__file__).resolve().parents[4] / ".build-info.json"
 
 
@@ -61,11 +63,30 @@ def save_mapping_policy(payload: MappingPolicy, db: Session = Depends(deps.get_d
     setting = db.query(Setting).first()
     if setting is None:
         raise HTTPException(422, "Save OCR configuration first")
+    before = (setting.mapping_engine, str(setting.mapping_fallback_provider_id or ""), bool(setting.mapping_fallback_enabled))
     setting.mapping_engine = payload.engine
     setting.mapping_fallback_provider_id = str(payload.fallback_provider_id) if payload.fallback_provider_id else None
     setting.mapping_fallback_enabled = payload.fallback_enabled
     db.commit()
+    if before != (setting.mapping_engine, str(setting.mapping_fallback_provider_id or ""), bool(setting.mapping_fallback_enabled)):
+        _queue_engine_change_tests(db)
     return payload
+
+
+def _queue_engine_change_tests(db: Session) -> None:
+    """Re-run stored test sets so schema owners can see how the new engine performs.
+
+    One message is published here; the worker finds the schemas and queues
+    their runs, so a Redis or broker outage cannot stall saving the policy.
+    """
+    from app.tasks.schema_studio_tasks import queue_engine_change_tests_task
+
+    if not settings.SCHEMA_TEST_AUTO_RUN:
+        return
+    try:
+        queue_engine_change_tests_task.apply_async(retry=False)
+    except Exception:  # noqa: BLE001 — the policy is saved; only the automatic re-test is missed
+        logger.warning("Could not queue test runs after the mapping engine changed", exc_info=True)
 
 
 @router.post("/mapping/test", status_code=202)

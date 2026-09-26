@@ -9,6 +9,7 @@ import { useAuth } from "@/components/auth-provider"
 import { getApiBaseUrl } from "@/lib/api"
 import { SchemaVersionsPanel } from "@/components/schema/SchemaVersionsPanel"
 import { SchemaTestSetPanel } from "@/components/schema/SchemaTestSetPanel"
+import { SchemaAccuracyPanel } from "@/components/schema/SchemaAccuracyPanel"
 
 interface SchemaField {
   name: string
@@ -39,7 +40,7 @@ export default function SchemaDetailPage() {
 
   const [schema, setSchema] = useState<SchemaDetail | null>(null)
   const [loading, setLoading] = useState(true)
-  const [activeTab, setActiveTab] = useState<"fields" | "json" | "versions" | "tests">("fields")
+  const [activeTab, setActiveTab] = useState<"fields" | "json" | "versions" | "tests" | "accuracy">("fields")
 
   const normalizedRole = useMemo(() => {
     if (!user?.role) return "user"
@@ -197,6 +198,17 @@ export default function SchemaDetailPage() {
                 Test set
               </button>
             )}
+            {canManage && (
+              <button
+                onClick={() => setActiveTab("accuracy")}
+                className={`px-6 py-3 text-sm font-medium border-b-2 transition-colors ${activeTab === "accuracy"
+                    ? "border-blue-600 text-blue-600"
+                    : "border-transparent text-slate-500 hover:text-slate-700"
+                  }`}
+              >
+                Accuracy
+              </button>
+            )}
           </div>
         </div>
 
@@ -235,6 +247,10 @@ export default function SchemaDetailPage() {
 
           {activeTab === "tests" && canManage && (
             <SchemaTestSetPanel schemaId={schema.id} fields={(schema.fields || []).map((field) => ({ name: field.name, type: field.type }))} />
+          )}
+
+          {activeTab === "accuracy" && canManage && (
+            <SchemaAccuracyPanel schemaId={schema.id} onSchemaUpdated={(updated) => setSchema((current) => ({ ...(current as SchemaDetail), ...(updated as Partial<SchemaDetail>) }))} />
           )}
 
           {activeTab === "json" && (

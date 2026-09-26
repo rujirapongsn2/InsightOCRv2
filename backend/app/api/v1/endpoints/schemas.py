@@ -6,8 +6,8 @@ import re
 from typing import List, Any, Literal
 from urllib.parse import urlparse, urlencode
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Response, status
-from pydantic import BaseModel, model_validator
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query, Response, status
+from pydantic import BaseModel, Field, ValidationError, model_validator
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
@@ -567,6 +567,8 @@ async def store_schema_samples(
         raise
     log_activity(db=db, user_id=current_user.id, action=Actions.UPDATE_SCHEMA, resource_type="schema",
                  resource_id=schema.id, details={"schema_name": schema.name, "samples_stored": len(rows)})
+    if any(row.expected for row in rows):
+        _queue_auto_test(schema, schema.current_version, "samples_added")
     return [_sample_summary(row) for row in rows]
 
 
@@ -668,8 +670,10 @@ def list_schema_versions(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schema not found")
     rows = (db.query(SchemaVersion).filter(SchemaVersion.schema_id == schema.id)
             .order_by(SchemaVersion.version.desc()).all())
+    history = schema_versions.version_test_history(rows)
     return {
         "current_version": schema.current_version,
+        "auto_test": _auto_test_status(schema),
         "versions": [
             {
                 "version": row.version,
@@ -678,10 +682,112 @@ def list_schema_versions(
                 "created_at": row.created_at,
                 "created_by_name": row.creator.full_name if row.creator else None,
                 "fields": row.fields,
+                "test": history.get(row.version),
             }
             for row in rows
         ],
     }
+
+
+def _queue_auto_test(schema: DocumentSchema, version: int | None, trigger: str) -> None:
+    from app.tasks.schema_studio_tasks import queue_auto_test
+
+    queue_auto_test(schema.id, version, trigger)
+
+
+def _auto_test_status(schema: DocumentSchema) -> dict[str, Any]:
+    """Whether an automatic test run is queued or running for this schema."""
+    from app.tasks.schema_studio_tasks import auto_test_key
+
+    status_info: dict[str, Any] = {"enabled": settings.SCHEMA_TEST_AUTO_RUN, "pending": False}
+    try:
+        client = schema_studio._redis_client()
+        try:
+            marker = client.get(auto_test_key(schema.id))
+        finally:
+            client.close()
+    except Exception:  # noqa: BLE001 — status is informational
+        return status_info
+    if marker:
+        status_info.update(pending=True, **{key: value for key, value in json.loads(marker).items()
+                                             if key in {"trigger", "version"}})
+    return status_info
+
+
+@router.get("/{schema_id}/accuracy")
+def read_schema_accuracy(
+    *,
+    db: Session = Depends(deps.get_db),
+    schema_id: str,
+    days: int | None = Query(None, ge=1, le=3650),
+    current_user: User = Depends(deps.get_current_active_user),
+) -> Any:
+    """Per-field accuracy of mapped values against what reviewers confirmed."""
+    from app.services.schema_accuracy import schema_accuracy
+
+    schema = _get_managed_schema(db, schema_id, current_user)
+    return schema_accuracy(db, schema, days)
+
+
+@router.get("/{schema_id}/improvements")
+def read_schema_improvements(
+    *,
+    db: Session = Depends(deps.get_db),
+    schema_id: str,
+    days: int | None = Query(None, ge=1, le=3650),
+    current_user: User = Depends(deps.get_current_active_user),
+) -> Any:
+    """Schema changes suggested by reviewer corrections (labels, format rules, required flags)."""
+    from app.services.schema_accuracy import suggest_improvements
+
+    schema = _get_managed_schema(db, schema_id, current_user)
+    result = suggest_improvements(db, schema, days)
+    setting = db.query(Setting).first()
+    # Labels are only read when the mapping engine is Auto.
+    result["label_pass_active"] = (getattr(setting, "mapping_engine", None) or "auto") == "auto"
+    return result
+
+
+class SchemaImprovementChange(BaseModel):
+    field: str
+    kind: Literal["add_labels", "replace_pattern", "remove_pattern", "make_optional"]
+    labels: list[str] | None = None
+    pattern: str | None = None
+
+
+class SchemaImprovementApply(BaseModel):
+    changes: list[SchemaImprovementChange] = Field(..., min_length=1, max_length=50)
+
+
+@router.post("/{schema_id}/improvements/apply", response_model=DocumentSchemaSchema)
+def apply_schema_improvements(
+    *,
+    db: Session = Depends(deps.get_db),
+    schema_id: str,
+    payload: SchemaImprovementApply,
+    current_user: User = Depends(deps.get_current_active_user),
+) -> Any:
+    """Apply accepted suggestions as a new schema version, then re-run the test set."""
+    from app.services.schema_accuracy import apply_improvements, describe_changes
+
+    schema = _get_managed_schema(db, schema_id, current_user)
+    changes = [change.model_dump() for change in payload.changes]
+    try:
+        fields = apply_improvements(schema.fields or [], changes)
+        update = DocumentSchemaUpdate(fields=fields)
+    except (ValueError, ValidationError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            detail=str(exc.errors()[0].get("msg") if isinstance(exc, ValidationError) else exc)) from exc
+    schema.fields = _schema_update_values(update, schema)["fields"]
+    previous_version = schema.current_version
+    version = schema_versions.ensure_current_version(db, schema, current_user.id, describe_changes(changes))
+    db.commit()
+    db.refresh(schema)
+    log_activity(db=db, user_id=current_user.id, action=Actions.UPDATE_SCHEMA, resource_type="schema",
+                 resource_id=schema.id, details={"schema_name": schema.name, "review_suggestions_applied": len(changes)})
+    if version.version != previous_version:
+        _queue_auto_test(schema, version.version, "review_suggestions")
+    return schema
 
 
 @router.post("/preview-fixed-fields")
@@ -1096,9 +1202,12 @@ def update_schema(
         setattr(schema, field, value)
 
     db.add(schema)
-    schema_versions.ensure_current_version(db, schema, current_user.id, "Edited")
+    previous_version = schema.current_version
+    version = schema_versions.ensure_current_version(db, schema, current_user.id, "Edited")
     db.commit()
     db.refresh(schema)
+    if version.version != previous_version:
+        _queue_auto_test(schema, version.version, "schema_change")
 
     # Log activity
     log_activity(

@@ -88,14 +88,23 @@ def upload(name, data=b"%PDF-1.4 sample"):
 
 
 @pytest.fixture
-def storage(monkeypatch):
+def queued(monkeypatch):
+    """Automatic test runs requested by endpoints (never sent to the real broker)."""
+    calls = []
+    monkeypatch.setattr("app.tasks.schema_studio_tasks.queue_auto_test",
+                        lambda schema_id, version, trigger: calls.append((str(schema_id), version, trigger)) or True)
+    return calls
+
+
+@pytest.fixture
+def storage(monkeypatch, queued):
     fake = FakeStorage()
     monkeypatch.setattr("app.services.storage.get_storage_service", lambda: fake)
     monkeypatch.setattr("app.api.v1.endpoints.schemas.log_activity", lambda **kwargs: None)
     return fake
 
 
-def test_samples_need_consent_and_keep_cached_text_and_confirmed_values(db, storage, monkeypatch):
+def test_samples_need_consent_and_keep_cached_text_and_confirmed_values(db, storage, monkeypatch, queued):
     from app.api.v1.endpoints import schemas as ep
     from app.services import schema_studio
 
@@ -118,6 +127,7 @@ def test_samples_need_consent_and_keep_cached_text_and_confirmed_values(db, stor
     assert row.storage_path.startswith(f"schema-samples/{schema.id}/") and row.storage_path in storage.files
     assert row.expires_at is not None
     assert out[0]["confirmed_fields"] == ["invoice_no"]
+    assert queued == [(str(schema.id), schema.current_version, "samples_added")]
 
 
 def test_deleting_a_sample_removes_its_file(db, storage):
@@ -193,8 +203,111 @@ def test_test_set_results_keep_the_version_that_was_tested(db, monkeypatch):
     db.commit()
     monkeypatch.setattr(tasks, "SessionLocal", lambda: db)
     monkeypatch.setattr(db, "close", lambda: None)
-    tasks._save_last_runs(str(schema.id), [{"sample_id": row.id, "comparison": {"checked": 1, "matched": 1, "fields": {}}}], 3)
-    assert db.get(SchemaSample, row.id).last_run["schema_version"] == 3
+    schema_versions.ensure_current_version(db, schema)
+    tasks._save_last_runs(str(schema.id), [{"sample_id": row.id, "report": {"engine": "llm"},
+                                            "comparison": {"checked": 1, "matched": 1,
+                                                           "fields": {"invoice_no": {"match": True}}}}], 1,
+                          None, "schema_change")
+    assert db.get(SchemaSample, row.id).last_run["schema_version"] == 1
+    run = schema_versions.latest_version(db, schema.id).test_runs[-1]
+    assert (run["engine"], run["trigger"], run["fields"]) == ("llm", "schema_change",
+                                                               {"invoice_no": {"checked": 1, "matched": 1}})
+
+
+def test_applying_review_suggestions_creates_a_version_and_retests(db, storage, queued):
+    from app.api.v1.endpoints import schemas as ep
+
+    schema = make_schema(db, [{"name": "po_number", "type": "text", "required": True}])
+    schema_versions.ensure_current_version(db, schema)
+    db.commit()
+    payload = ep.SchemaImprovementApply(changes=[
+        {"field": "po_number", "kind": "add_labels", "labels": ["PO No"]},
+        {"field": "po_number", "kind": "make_optional"},
+    ])
+    out = ep.apply_schema_improvements(db=db, schema_id=str(schema.id), payload=payload, current_user=ADMIN)
+    field = out.fields[0]
+    assert field["validation_rules"]["source_labels"] == ["PO No"] and field["required"] is False
+    assert out.current_version == 2
+    assert queued == [(str(schema.id), 2, "review_suggestions")]
+    with pytest.raises(HTTPException) as exc:
+        ep.apply_schema_improvements(db=db, schema_id=str(schema.id), current_user=ADMIN,
+                                     payload=ep.SchemaImprovementApply(changes=[{"field": "gone", "kind": "make_optional"}]))
+    assert exc.value.status_code == 422
+
+
+class FakeRedis:
+    def __init__(self, store):
+        self.store = store
+
+    def set(self, key, value, ex=None):
+        self.store[key] = value
+
+    def get(self, key):
+        return self.store.get(key)
+
+    def delete(self, key):
+        self.store.pop(key, None)
+
+    def close(self):
+        pass
+
+
+@pytest.mark.parametrize("expected_version,marker_token,runs", [(1, "t1", 1), (0, "t1", 0), (1, "newer", 0)])
+def test_automatic_test_runs_only_on_the_version_it_was_queued_for(db, monkeypatch, expected_version, marker_token, runs):
+    import redis
+    from app.tasks import schema_studio_tasks as tasks
+
+    schema = make_schema(db, [{"name": "invoice_no", "type": "text"}, {"name": "box", "type": "text",
+                                                                        "locator": {"page": 1}}])
+    schema_versions.ensure_current_version(db, schema)
+    db.add_all([
+        SchemaSample(id=uuid4(), schema_id=schema.id, filename="a.pdf", storage_path="p/a", text="t",
+                     expected={"invoice_no": "INV-1"}),
+        SchemaSample(id=uuid4(), schema_id=schema.id, filename="b.pdf", storage_path="p/b", text="t",
+                     expected={"removed_field": "x"}),
+    ])
+    db.commit()
+    store = {tasks.auto_test_key(schema.id): json.dumps({"version": expected_version, "token": marker_token})}
+    monkeypatch.setattr(redis, "from_url", lambda *args, **kwargs: FakeRedis(store))
+    monkeypatch.setattr(tasks, "SessionLocal", lambda: db)
+    monkeypatch.setattr(db, "close", lambda: None)
+    calls = []
+    monkeypatch.setattr(tasks, "run_schema_samples_task", lambda *args: calls.append(args))
+
+    tasks.auto_test_schema_task.run(str(schema.id), "schema_change", expected_version, "t1")
+
+    assert len(calls) == runs
+    if runs:
+        _user, _run, samples, fields, engine, schema_id, version, trigger = calls[0]
+        assert [sample["filename"] for sample in samples] == ["a.pdf"]  # b.pdf has no current confirmations
+        assert [field["name"] for field in fields] == ["invoice_no"]  # fixed-position fields need the page image
+        assert (engine, version, trigger) == (None, 1, "schema_change")
+    # A newer request keeps its marker, so the Versions tab keeps showing it as running.
+    assert bool(store) == (marker_token == "newer")
+
+
+def test_a_burst_of_requests_runs_once(db, monkeypatch):
+    import redis
+    from app.tasks import schema_studio_tasks as tasks
+
+    store, queued_tasks = {}, []
+    monkeypatch.setattr(redis, "from_url", lambda *args, **kwargs: FakeRedis(store))
+    monkeypatch.setattr(tasks.auto_test_schema_task, "apply_async", lambda args, **kwargs: queued_tasks.append(args))
+    schema_id = uuid4()
+    for trigger in ("samples_added", "samples_added", "engine_change"):
+        assert tasks.queue_auto_test(schema_id, 1, trigger)
+    calls = []
+    monkeypatch.setattr(tasks, "SessionLocal", lambda: db)
+    monkeypatch.setattr(db, "close", lambda: None)
+    monkeypatch.setattr(tasks, "run_schema_samples_task", lambda *args: calls.append(args))
+    make_schema(db, [{"name": "invoice_no", "type": "text"}]).id = schema_id
+    db.add(SchemaSample(id=uuid4(), schema_id=schema_id, filename="a.pdf", storage_path="p/a", text="t",
+                        expected={"invoice_no": "INV-1"}))
+    db.commit()
+    for args in queued_tasks:
+        tasks.auto_test_schema_task.run(*args)
+    assert len(calls) == 1 and calls[0][-1] == "engine_change"
+    assert store == {}
 
 
 @pytest.mark.parametrize("extracted,detail", [(ValueError("no pages"), "Could not read"), ("", "No text could be read")])

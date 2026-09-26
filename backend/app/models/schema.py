@@ -53,6 +53,8 @@ class SchemaVersion(Base):
     created_by = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     creator = relationship("User")
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    # Latest test-set runs on this version (newest last): per-field matches, engine, trigger.
+    test_runs = Column(JSON, nullable=True)
 
 
 class SchemaSample(Base):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import socket
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -59,8 +60,15 @@ def _schema():
     )
 
 
-def _setting(enabled=True):
-    return SimpleNamespace(ocr_fallback_enabled=enabled, ocr_fallback_api_key=None, verify_ssl=True)
+def _setting(enabled=True, fallback_key=None):
+    """Softnix OCR is configured with fake credentials; the OCR calls themselves are stubbed."""
+    return SimpleNamespace(
+        ocr_fallback_enabled=enabled,
+        ocr_fallback_api_key=fallback_key,
+        verify_ssl=True,
+        ocr_endpoint="https://softnix-ocr.invalid",
+        api_token="test-token",
+    )
 
 
 def _write_pdf_placeholder(tmp_path):
@@ -75,10 +83,30 @@ def _write_image(tmp_path):
     return str(path)
 
 
+def _unexpected_call(name):
+    def fail(*_args, **_kwargs):
+        raise AssertionError(f"{name} was called without a test stub")
+    return fail
+
+
 @pytest.fixture(autouse=True)
-def _skip_local_tesseract(monkeypatch):
-    """Keep provider-chain tests deterministic; override per Tesseract test."""
+def _no_live_providers(monkeypatch):
+    """Keep provider-chain tests deterministic and offline.
+
+    A developer's MISTRAL_API_KEY must never turn a test into a paid API call:
+    the key is removed, every OCR provider fails unless the test stubs it, and
+    any socket connection fails outright. Tests override the stubs they need.
+    """
+    monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
     monkeypatch.setattr(anydoc_pipeline, "process_tesseract_ocr", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr(anydoc_pipeline, "process_ocr", _unexpected_call("Softnix OCR"))
+    monkeypatch.setattr(anydoc_pipeline, "process_fallback_ocr", _unexpected_call("OCR fallback"))
+
+    def refuse_connection(*_args, **_kwargs):
+        raise AssertionError("tests must not open network connections")
+
+    monkeypatch.setattr(socket.socket, "connect", refuse_connection)
+    monkeypatch.setattr(socket.socket, "connect_ex", refuse_connection)
 
 
 def test_anydoc_hybrid_preserves_all_pages_without_field_mapping(monkeypatch, tmp_path):
@@ -110,14 +138,14 @@ def test_anydoc_hybrid_uses_configured_fallback_for_a_failed_page(monkeypatch, t
     monkeypatch.setattr(anydoc_pipeline, "_load_anydoc", lambda: FakeAnydoc())
     monkeypatch.setattr(anydoc_pipeline, "_pdf_text_pages", lambda _path: [{"page_number": 1, "ocr_text": ""}, {"page_number": 2, "ocr_text": ""}])
     monkeypatch.setattr(anydoc_pipeline, "process_ocr", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("primary down")))
-    monkeypatch.setattr(anydoc_pipeline, "resolve_fallback_api_key", lambda _setting: ("fallback-key", "environment"))
     monkeypatch.setattr(
         anydoc_pipeline,
         "process_fallback_ocr",
         lambda *_args, **_kwargs: {"results": {"pages": [{"ocr_text": "Fallback total 20"}]}},
     )
     monkeypatch.setattr(anydoc_pipeline, "get_verify_ssl", lambda *_args: True)
-    result = extract_anydoc_document(_write_pdf_placeholder(tmp_path), FakeDb(_setting()), _schema())
+    result = extract_anydoc_document(_write_pdf_placeholder(tmp_path), FakeDb(_setting(fallback_key="fallback-key")),
+                                     _schema())
 
     assert result.pages[1]["provider"] == "ocr_fallback"
     assert result.metadata["provider_counts"] == {
@@ -204,7 +232,6 @@ def test_anydoc_hybrid_image_uses_softnix_ocr_after_tesseract_and_skips_auto_map
 
 def test_anydoc_hybrid_image_uses_fallback_when_primary_returns_no_text(monkeypatch, tmp_path):
     monkeypatch.setattr(anydoc_pipeline, "process_ocr", lambda *_args, **_kwargs: {})
-    monkeypatch.setattr(anydoc_pipeline, "resolve_fallback_api_key", lambda _setting: ("fallback-key", "environment"))
     monkeypatch.setattr(anydoc_pipeline, "get_verify_ssl", lambda *_args: True)
     monkeypatch.setattr(
         anydoc_pipeline,
@@ -212,7 +239,7 @@ def test_anydoc_hybrid_image_uses_fallback_when_primary_returns_no_text(monkeypa
         lambda *_args, **_kwargs: {"results": {"pages": [{"ocr_text": "Fallback image text"}]}},
     )
 
-    result = extract_anydoc_document(_write_image(tmp_path), FakeDb(_setting()), None)
+    result = extract_anydoc_document(_write_image(tmp_path), FakeDb(_setting(fallback_key="fallback-key")), None)
 
     assert result.pages[0]["provider"] == "ocr_fallback"
     assert result.metadata["fallback_pages"] == [1]
@@ -400,7 +427,6 @@ def test_schema_sample_uses_ocr_fallback_without_softnix_ocr(monkeypatch, tmp_pa
         "process_ocr",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("Softnix OCR must not be called")),
     )
-    monkeypatch.setattr(anydoc_pipeline, "resolve_fallback_api_key", lambda _setting: ("fallback-key", "environment"))
     monkeypatch.setattr(anydoc_pipeline, "get_verify_ssl", lambda *_args: True)
     monkeypatch.setattr(
         anydoc_pipeline,
@@ -408,7 +434,7 @@ def test_schema_sample_uses_ocr_fallback_without_softnix_ocr(monkeypatch, tmp_pa
         lambda *_args, **_kwargs: {"results": {"pages": [{"ocr_text": "Fallback sample text"}]}},
     )
 
-    result = extract_schema_sample(_write_image(tmp_path), FakeDb(_setting()))
+    result = extract_schema_sample(_write_image(tmp_path), FakeDb(_setting(fallback_key="fallback-key")))
 
     assert result.markdown == "Fallback sample text"
     assert result.pages[0]["provider"] == "ocr_fallback"
@@ -425,9 +451,7 @@ def test_schema_sample_fails_when_tesseract_and_fallback_return_no_text(monkeypa
         "process_ocr",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("Softnix OCR must not be called")),
     )
-    monkeypatch.setattr(anydoc_pipeline, "resolve_fallback_api_key", lambda _setting: ("", "none"))
-
-    with pytest.raises(AnydocTerminalError, match="TesseractOCR and OCR fallback"):
+    with pytest.raises(AnydocTerminalError, match=r"TesseractOCR returned no text.*OCR fallback is disabled"):
         extract_schema_sample(_write_image(tmp_path), FakeDb(_setting(False)))
 
 
