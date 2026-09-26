@@ -89,6 +89,74 @@ def _queue_engine_change_tests(db: Session) -> None:
         logger.warning("Could not queue test runs after the mapping engine changed", exc_info=True)
 
 
+class OcrQualityPolicy(BaseModel):
+    routing: bool
+    jev: bool
+
+
+def _ocr_quality_stats(db: Session, days: int = 30) -> dict[str, Any]:
+    """What report-only mode has recorded, to help decide whether to enable routing."""
+    from sqlalchemy import text as sql_text
+
+    query = sql_text("""
+        SELECT
+          count(*) FILTER (WHERE extraction_metadata::jsonb ? 'ocr_quality'
+                           AND extraction_metadata::jsonb->'ocr_quality' <> '{}'::jsonb) AS scored,
+          count(*) FILTER (WHERE jsonb_array_length(COALESCE(extraction_metadata::jsonb->'ocr_low_quality_pages', '[]'::jsonb)) > 0) AS low_quality,
+          count(*) FILTER (WHERE jsonb_array_length(COALESCE(extraction_metadata::jsonb->'ocr_escalated_pages', '[]'::jsonb)) > 0) AS escalated,
+          count(*) FILTER (WHERE extraction_metadata::jsonb ? 'auto_review_skipped') AS auto_review_held
+        FROM documents
+        WHERE processed_at >= now() - make_interval(days => :days) AND extraction_metadata IS NOT NULL
+    """)
+    try:
+        row = db.execute(query, {"days": days}).mappings().first() or {}
+    except Exception:  # noqa: BLE001 — statistics are informational
+        db.rollback()
+        return {"days": days, "available": False}
+    return {"days": days, "available": True, **{key: int(row.get(key) or 0) for key in
+                                                  ("scored", "low_quality", "escalated", "auto_review_held")}}
+
+
+def _ocr_quality_response(db: Session, setting: Setting | None) -> dict[str, Any]:
+    from app.services.ocr_quality import jev_enabled, routing_enabled
+    from app.services.typesafe import typesafe_is_configured
+
+    return {
+        "routing": routing_enabled(setting),
+        "jev": jev_enabled(setting),
+        "jev_configured": bool(setting) and typesafe_is_configured(setting),
+        "softnix_configured": bool(setting and (setting.ocr_endpoint or setting.api_endpoint) and setting.api_token),
+        "thresholds": {
+            "good_confidence": settings.OCR_QUALITY_GOOD_CONFIDENCE,
+            "poor_confidence": settings.OCR_QUALITY_POOR_CONFIDENCE,
+            "max_low_lines": settings.OCR_QUALITY_MAX_LOW_LINES,
+            "field_min_confidence": settings.OCR_FIELD_MIN_CONFIDENCE,
+            "jev_threshold": settings.OCR_QUALITY_JEV_THRESHOLD,
+        },
+        "stats": _ocr_quality_stats(db),
+    }
+
+
+@router.get("/ocr-quality")
+def read_ocr_quality_policy(db: Session = Depends(deps.get_db),
+                            current_user: User = Depends(deps.get_current_active_superuser)):
+    return _ocr_quality_response(db, db.query(Setting).first())
+
+
+@router.put("/ocr-quality")
+def save_ocr_quality_policy(payload: OcrQualityPolicy, db: Session = Depends(deps.get_db),
+                            current_user: User = Depends(deps.get_current_active_superuser)):
+    setting = db.query(Setting).first()
+    if setting is None:
+        raise HTTPException(422, "Save OCR configuration first")
+    setting.ocr_quality_routing = payload.routing
+    setting.ocr_quality_jev = payload.jev
+    db.commit()
+    log_activity(db=db, user_id=current_user.id, action=Actions.UPDATE_SETTINGS, resource_type="settings",
+                 resource_id=setting.id, details={"ocr_quality_routing": payload.routing, "ocr_quality_jev": payload.jev})
+    return _ocr_quality_response(db, setting)
+
+
 @router.post("/mapping/test", status_code=202)
 def start_mapping_test(current_user: User = Depends(deps.get_current_active_superuser)):
     import redis

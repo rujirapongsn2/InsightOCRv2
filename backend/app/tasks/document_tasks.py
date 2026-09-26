@@ -114,6 +114,8 @@ def remap_document_task(document_id: str, token: str, engine: str, field_names: 
                 values, report = map_fields(document.ocr_text or "", schema, db, file_path,
                                             engine=engine, field_names=field_names)
             attach_page_evidence(report, document.ocr_pages)
+            from app.services.ocr_quality import review_uncertain_values
+            review_uncertain_values(values, report, document.ocr_pages, schema.fields or [])
             db.refresh(document)
             if document.task_id != token:
                 return
@@ -939,6 +941,8 @@ def apply_schema_mapping(
         from app.services.schema_versions import record_document_version
         record_document_version(db, document, schema)
     attach_page_evidence(report, getattr(document, "ocr_pages", None))
+    from app.services.ocr_quality import review_uncertain_values
+    review_uncertain_values(values, report, getattr(document, "ocr_pages", None), schema.fields or [])
     extraction_metadata["mapping"] = report
     extraction_metadata["field_evidence"] = report["fields"]
     if report["unresolved_fields"]:
@@ -1060,6 +1064,17 @@ def _finalize_document_success(
     job_logger: Any,
     auto_review: bool = False,
 ) -> Dict[str, Any]:
+    blockers: list[str] = []
+    if auto_review:
+        from app.services.ocr_quality import auto_review_blockers
+        blockers = auto_review_blockers(document)
+        if blockers:
+            # Leave it for a person: the pipeline itself flagged these values.
+            metadata = dict(document.extraction_metadata or {})
+            metadata["auto_review_skipped"] = blockers
+            document.extraction_metadata = metadata
+            auto_review = False
+            job_logger.info("Auto-confirm skipped for %s: %s", document.filename, "; ".join(blockers))
     if auto_review:
         document.status = "reviewed"
         document.review_decision = "confirmed"

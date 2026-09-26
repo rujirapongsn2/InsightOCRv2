@@ -33,6 +33,10 @@ class Setting(Base):
     typesafe_endpoint = Column(String, nullable=True)
     typesafe_api_key = Column(String, nullable=True)
 
+    # OCR quality routing (see ocr_quality). NULL means "use the environment default".
+    ocr_quality_routing = Column(Boolean, nullable=True)
+    ocr_quality_jev = Column(Boolean, nullable=True)
+
     # Admin-managed Microsoft delegated OAuth configuration. The secret is
     # encrypted with the application SECRET_KEY before it reaches the DB.
     microsoft_oauth_client_id = Column(String, nullable=True)

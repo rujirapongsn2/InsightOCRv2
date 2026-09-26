@@ -390,18 +390,45 @@ def _ocr_page_with_providers(
     skipped: list[str] = []
     last_failure = "no OCR provider produced text"
 
+    # Set when Tesseract produced text judged poor: kept if no better OCR succeeds.
+    tesseract_page: dict[str, Any] | None = None
     try:
         attempted.append("TesseractOCR")
-        return run_tesseract()
+        page = run_tesseract()
     except Exception as error:
         logger.info("TesseractOCR did not produce text for page %s: %s", page_number, error)
         last_failure = str(error)
+    else:
+        # Scoring must never cost the page its text: on any error, keep Tesseract's result.
+        try:
+            quality = _judge_tesseract_page(page, setting, deadline_monotonic)
+        except Exception as error:  # noqa: BLE001
+            logger.warning("OCR quality check failed for page %s: %s", page_number, type(error).__name__)
+            page["quality"] = {"decision": "unknown", "error": type(error).__name__}
+            return page
+        page["quality"] = quality
+        if quality["decision"] != "poor":
+            return page
+        from app.services.ocr_quality import routing_enabled
+        if not routing_enabled(setting):
+            quality["action"] = "would_escalate"  # report-only: keep the text, record the verdict
+            return page
+        quality["action"] = "escalated"
+        tesseract_page = page
+        last_failure = "TesseractOCR text was judged poor"
+
+    def better_than_tesseract(page: dict[str, Any]) -> dict[str, Any]:
+        if tesseract_page is not None:
+            page["replaced"] = {"provider": "tesseract_ocr",
+                                "mean_confidence": tesseract_page["quality"].get("mean_confidence"),
+                                "reason": tesseract_page["quality"].get("reason")}
+        return page
 
     if allow_softnix_ocr:
         if softnix_ocr_configured(setting):
             try:
                 attempted.append("Softnix OCR")
-                return run_softnix()
+                return better_than_tesseract(run_softnix())
             except Exception as error:
                 logger.warning("Softnix OCR failed for page %s: %s", page_number, error)
                 last_failure = str(error)
@@ -420,16 +447,65 @@ def _ocr_page_with_providers(
     else:
         try:
             attempted.append("OCR fallback")
-            return run_fallback()
+            return better_than_tesseract(run_fallback())
         except Exception as error:
             logger.warning("OCR fallback failed for page %s: %s", page_number, error)
             last_failure = str(error)
+
+    if tesseract_page is not None:
+        # No better OCR was available or it failed: poor text beats no text.
+        tesseract_page["quality"]["action"] = "kept_no_better_ocr"
+        return tesseract_page
 
     attempted_label = ", ".join(attempted) if attempted else "no providers"
     skipped_label = f"; skipped: {', '.join(skipped)}" if skipped else ""
     raise AnydocTerminalError(
         f"{attempted_label} returned no text for page {page_number}{skipped_label}; {last_failure}"
     )
+
+
+def _judge_tesseract_page(page: dict[str, Any], setting: Setting, deadline_monotonic: float) -> dict[str, Any]:
+    """Layer 0 (confidence + broken Thai), then Jev Noul only for borderline pages."""
+    from app.services.ocr_quality import assess_tesseract_page, jev_readable
+
+    quality = assess_tesseract_page(page.get("words") or [],
+                                    _thai_font_mapping_signals(page.get("ocr_text", ""))["suspect"])
+    decision = quality["verdict"]
+    if decision == "uncertain":
+        remaining = max(0.0, deadline_monotonic - time.monotonic())
+        jev = jev_readable(page.get("ocr_text", ""), setting,
+                           min(settings.OCR_QUALITY_JEV_TIMEOUT_SECONDS, remaining))
+        if jev is not None:
+            quality["jev"] = jev
+            if "readable" in jev:
+                decision = "good" if jev["readable"] else "poor"
+        if decision == "uncertain":
+            decision = "good"  # without a second opinion, keep the text rather than pay for another OCR
+    quality["decision"] = decision
+    return quality
+
+
+def _normalize_pages(pages: list[dict[str, Any]], markdown: str) -> tuple[str, list[int]]:
+    """Apply the unambiguous Thai encoding fixes to every page and the combined text."""
+    from app.services.ocr_quality import normalize_thai
+
+    changed: list[int] = []
+    for page in pages:
+        text, count = normalize_thai(page.get("ocr_text") or "")
+        if count:
+            page["ocr_text"] = text
+            changed.append(int(page["page_number"]))
+    markdown, _count = normalize_thai(markdown)
+    return markdown, changed
+
+
+def _quality_metadata(pages: list[dict[str, Any]]) -> dict[str, Any]:
+    quality = {int(page["page_number"]): page["quality"] for page in pages if isinstance(page.get("quality"), dict)}
+    return {
+        "ocr_quality": quality,
+        "ocr_low_quality_pages": sorted(number for number, item in quality.items() if item.get("decision") == "poor"),
+        "ocr_escalated_pages": sorted(int(page["page_number"]) for page in pages if page.get("replaced")),
+    }
 
 
 def _provider_pages(pages: list[dict[str, Any]], provider: str) -> list[int]:
@@ -562,6 +638,7 @@ def _extract_anydoc_pdf_document(
 
     if not markdown:
         raise AnydocTerminalError("AnyDoc and OCR providers returned no text")
+    markdown, normalized_pages = _normalize_pages(pages, markdown)
 
     metadata = {
         "pipeline": pipeline_name,
@@ -597,6 +674,8 @@ def _extract_anydoc_pdf_document(
             for page in pages
         ],
         "provider_counts": _provider_counts(pages),
+        **_quality_metadata(pages),
+        "thai_normalized_pages": normalized_pages,
         "requested_ocr_engine": forced_provider,
         # Mapping is applied by the task only after canonical Markdown has been
         # produced, so all OCR routes share one Schema validation path.
@@ -698,10 +777,8 @@ def _extract_anydoc_image_document(
             allow_softnix_ocr=allow_softnix_ocr,
             forced_provider=forced_provider,
         )
-        text = page["ocr_text"]
-
-        markdown = text.strip()
         pages = [page]
+        markdown, normalized_pages = _normalize_pages(pages, page["ocr_text"].strip())
         metadata = {
             "pipeline": pipeline_name,
             "parser": "image_ocr",
@@ -717,6 +794,8 @@ def _extract_anydoc_image_document(
             "fallback_pages": [1] if page.get("provider") == "ocr_fallback" else [],
             "page_sources": [{"page": 1, "provider": page["provider"]}],
             "provider_counts": _provider_counts(pages),
+            **_quality_metadata(pages),
+            "thai_normalized_pages": normalized_pages,
             "requested_ocr_engine": forced_provider,
             "mapping": "pending" if schema else "not_requested",
             "schema_context": schema.name if schema else None,

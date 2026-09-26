@@ -9,6 +9,7 @@ import { AlertCircle, Bot, Check, CheckCircle2, ChevronDown, Cloud, Copy, Eye, E
 import { getApiBaseUrl, getPublicApiBaseUrl } from "@/lib/api"
 import { ApiAccessTokens } from "@/components/settings/ApiAccessTokens"
 import { MappingSettings } from "@/components/settings/MappingSettings"
+import { OcrQualitySettings } from "@/components/settings/OcrQualitySettings"
 import { ApiWorkflowDocs } from "@/components/profile/ApiWorkflowDocs"
 import { AgentSkillDownloads } from "@/components/profile/AgentSkillDownloads"
 import { McpClientGuide } from "@/components/profile/McpClientGuide"
@@ -967,6 +968,18 @@ export default function SettingsPage() {
               <span className="break-all">{error}</span>
             </div>
           )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>คุณภาพ OCR</CardTitle>
+          <p className="text-sm text-slate-600 mt-1">
+            ตรวจคุณภาพข้อความจาก Tesseract และเลือกว่าจะให้ระบบอ่านหน้าที่คุณภาพต่ำใหม่หรือไม่
+          </p>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <OcrQualitySettings />
         </CardContent>
       </Card>
 

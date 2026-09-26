@@ -79,6 +79,25 @@ class Settings(BaseSettings):
     ANYDOC_DOCUMENT_TIMEOUT_SECONDS: int = 1200
     TESSERACT_OCR_LANGUAGE: str = "tha+eng"
     TESSERACT_OCR_TIMEOUT_SECONDS: int = 30
+    # OCR quality routing. Report-only until OCR_QUALITY_ROUTING is enabled: pages are
+    # scored and "would_escalate" is recorded, but the Tesseract text is kept.
+    OCR_QUALITY_ROUTING: bool = False
+    OCR_QUALITY_GOOD_CONFIDENCE: float = 75.0
+    OCR_QUALITY_POOR_CONFIDENCE: float = 55.0
+    OCR_QUALITY_LOW_WORD_CONFIDENCE: float = 60.0
+    OCR_QUALITY_MIN_WORDS: int = 10
+    OCR_QUALITY_VERY_LOW_WORD_CONFIDENCE: float = 40.0
+    # A page with this many low-confidence lines is poor even when its mean is high.
+    OCR_QUALITY_MAX_LOW_LINES: int = 3
+    # A mapped value read from OCR words below this confidence goes to review.
+    OCR_FIELD_MIN_CONFIDENCE: float = 60.0
+    # Ask TypeSafe Jev (Noul) about borderline pages when it is configured.
+    OCR_QUALITY_JEV: bool = False
+    OCR_QUALITY_JEV_THRESHOLD: float = 0.5
+    OCR_QUALITY_JEV_MAX_CHARS: int = 6000
+    OCR_QUALITY_JEV_TIMEOUT_SECONDS: int = 20
+    # Unambiguous Thai encoding fixes (detached marks, decomposed SARA AM).
+    THAI_TEXT_NORMALIZE: bool = True
     # Softnix OCR is asynchronous. Complex scanned Thai pages can take more
     # than a minute, so allow a bounded four-minute wait before OCR fallback.
     ANYDOC_PRIMARY_OCR_TIMEOUT_SECONDS: int = 240

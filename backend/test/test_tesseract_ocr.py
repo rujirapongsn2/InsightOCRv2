@@ -49,7 +49,7 @@ def test_tesseract_ocr_tsv_returns_positioned_words(tmp_path):
         return_value=SimpleNamespace(returncode=0, stdout=tsv, stderr=""),
     ) as run:
         assert process_tesseract_ocr_tsv(str(image_path), language="eng", timeout=8) == [
-            {"text": "Invoice", "x": 12.0, "y": 34.0, "width": 56.0, "height": 18.0}
+            {"text": "Invoice", "x": 12.0, "y": 34.0, "width": 56.0, "height": 18.0, "conf": 95.0, "line": "1.1.1"}
         ]
 
     assert run.call_args.args[0] == ["tesseract", str(image_path), "stdout", "-l", "eng", "tsv"]
@@ -82,8 +82,8 @@ def test_words_come_from_the_same_pass_as_percent_of_the_image(tmp_path, monkeyp
 
     assert text == 'INV-1 "quoted'
     assert len(commands) == 1 and commands[0][-2:] == ["txt", "tsv"]
-    assert words == [{"text": "INV-1", "x": 10.0, "y": 10.0, "width": 20.0, "height": 5.0},
-                     {"text": '"quoted', "x": 35.0, "y": 10.0, "width": 15.0, "height": 5.0}]
+    assert words == [{"text": "INV-1", "x": 10.0, "y": 10.0, "width": 20.0, "height": 5.0, "conf": 95.0, "line": "1.1.1"},
+                     {"text": '"quoted', "x": 35.0, "y": 10.0, "width": 15.0, "height": 5.0, "conf": 95.0, "line": "1.1.1"}]
 
 
 def test_sample_words_reads_each_pdf_page_with_tesseract(monkeypatch, tmp_path):

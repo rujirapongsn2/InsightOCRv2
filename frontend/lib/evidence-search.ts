@@ -22,8 +22,13 @@ type ViewportLike = {
 
 const MIN_SEARCH_LENGTH = 2
 
+/** One spelling for matching: SARA AM decomposed, as OCR words often keep it ("จํากัด"). */
+function searchForm(text: string): string {
+    return text.replace(/\u0E33/g, "\u0E4D\u0E32").toLowerCase()
+}
+
 function compact(text: string): string {
-    return text.replace(/\s+/g, "").toLowerCase()
+    return searchForm(text.replace(/\s+/g, ""))
 }
 
 /** Ways the value may be printed in the document, e.g. 1250 → "1,250.00". */
@@ -67,8 +72,10 @@ export function findTextBox(items: TextItemLike[], viewport: ViewportLike, texts
     items.forEach((item, index) => {
         for (let char = 0; char < item.str.length; char += 1) {
             if (/\s/.test(item.str[char])) continue
-            joined += item.str[char].toLowerCase()
-            owner.push({ item: index, char })
+            for (const part of searchForm(item.str[char])) {
+                joined += part
+                owner.push({ item: index, char })
+            }
         }
     })
     for (const text of texts) {
@@ -128,9 +135,9 @@ export function findWordBox(words: PageWord[], texts: string[]): Box | null {
     let joined = ""
     const owner: number[] = []
     words.forEach((word, index) => {
-        for (const char of word.text) {
+        for (const char of searchForm(word.text)) {
             if (/\s/.test(char)) continue
-            joined += char.toLowerCase()
+            joined += char
             owner.push(index)
         }
     })

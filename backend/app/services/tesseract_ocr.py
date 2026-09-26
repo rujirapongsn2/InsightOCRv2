@@ -93,6 +93,8 @@ def _percent_words(tsv: str, image_path: str) -> list[dict[str, Any]]:
             "y": round(word["y"] / height * 100, 2),
             "width": round(word["width"] / width * 100, 2),
             "height": round(word["height"] / height * 100, 2),
+            "conf": word["conf"],
+            "line": word["line"],
         })
     return words
 
@@ -105,7 +107,9 @@ def _tsv_words(tsv: str) -> list[dict[str, Any]]:
             continue
         try:
             words.append({"text": text, "x": float(row["left"]), "y": float(row["top"]),
-                          "width": float(row["width"]), "height": float(row["height"])})
+                          "width": float(row["width"]), "height": float(row["height"]),
+                          "conf": round(float(row.get("conf") or -1), 1),
+                          "line": f"{row.get('block_num')}.{row.get('par_num')}.{row.get('line_num')}"})
         except (KeyError, TypeError, ValueError):
             continue
     return words
