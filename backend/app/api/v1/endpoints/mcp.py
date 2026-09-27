@@ -543,7 +543,9 @@ def _list_integrations(arguments: dict[str, Any], db: Session, user: User) -> di
     limit = _bounded_int(arguments.get("limit"), default=50, minimum=1, maximum=MCP_MAX_RESULTS, field_name="limit")
     query = db.query(Integration).filter(Integration.status == IntegrationStatus.ACTIVE)
     if not is_admin_user(user):
-        query = query.filter(Integration.user_id == user.id)
+        from sqlalchemy import or_
+        # Own integrations plus the ones an admin shared (same rule as Agent DOC and workflows).
+        query = query.filter(or_(Integration.user_id == user.id, Integration.is_shared.is_(True)))
     integrations = query.order_by(Integration.name.asc()).limit(limit).all()
     return {
         "integrations": [
@@ -553,6 +555,7 @@ def _list_integrations(arguments: dict[str, Any], db: Session, user: User) -> di
                 "type": _integration_type_value(integration.type),
                 "description": integration.description,
                 "status": _integration_type_value(integration.status),
+                "shared": bool(integration.is_shared) and integration.user_id != user.id,
                 "created_at": _serialize_datetime(integration.created_at),
                 "updated_at": _serialize_datetime(integration.updated_at),
             }

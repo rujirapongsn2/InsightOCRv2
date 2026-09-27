@@ -855,9 +855,11 @@ def _ensure_integration_owner(integration: Integration, owner_user_id: Optional[
     """Block a workflow from using another user's Integration credentials."""
     if owner_user_id is None:
         return  # legacy workflow without an owner — nothing to enforce
-    if integration.user_id is not None and str(integration.user_id) != str(owner_user_id):
+    from app.services.integration_access import integration_usable_by
+
+    if not integration_usable_by(integration, owner_user_id):
         raise NodeExecutionError(
-            f"Integration '{integration.name}' belongs to another user"
+            f"Integration '{integration.name}' belongs to another user and is not shared"
         )
 
 

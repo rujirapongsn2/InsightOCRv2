@@ -46,7 +46,8 @@ class CRUDIntegration:
             type=integration.type,
             description=integration.description,
             status=integration.status,
-            config=integration.config
+            config=integration.config,
+            is_shared=bool(getattr(integration, "is_shared", False)),
         )
         db.add(db_integration)
         db.commit()

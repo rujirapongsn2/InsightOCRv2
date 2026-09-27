@@ -26,6 +26,7 @@ from app.models.integration import Integration
 from app.models.job import Job
 from app.models.schema import DocumentSchema
 from app.models.user import User
+from app.services.integration_access import integration_usable_by
 from app.services.workflow_engine import (
     EXECUTORS,
     JEV_CHOICE_FALLBACK_HANDLE,
@@ -254,8 +255,8 @@ def validate_workflow_definition(
                 level = "warning" if allow_unresolved_references else "error"
                 issues.append(_issue(nid, level, "integration_id", "ไม่พบ integration ที่อ้างถึง — โปรดเลือก/สร้างใหม่"))
             else:
-                if integ.user_id is not None and str(integ.user_id) != str(owner.id):
-                    issues.append(_issue(nid, "error", "integration_id", "integration นี้เป็นของผู้ใช้อื่น"))
+                if not integration_usable_by(integ, owner.id):
+                    issues.append(_issue(nid, "error", "integration_id", "integration นี้เป็นของผู้ใช้อื่นและไม่ได้แชร์ไว้"))
                 itype = integ.type.value if hasattr(integ.type, "value") else str(integ.type)
                 if itype != provider:
                     issues.append(_issue(nid, "error", "integration_id", f"integration ต้องเป็นชนิด {provider} (พบ {itype})"))
@@ -301,8 +302,8 @@ def validate_workflow_definition(
                 else:
                     integration_type = integration.type.value if hasattr(integration.type, "value") else str(integration.type)
                     integration_status = integration.status.value if hasattr(integration.status, "value") else str(integration.status)
-                    if integration.user_id is not None and str(integration.user_id) != str(owner.id):
-                        issues.append(_issue(nid, "error", "provider_ref", "LLM integration นี้เป็นของผู้ใช้อื่น"))
+                    if not integration_usable_by(integration, owner.id):
+                        issues.append(_issue(nid, "error", "provider_ref", "LLM integration นี้เป็นของผู้ใช้อื่นและไม่ได้แชร์ไว้"))
                     if integration_type not in {"llm", "softnix_genai"}:
                         issues.append(_issue(nid, "error", "provider_ref", "ต้องเลือก Integration ชนิด LLM Provider หรือ Softnix GenAI"))
                     if integration_status != "active":
@@ -340,8 +341,8 @@ def validate_workflow_definition(
                 else:
                     integration_type = integration.type.value if hasattr(integration.type, "value") else str(integration.type)
                     integration_status = integration.status.value if hasattr(integration.status, "value") else str(integration.status)
-                    if integration.user_id is not None and str(integration.user_id) != str(owner.id):
-                        issues.append(_issue(nid, "error", "integration_id", "LLM integration นี้เป็นของผู้ใช้อื่น"))
+                    if not integration_usable_by(integration, owner.id):
+                        issues.append(_issue(nid, "error", "integration_id", "LLM integration นี้เป็นของผู้ใช้อื่นและไม่ได้แชร์ไว้"))
                     if integration_type not in {"llm", "softnix_genai"}:
                         issues.append(_issue(nid, "error", "integration_id", "ต้องเลือก Integration ชนิด LLM Provider หรือ Softnix GenAI"))
                     if integration_status != "active":

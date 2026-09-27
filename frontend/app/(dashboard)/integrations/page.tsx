@@ -72,6 +72,7 @@ interface Integration {
     type: IntegrationType
     description?: string
     status: "active" | "paused"
+    is_shared?: boolean
     updatedAt?: string
     updated_at?: string
     created_at?: string
@@ -83,6 +84,7 @@ interface IntegrationFormState {
     type: IntegrationType
     description: string
     status: "active" | "paused"
+    isShared: boolean
     method: "POST" | "PUT"
     endpoint: string
     authHeader: string
@@ -109,6 +111,7 @@ const defaultFormState: IntegrationFormState = {
     type: "api",
     description: "",
     status: "active",
+    isShared: false,
     method: "POST",
     endpoint: "",
     authHeader: "",
@@ -548,6 +551,7 @@ export default function IntegrationsPage() {
         setFormState({
             name: integration.name, type: integration.type,
             description: integration.description || "", status: integration.status,
+            isShared: Boolean(integration.is_shared),
             method: (integration.config.method as "POST" | "PUT") || "POST",
             endpoint: integration.config.endpoint || "",
             authHeader: integration.config.authHeader || "",
@@ -629,10 +633,14 @@ export default function IntegrationsPage() {
 
         try {
             if (editingId) {
-                const updated = await updateIntegration(token, editingId, { name: formState.name, type: formState.type, description: formState.description, status: formState.status, config: configData })
+                // A shared integration's connection (type/config) can only be changed by an admin.
+                const connectionLocked = !isAdmin && formState.isShared
+                const updated = await updateIntegration(token, editingId, connectionLocked
+                    ? { name: formState.name, description: formState.description, status: formState.status }
+                    : { name: formState.name, type: formState.type, description: formState.description, status: formState.status, config: configData, ...(isAdmin ? { is_shared: formState.isShared } : {}) })
                 setIntegrations(integrations.map((item) => (item.id === editingId ? updated as Integration : item)))
             } else {
-                const created = await createIntegration(token, { name: formState.name, type: formState.type, description: formState.description, status: formState.status, config: configData })
+                const created = await createIntegration(token, { name: formState.name, type: formState.type, description: formState.description, status: formState.status, config: configData, ...(isAdmin ? { is_shared: formState.isShared } : {}) })
                 setIntegrations([...integrations, created as Integration])
             }
             setShowForm(false)
@@ -1216,6 +1224,12 @@ export default function IntegrationsPage() {
                                             <span className={`rounded-full px-2.5 py-1 text-[0.75rem] font-semibold leading-none ${integration.status === "active" ? "bg-green-100 text-green-700" : "bg-amber-100 text-amber-700"}`}>
                                                 {integration.status === "active" ? "Active" : "Paused"}
                                             </span>
+                                            {integration.is_shared && (
+                                                <span title="ผู้ใช้ทุกคนใช้ integration นี้ใน Agent และ Workflow ได้ โดยไม่เห็นคีย์หรือรหัสผ่าน"
+                                                    className="rounded-full bg-blue-100 px-2.5 py-1 text-[0.75rem] font-semibold leading-none text-blue-700">
+                                                    แชร์ให้ทุกคน
+                                                </span>
+                                            )}
                                             {isLlmIntegration && (
                                                 <span
                                                     title={agentTools?.error || (agentTools?.verifiedAt ? "พร้อมใช้กับ Workflow Agent" : "ระบบยังไม่ได้ยืนยัน Agent tools")}
@@ -1324,6 +1338,24 @@ export default function IntegrationsPage() {
                             </select>
                         </div>
                     </div>
+                    {!isAdmin && editingId && formState.isShared && (
+                        <p className="rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                            integration นี้แชร์ให้ทุกคนใช้อยู่ แก้ได้เฉพาะชื่อ คำอธิบาย และสถานะ ส่วนการเชื่อมต่อ (endpoint, คีย์, ค่าอื่นๆ) ต้องให้ admin แก้
+                        </p>
+                    )}
+                    {isAdmin && (
+                        <label className="flex items-start gap-3 rounded-md border border-slate-200 bg-slate-50 p-3 text-sm" htmlFor="integration-is-shared">
+                            <input id="integration-is-shared" type="checkbox" className="mt-0.5 h-4 w-4" checked={formState.isShared}
+                                onChange={(e) => setFormState({ ...formState, isShared: e.target.checked })} />
+                            <span>
+                                <span className="font-medium">แชร์ให้ผู้ใช้ทุกคนใช้</span>
+                                <span className="block text-xs text-slate-600">
+                                    ผู้ใช้คนอื่นเลือก integration นี้ใน Workflow และให้ Agent เรียกใช้ได้ โดยไม่เห็นคีย์หรือรหัสผ่าน
+                                    · ปิดไว้ = ใช้ได้เฉพาะเจ้าของ
+                                </span>
+                            </span>
+                        </label>
+                    )}
                     <div className="space-y-2">
                         <label className="text-sm font-medium">Description</label>
                         <Textarea placeholder="Describe what this integration sends" value={formState.description}

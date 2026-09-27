@@ -332,7 +332,18 @@ def _cloud_redirect_url(request: Request, **params: str) -> str:
     return f"{resolve_public_app_url(request).rstrip('/')}/integrations?{query}"
 
 
+def _shared_change_blocked(current_user: User, integration: Integration) -> bool:
+    """True when a non-admin, non-owner tries to change an integration everyone depends on."""
+    is_admin = current_user.is_superuser or deps._normalize_role(str(current_user.role) if current_user.role else None) == "admin"
+    return bool(getattr(integration, "is_shared", False)) and not is_admin and integration.user_id != current_user.id
+
+
 def _can_manage_cloud(current_user: User, integration: Integration) -> bool:
+    # The destination folder is part of a shared integration's connection: admins only,
+    # the same rule update_integration applies to config.
+    is_admin = current_user.is_superuser or deps._normalize_role(str(current_user.role) if current_user.role else None) == "admin"
+    if getattr(integration, "is_shared", False) and not is_admin:
+        return False
     return bool(
         current_user.is_superuser
         or current_user.role in ("admin", "manager", "documents_admin")
@@ -455,6 +466,13 @@ async def complete_cloud_oauth(
         ),
         None,
     )
+    is_admin = user.is_superuser or normalize_role(user.role) == "admin"
+    if existing and existing.is_shared and not is_admin:
+        # Reconnecting would replace the tokens and drive every user's workflows rely on
+        # (and re-activate it if an admin paused it); an admin must do that.
+        return RedirectResponse(_cloud_redirect_url(
+            request, oauth="error", provider=provider,
+            message="บัญชีนี้ถูกแชร์ให้ทุกคนใช้อยู่ ต้องให้ admin เป็นผู้เชื่อมต่อใหม่"))
     if existing:
         config["folder_id"] = (existing.config or {}).get("folder_id") or config["folder_id"]
         config["folder_name"] = (existing.config or {}).get("folder_name") or config["folder_name"]
@@ -710,6 +728,8 @@ async def create_integration(
 
     if normalized != "manager" and not is_admin:
         raise HTTPException(status_code=403, detail="Only managers and admins can create integrations")
+    if integration_data.is_shared and not is_admin:
+        raise HTTPException(status_code=403, detail="Only admins can share an integration with everyone")
 
     integration_data.config = _prepare_agent_tools_verification(
         integration_data.type,
@@ -762,6 +782,16 @@ async def update_integration(
     # Check permissions: admin can update any, managers can update their own or same-group
     if not is_admin and existing.user_id != current_user.id and not can_manage_group_resource(current_user, existing.user):
         raise HTTPException(status_code=403, detail="You can only update your own integrations")
+    if existing.is_shared and not is_admin and existing.user_id != current_user.id:
+        # Everyone depends on a shared integration; only its owner or an admin may change it.
+        raise HTTPException(status_code=403, detail="Only an admin or the owner can change a shared integration")
+    if existing.is_shared and not is_admin and (integration_data.config is not None or integration_data.type is not None):
+        # Everyone's workflows send data through a shared integration's endpoint and credentials;
+        # only an admin may change them (or unshare it first).
+        raise HTTPException(status_code=403, detail="Only an admin can change the connection of a shared integration")
+    if integration_data.is_shared is not None and bool(integration_data.is_shared) != bool(existing.is_shared) and not is_admin:
+        # Sharing hands other users the use of these credentials; an admin decides that.
+        raise HTTPException(status_code=403, detail="Only admins can change whether an integration is shared")
 
     # A masked credential in the payload means the client echoed back the
     # redacted GET response unchanged — restore the stored value.
@@ -820,7 +850,8 @@ async def update_integration(
         details={
             "name": updated_integration.name,
             "type": updated_integration.type,
-            "status": updated_integration.status
+            "status": updated_integration.status,
+            "is_shared": bool(updated_integration.is_shared),
         }
     )
 
@@ -846,6 +877,9 @@ async def delete_integration(
     # Check permissions: admin can delete any, managers can delete their own or same-group
     if not is_admin and existing.user_id != current_user.id and not can_manage_group_resource(current_user, existing.user):
         raise HTTPException(status_code=403, detail="You can only delete your own integrations")
+    if existing.is_shared and not is_admin and existing.user_id != current_user.id:
+        # Everyone depends on a shared integration; only its owner or an admin may delete it.
+        raise HTTPException(status_code=403, detail="Only an admin or the owner can delete a shared integration")
 
     # Delete integration
     success = crud_integration.delete(db=db, integration_id=integration_id)
@@ -986,7 +1020,8 @@ def _authorize_send_target(
         return
     if is_admin_user(current_user) or normalize_role(current_user.role) == "manager":
         return
-    if integration.user_id != current_user.id:
+    # Other users' destinations only when an admin explicitly shared them.
+    if integration.user_id != current_user.id and not getattr(integration, "is_shared", False):
         raise HTTPException(status_code=403, detail="You cannot use this integration")
 
 
@@ -1056,6 +1091,8 @@ async def test_agent_tools(
             raise HTTPException(status_code=403, detail="Only managers and admins can verify Agent tools")
         if not is_admin and integration.user_id != current_user.id and not can_manage_group_resource(current_user, integration.user):
             raise HTTPException(status_code=403, detail="You can only verify your own integrations")
+        if _shared_change_blocked(current_user, integration):
+            raise HTTPException(status_code=403, detail="Only an admin or the owner can re-verify a shared integration")
         if not _is_llm_integration(integration):
             raise HTTPException(status_code=400, detail="Integration is not an LLM type")
         api_key = _integration_api_key(integration)

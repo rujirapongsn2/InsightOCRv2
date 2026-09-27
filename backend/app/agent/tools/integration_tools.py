@@ -9,12 +9,13 @@ def _value(field) -> str:
 
 
 def _visible_to(integration, user_id) -> bool:
-    """The user's own integrations and shared ones (no owner); never another user's.
+    """The user's own integrations and ones an admin shared; never another user's private ones.
 
-    Same rule the workflow validator applies to integration references.
+    Same rule as workflow nodes (integration_access.integration_usable_by).
     """
-    owner = getattr(integration, "user_id", None)
-    return owner is None or str(owner) == str(user_id)
+    from app.services.integration_access import integration_usable_by
+
+    return integration_usable_by(integration, user_id)
 
 
 def _accessible_integrations(db, user_id, *, active_only: bool = True) -> list:
@@ -36,7 +37,7 @@ def _find_integration(db, user_id, *, integration_id=None, integration_name=None
                if integration.name and integration.name.strip().lower() == name
                and (itype is None or _value(integration.type) == itype)]
     # Prefer the user's own over a shared integration with the same name.
-    matches.sort(key=lambda integration: getattr(integration, "user_id", None) is None)
+    matches.sort(key=lambda integration: str(getattr(integration, "user_id", None)) != str(user_id))
     return matches[0] if matches else None
 
 
@@ -49,7 +50,8 @@ async def _list_integrations_handler(args: dict, context) -> dict:
             continue
         # No secrets: id/name/type/status/description only.
         out.append({"id": str(integration.id), "name": integration.name, "type": itype,
-                    "status": _value(integration.status), "description": getattr(integration, "description", None)})
+                    "status": _value(integration.status), "description": getattr(integration, "description", None),
+                    "shared": str(getattr(integration, "user_id", None)) != str(context.user_id)})
     return {"count": len(out), "integrations": out}
 
 

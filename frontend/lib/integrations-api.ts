@@ -40,6 +40,8 @@ export interface Integration {
   description?: string
   status: "active" | "paused"
   config: IntegrationConfig
+  /** Shared by an admin: every user may use it in Agent DOC and workflows. */
+  is_shared?: boolean
   created_at: string
   updated_at: string
 }
@@ -50,6 +52,7 @@ export interface IntegrationCreate {
   description?: string
   status?: "active" | "paused"
   config: Record<string, any>
+  is_shared?: boolean
 }
 
 export interface IntegrationUpdate {
@@ -58,6 +61,7 @@ export interface IntegrationUpdate {
   description?: string
   status?: "active" | "paused"
   config?: Record<string, any>
+  is_shared?: boolean
 }
 
 /**

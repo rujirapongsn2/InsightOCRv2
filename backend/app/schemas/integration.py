@@ -1,6 +1,6 @@
 """Integration schemas for API request/response validation."""
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional, Dict, Any
 from datetime import datetime
 from uuid import UUID
@@ -34,6 +34,7 @@ class IntegrationCreate(BaseModel):
     description: Optional[str] = None
     status: str = Field(default="active", pattern="^(active|paused)$")
     config: Dict[str, Any] = Field(default_factory=dict)
+    is_shared: bool = False
 
 
 class IntegrationUpdate(BaseModel):
@@ -43,6 +44,15 @@ class IntegrationUpdate(BaseModel):
     description: Optional[str] = None
     status: Optional[str] = Field(None, pattern="^(active|paused)$")
     config: Optional[Dict[str, Any]] = None
+    is_shared: Optional[bool] = None
+
+    @field_validator("is_shared", mode="before")
+    @classmethod
+    def _no_null_sharing(cls, value):
+        # Omit the field to leave sharing unchanged; null is not a valid setting.
+        if value is None:
+            raise ValueError("is_shared must be true or false; leave it out to keep the current setting")
+        return value
 
 
 class IntegrationResponse(BaseModel):
@@ -54,6 +64,7 @@ class IntegrationResponse(BaseModel):
     description: Optional[str]
     status: str
     config: Dict[str, Any]
+    is_shared: bool = False
     created_at: datetime
     updated_at: datetime
 

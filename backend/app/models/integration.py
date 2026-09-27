@@ -1,6 +1,6 @@
 """Integration model for storing integration configurations."""
 
-from sqlalchemy import Column, String, Text, DateTime, Enum as SQLEnum, ForeignKey, func
+from sqlalchemy import Column, String, Text, DateTime, Enum as SQLEnum, ForeignKey, func, Boolean
 from sqlalchemy.orm import relationship
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 import uuid
@@ -36,6 +36,8 @@ class Integration(Base):
     type = Column(SQLEnum(IntegrationType), nullable=False)
     description = Column(Text)
     status = Column(SQLEnum(IntegrationStatus), default=IntegrationStatus.ACTIVE, nullable=False)
+    # Shared by an admin: every user may use it in Agent DOC and workflows (credentials stay hidden).
+    is_shared = Column(Boolean, default=False, nullable=False, server_default="false")
 
     # Configuration stored as JSON (encrypted sensitive fields will be handled separately)
     config = Column(JSONB, nullable=False, default={})
