@@ -122,7 +122,7 @@ def _ensure_receipt_review_job(db: Session, owner: User | None) -> Job:
                     page_count=1,
                     extracted_data=item["data"],
                     reviewed_data=item["data"],
-                    review_decision="approved",
+                    review_decision="confirmed",
                     extraction_confidence=0.94,
                 )
             )

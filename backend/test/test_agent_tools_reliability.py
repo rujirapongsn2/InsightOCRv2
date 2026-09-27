@@ -333,11 +333,20 @@ def test_repeated_decisions_change_nothing_and_reversals_need_consent(db3, monke
     again = asyncio.run(document_tools._approve_document_handler({"doc_id": str(doc.id)}, ctx))
     assert first["verified"] and again["unchanged"] is True and len(logged) == 1
 
+    assert db3.get(Document, doc.id).review_decision == "confirmed"  # same value as the review page
     refused = asyncio.run(document_tools._reject_document_handler({"doc_id": str(doc.id)}, ctx))
-    assert refused["ok"] is False and refused["current_decision"] == "approved"
+    assert refused["ok"] is False and refused["current_decision"] == "confirmed"
     reversed_ = asyncio.run(document_tools._reject_document_handler(
         {"doc_id": str(doc.id), "reverse_previous_decision": True}, ctx))
-    assert reversed_["changed_from"] == "approved" and db3.get(Document, doc.id).review_decision == "rejected"
+    saved = db3.get(Document, doc.id)
+    assert reversed_["changed_from"] == "confirmed" and (saved.status, saved.review_decision) == ("rejected", "rejected")
+    again = asyncio.run(document_tools._reject_document_handler({"doc_id": str(doc.id)}, ctx))
+    assert again["unchanged"] is True and again["status"] == "rejected"  # reports the real status
+
+    legacy = _document(db3, {"total": 2})
+    legacy.status, legacy.review_decision = "reviewed", "approved"  # written by the old agent
+    db3.commit()
+    assert asyncio.run(document_tools._approve_document_handler({"doc_id": str(legacy.id)}, ctx))["unchanged"] is True
 
 
 def test_bulk_approve_with_nothing_waiting_is_not_a_success(db3):

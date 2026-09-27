@@ -265,9 +265,11 @@ def _review_target(args: dict, context):
 
 def _already_decided(doc, decision: str) -> dict | None:
     """Idempotency: repeating a decision changes nothing and logs nothing."""
-    if doc.status == "reviewed" and doc.review_decision == decision:
+    # Same values as the review page (confirmed / rejected); legacy agent rows said "approved".
+    current = "confirmed" if doc.review_decision == "approved" else doc.review_decision
+    if doc.status in {"reviewed", "rejected"} and current == decision:
         return {"ok": True, "verified": True, "unchanged": True, "doc_id": str(doc.id), "filename": doc.filename,
-                "status": "reviewed", "note": f"Already {decision}; nothing changed."}
+                "status": doc.status, "note": f"Already {decision}; nothing changed."}
     return None
 
 
@@ -275,12 +277,12 @@ async def _approve_document_handler(args: dict, context) -> dict:
     doc, error = _review_target(args, context)
     if error:
         return error
-    done = _already_decided(doc, "approved")
+    done = _already_decided(doc, "confirmed")
     if done:
         return done
-    previous = doc.review_decision if doc.status == "reviewed" else None
+    previous = doc.review_decision if doc.status in {"reviewed", "rejected"} else None
     doc.status = "reviewed"
-    doc.review_decision = "approved"
+    doc.review_decision = "confirmed"
     doc.reviewed_at = datetime.now(timezone.utc)
     doc.reviewed_by = context.user_id
     if not doc.reviewed_data:
@@ -291,7 +293,7 @@ async def _approve_document_handler(args: dict, context) -> dict:
         context.db.rollback()
         return {"ok": False, "error": f"DB commit failed: {type(e).__name__}: {e}"}
     context.db.refresh(doc)
-    if doc.status != "reviewed" or doc.review_decision != "approved":
+    if doc.status != "reviewed" or doc.review_decision != "confirmed":
         return {
             "ok": False,
             "error": "Read-back mismatch: review state not persisted",
@@ -300,7 +302,7 @@ async def _approve_document_handler(args: dict, context) -> dict:
         }
     log_activity(context.db, user_id=context.user_id, action="review_document",
                  resource_type="document", resource_id=str(doc.id),
-                 details={"decision": "approved", "agent_initiated": True, "note": args.get("note"),
+                 details={"decision": "confirmed", "agent_initiated": True, "note": args.get("note"),
                           "previous_decision": previous})
     result = {"ok": True, "verified": True, "doc_id": str(doc.id), "filename": doc.filename, "status": "reviewed"}
     if previous:
@@ -315,12 +317,12 @@ async def _reject_document_handler(args: dict, context) -> dict:
     done = _already_decided(doc, "rejected")
     if done:
         return done
-    previous = doc.review_decision if doc.status == "reviewed" else None
+    previous = doc.review_decision if doc.status in {"reviewed", "rejected"} else None
     if previous and not args.get("reverse_previous_decision"):
         # Rejecting an approved document used to happen silently.
         return {"ok": False, "error": f"This document is already {previous}. Ask the user, then call again with "
                                       "reverse_previous_decision=true to change it.", "current_decision": previous}
-    doc.status = "reviewed"
+    doc.status = "rejected"  # as the review page does
     doc.review_decision = "rejected"
     doc.reviewed_at = datetime.now(timezone.utc)
     doc.reviewed_by = context.user_id
@@ -330,7 +332,7 @@ async def _reject_document_handler(args: dict, context) -> dict:
         context.db.rollback()
         return {"ok": False, "error": f"DB commit failed: {type(e).__name__}: {e}"}
     context.db.refresh(doc)
-    if doc.status != "reviewed" or doc.review_decision != "rejected":
+    if doc.status != "rejected" or doc.review_decision != "rejected":
         return {
             "ok": False,
             "error": "Read-back mismatch: review state not persisted",
@@ -340,7 +342,7 @@ async def _reject_document_handler(args: dict, context) -> dict:
     log_activity(context.db, user_id=context.user_id, action="review_document",
                  resource_type="document", resource_id=str(doc.id),
                  details={"decision": "rejected", "agent_initiated": True, "previous_decision": previous})
-    result = {"ok": True, "verified": True, "doc_id": str(doc.id), "filename": doc.filename, "status": "reviewed"}
+    result = {"ok": True, "verified": True, "doc_id": str(doc.id), "filename": doc.filename, "status": "rejected"}
     if previous:
         result["changed_from"] = previous
     return result
@@ -359,7 +361,7 @@ async def _bulk_approve_handler(args: dict, context) -> dict:
     target_ids = [d.id for d in docs]
     for d in docs:
         d.status = "reviewed"
-        d.review_decision = "approved"
+        d.review_decision = "confirmed"
         d.reviewed_at = datetime.now(timezone.utc)
         d.reviewed_by = context.user_id
         if not d.reviewed_data:
@@ -388,7 +390,7 @@ async def _bulk_approve_handler(args: dict, context) -> dict:
 tool_registry.register(ToolDef(
     name="list_documents", category="document",
     description="List all documents in the current job with status, confidence, and review state.",
-    parameters_schema={"type": "object", "properties": {"status_filter": {"type": "string", "enum": ["uploaded", "ocr_completed", "extraction_completed", "reviewed", "all"], "default": "all"}}, "required": []},
+    parameters_schema={"type": "object", "properties": {"status_filter": {"type": "string", "enum": ["uploaded", "ocr_completed", "extraction_completed", "reviewed", "rejected", "all"], "default": "all"}}, "required": []},
     handler=_list_documents_handler,
 ))
 
@@ -433,7 +435,7 @@ tool_registry.register(ToolDef(
 
 tool_registry.register(ToolDef(
     name="approve_document", category="document",
-    description="Approve a document — sets status to 'reviewed' with decision 'approved'.",
+    description="Approve a document — sets status to 'reviewed' with review_decision 'confirmed' (the same value the review page uses).",
     parameters_schema={"type": "object", "properties": {"doc_id": {"type": "string"}, "note": {"type": "string"}}, "required": ["doc_id"]},
     handler=_approve_document_handler,
     requires_confirmation=True,
@@ -441,7 +443,7 @@ tool_registry.register(ToolDef(
 
 tool_registry.register(ToolDef(
     name="reject_document", category="document",
-    description="Reject a document — sets status to 'reviewed' with decision 'rejected'.",
+    description="Reject a document — sets status to 'rejected' with review_decision 'rejected' (the same values the review page uses).",
     parameters_schema={"type": "object", "properties": {
         "doc_id": {"type": "string"},
         "reverse_previous_decision": {"type": "boolean", "description": "Set only after the user agreed to change an existing decision"},
