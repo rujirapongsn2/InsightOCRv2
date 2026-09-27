@@ -10,6 +10,8 @@ class AgentPendingAction(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     conversation_id = Column(UUID(as_uuid=True), ForeignKey("agent_conversations.id", ondelete="CASCADE"), nullable=False, index=True)
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    # The run that asked; a request is shown and honoured only for that run.
+    run_id = Column(UUID(as_uuid=True), ForeignKey("agent_runs.id", ondelete="CASCADE"), nullable=True, index=True)
     # "confirmation" (approve/reject a tool) | "credential_request" (collect a key via card)
     kind = Column(String(32), nullable=False, default="confirmation")
     tool_name = Column(String(100), nullable=False)

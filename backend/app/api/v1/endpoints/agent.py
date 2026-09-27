@@ -152,16 +152,23 @@ def _build_agent_llm_config(db: Session, conv) -> dict:
 
 def _agent_run_payload(db: Session, run: AgentRun) -> dict:
     """Return only UI-safe run state; messages remain the source of evidence."""
-    pending = (
-        db.query(AgentPendingAction)
-        .filter(
+    # Only a request this active run made: an older run's leftover request must
+    # never be shown (or auto-approved) as if the current run were waiting for it.
+    pending = None
+    if run.status in {"queued", "running"}:
+        query = db.query(AgentPendingAction).filter(
             AgentPendingAction.conversation_id == run.conversation_id,
             AgentPendingAction.user_id == run.user_id,
             AgentPendingAction.status == "pending",
         )
-        .order_by(AgentPendingAction.created_at.desc())
-        .first()
-    )
+        from sqlalchemy import or_
+        # Requests carry the run that made them; older rows without one fall back to time.
+        query = query.filter(or_(
+            AgentPendingAction.run_id == run.id,
+            AgentPendingAction.run_id.is_(None) & (AgentPendingAction.created_at >= run.created_at)
+            if run.created_at is not None else AgentPendingAction.run_id.is_(None),
+        ))
+        pending = query.order_by(AgentPendingAction.created_at.desc()).first()
     return {
         "id": str(run.id),
         "conversation_id": str(run.conversation_id),
@@ -316,6 +323,17 @@ async def send_agent_message(
             status_code=409,
             detail="Agent is already working on this conversation. Reopen it to follow the existing run.",
         )
+    stopping = (
+        db.query(AgentRun.id)
+        .filter(AgentRun.conversation_id == conversation_id, AgentRun.status == "cancelled",
+                AgentRun.finished_at.is_(None))
+        .first()
+    )
+    if stopping:
+        raise HTTPException(
+            status_code=409,
+            detail="กำลังหยุดงานก่อนหน้า รอสักครู่แล้วส่งข้อความอีกครั้ง",
+        )
 
     run = crud_run.create(
         db,
@@ -374,6 +392,54 @@ async def get_agent_run(
     return {"run": _agent_run_payload(db, run)}
 
 
+@router.post("/conversations/{conversation_id}/runs/{run_id}/cancel")
+async def cancel_agent_run(
+    conversation_id: UUID,
+    run_id: UUID,
+    db: Session = Depends(deps.get_db),
+    current_user=Depends(deps.get_current_user),
+):
+    """Stop an active run and free the conversation.
+
+    A queued run's task is revoked; a running one stops at its next step (the
+    worker checks the run's status). Waiting approvals are rejected so they
+    cannot be confirmed later for a run that has ended.
+    """
+    from datetime import datetime, timezone
+    from app.celery_app import celery_app
+
+    conv = crud_conv.get(db, conversation_id)
+    run = crud_run.get(db, run_id)
+    if not conv or not run or run.conversation_id != conversation_id or run.user_id != current_user.id:
+        raise HTTPException(status_code=404)
+    now = datetime.now(timezone.utc)
+    # A queued run has no worker yet, so it is finished at once. A running one is
+    # finished by its worker when it actually stops (the conversation stays locked until then).
+    stopped = (
+        db.query(AgentRun)
+        .filter(AgentRun.id == run_id, AgentRun.status == "queued")
+        .update({"status": "cancelled", "error": "Stopped by the user", "finished_at": now}, synchronize_session=False)
+    ) or (
+        db.query(AgentRun)
+        .filter(AgentRun.id == run_id, AgentRun.status == "running")
+        .update({"status": "cancelled", "error": "Stopped by the user"}, synchronize_session=False)
+    )
+    if stopped:
+        db.query(AgentPendingAction).filter(
+            AgentPendingAction.conversation_id == conversation_id,
+            AgentPendingAction.user_id == current_user.id,
+            AgentPendingAction.status == "pending",
+        ).update({"status": "rejected"}, synchronize_session=False)
+    db.commit()
+    db.refresh(run)
+    if stopped and run.task_id:
+        try:
+            celery_app.control.revoke(run.task_id)  # drops it if still queued; never kills a running worker
+        except Exception:  # noqa: BLE001 — the status change already stops the run
+            pass
+    return {"run": _agent_run_payload(db, run)}
+
+
 @router.post("/confirm/{pending_action_id}")
 async def confirm_pending_action(
     pending_action_id: UUID,
@@ -391,7 +457,8 @@ async def confirm_pending_action(
             status_code=400,
             detail=f"{action.tool_name} requires explicit user confirmation",
         )
-    crud_pending.resolve(db, pending_action_id, "confirmed" if data.approved else "rejected")
+    if not crud_pending.resolve(db, pending_action_id, "confirmed" if data.approved else "rejected"):
+        raise HTTPException(status_code=409, detail="This request is no longer waiting for an answer")
     return {"ok": True}
 
 

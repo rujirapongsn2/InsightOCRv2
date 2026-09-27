@@ -12,6 +12,8 @@ from app.crud.crud_agent_skill import agent_skill as crud_skill
 # the DB; only the model-facing copy is truncated so giant OCR payloads don't
 # blow the context window or drown the model in noise.
 TOOL_RESULT_MAX_CHARS = 12000
+HISTORY_USER_TURNS = 6
+HISTORY_MAX_MESSAGES = 120
 
 # Focused legal questions should be answered from the current Job's evidence.
 # Keep this allowlist intentionally small so legacy legal skills cannot expand a
@@ -185,8 +187,10 @@ class AgentContext:
             # delegation inside the strict policy selected for the turn.
             self.active_skill_allowed_tools &= next_policy
 
-    async def load_history(self, limit: int = 20) -> list[dict]:
-        messages = crud_conv.get_messages(self.db, self.conversation_id, limit=limit)
+    async def load_history(self, turns: int = HISTORY_USER_TURNS, max_messages: int = HISTORY_MAX_MESSAGES) -> list[dict]:
+        # Counted in user turns, not rows: one tool-heavy answer used to push the
+        # previous question out of a 20-row window.
+        messages = crud_conv.get_recent_turns(self.db, self.conversation_id, turns=turns, max_messages=max_messages)
         history = []
         for m in messages:
             if m.role == "user":
@@ -435,7 +439,7 @@ Help users understand, validate, correct, enrich, approve, route, and export doc
 - Use `convert_to_xlsx` when the user asks to convert an existing saved output/report/Word/PDF/CSV/text file to Excel. Prefer this deterministic conversion tool over `read_file` + `execute_python`.
 - The sandbox image preinstalls common document/data packages: `fpdf2`, `reportlab`, `requests`, `openpyxl`, `xlsxwriter`, `pandas`, `python-docx`, `pypdf`, `pillow`, and `xlrd`. CSV uses Python's built-in `csv` module. If a package is missing, call `_pip_install('pkg1 pkg2')`; NEVER call subprocess or os.system pip directly (the sandbox filesystem is read-only; only /tmp is writable).
 - For Excel output: use `openpyxl` or `xlsxwriter`, save to `/tmp/<name>.xlsx`, then call `_save_file('/tmp/<name>.xlsx')` and pass the returned base64 to `write_file`.
-- For editing an existing Excel/PDF/DOCX output: first call `read_file(path='outputs/name.xlsx', return_base64=true)`, pass that base64 into `execute_python`, decode it to `/tmp/input.xlsx` or `BytesIO`, modify it, save a new `/tmp/output.xlsx`, then call `_save_file('/tmp/output.xlsx')` and `write_file`. Never read an old `/tmp/...` path from a previous tool call; every execute_python run is a fresh ephemeral container.
+- For editing an existing Excel/PDF/DOCX output: call `execute_python` with `input_files=['outputs/name.xlsx']`, open `/tmp/inputs/name.xlsx` in the code, modify it, save a new `/tmp/output.xlsx`, then call `_save_file('/tmp/output.xlsx')` inside the code (the file is stored automatically). Never pass file content as base64 through `inputs` or `write_file`; it is cut off and the file breaks. Never read an old `/tmp/...` path from a previous tool call; every execute_python run is a fresh ephemeral container.
 - For CSV output: use Python's built-in `csv` module, encode as UTF-8, save to `/tmp/<name>.csv`, then call `_save_file('/tmp/<name>.csv')` or write text directly with `write_file`.
 - For custom PDF output with Thai text only when `create_pdf` is insufficient: use `execute_python`, `fpdf2`, and `_thai_font_path()` to load a Thai-capable font already present in the sandbox. Template:
 ```python

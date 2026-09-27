@@ -128,20 +128,43 @@ async def _create_skill_handler(args: dict, context) -> dict:
 
 # ── import_skill ──────────────────────────────────────────────────────────────
 
+def _job_scoped_path(context, path: str) -> tuple[str | None, str | None]:
+    """(storage key, error): skill files are read and written only inside the job's own files.
+
+    Arbitrary server paths let the agent read any file on the host and fail on
+    read-only containers.
+    """
+    from app.agent.tools.filesystem_tools import _normalize_job_path, _resolve_path
+
+    if not getattr(context, "job_id", None):
+        return None, "Skill files can only be imported or exported inside a Job's files"
+    try:
+        return _resolve_path(str(context.job_id), _normalize_job_path(str(context.job_id), path)), None
+    except ValueError as exc:
+        return None, str(exc)
+
+
 async def _import_skill_handler(args: dict, context) -> dict:
+    import tempfile
+    from app.services.storage import get_storage_service
+
     file_path = args["file_path"].strip()
     if not file_path:
         return {"error": "file_path is required"}
-
-    path = Path(file_path)
-    if not path.exists():
+    if not file_path.lower().endswith(".md"):
+        return {"error": "file_path must be a SKILL.md (markdown) file in the Job's files"}
+    key, error = _job_scoped_path(context, file_path)
+    if error:
+        return {"error": error}
+    storage = get_storage_service()
+    if not storage.exists(key):
         return {"error": f"File not found: {file_path}"}
-    if path.name != "SKILL.md" and path.suffix == ".md":
-        # Allow importing any .md file, treat as SKILL.md
-        pass
 
     try:
-        skill_data = parse_skill_md(str(path))
+        with storage.get_local_path(key) as local_path, tempfile.TemporaryDirectory() as workdir:
+            skill_file = Path(workdir) / "SKILL.md"
+            skill_file.write_bytes(Path(local_path).read_bytes())
+            skill_data = parse_skill_md(str(skill_file))
     except Exception as e:
         return {"error": f"Failed to parse SKILL.md: {str(e)}"}
 
@@ -171,7 +194,33 @@ async def _import_skill_handler(args: dict, context) -> dict:
                 "error": f"Skill '{skill_data['name']}' already exists. Set overwrite=true to replace.",
                 "existing_id": str(existing.id),
             }
-        crud_skill.delete_by_id(context.db, existing.id)
+
+    fields = dict(
+        description=skill_data["description"],
+        procedure=skill_data["body"],
+        trigger_hint=args.get("trigger_hint"),
+        tools_used=tool_names,
+        allowed_tools=allowed_tools,
+        license_=skill_data.get("license"),
+        compatibility=skill_data.get("compatibility"),
+        metadata_=_strict_skill_metadata(skill_data.get("metadata_")),
+        source="imported",
+        file_path=file_path,
+    )
+    if existing:
+        # Replace in place: deleting first lost the user's skill whenever creating the new one failed.
+        try:
+            for attribute, value in fields.items():
+                # crud_skill.create maps license_ to the "license" column; do the same here.
+                setattr(existing, "license" if attribute == "license_" else attribute, value)
+            context.db.commit()
+            context.db.refresh(existing)
+        except Exception as e:
+            context.db.rollback()
+            return {"error": f"Failed to import skill: {str(e)}"}
+        skill = existing
+        return {"ok": True, "id": str(skill.id), "name": skill.name, "scope": skill.scope,
+                "description": skill.description, "created_by": skill.created_by, "replaced": True}
 
     try:
         skill = crud_skill.create(
@@ -189,7 +238,7 @@ async def _import_skill_handler(args: dict, context) -> dict:
             metadata_=_strict_skill_metadata(skill_data.get("metadata_")),
             created_by="imported",
             source="imported",
-            file_path=str(path.resolve()),
+            file_path=file_path,
         )
     except Exception as e:
         return {"error": f"Failed to import skill: {str(e)}"}
@@ -227,23 +276,29 @@ async def _export_skill_handler(args: dict, context) -> dict:
         if include_bundle:
             zip_bytes = export_skill_to_md(skill, include_bundle=True)
             if output_dir:
-                out_path = Path(output_dir) / f"{skill.name}.zip"
-                out_path.parent.mkdir(parents=True, exist_ok=True)
-                out_path.write_bytes(zip_bytes)
-                return {"ok": True, "file": str(out_path), "size": len(zip_bytes)}
+                return _write_job_file(context, f"{output_dir.rstrip('/')}/{skill.name}.zip", zip_bytes, "application/zip")
             # Return as base64 if no output dir
             import base64
             return {"ok": True, "format": "zip", "base64": base64.b64encode(zip_bytes).decode(), "size": len(zip_bytes)}
         else:
             md_content = export_skill_to_md(skill, include_bundle=False)
             if output_dir:
-                out_path = Path(output_dir) / "SKILL.md"
-                out_path.parent.mkdir(parents=True, exist_ok=True)
-                out_path.write_text(md_content, encoding="utf-8")
-                return {"ok": True, "file": str(out_path)}
+                return _write_job_file(context, f"{output_dir.rstrip('/')}/SKILL.md", md_content.encode("utf-8"),
+                                       "text/markdown; charset=utf-8")
             return {"ok": True, "format": "markdown", "content": md_content}
     except Exception as e:
         return {"error": f"Export failed: {str(e)}"}
+
+
+def _write_job_file(context, path: str, data: bytes, content_type: str) -> dict:
+    import io
+    from app.services.storage import get_storage_service
+
+    key, error = _job_scoped_path(context, path)
+    if error:
+        return {"error": error}
+    get_storage_service().upload_file(io.BytesIO(data), key, content_type=content_type)
+    return {"ok": True, "file": path, "size": len(data)}
 
 
 # ── list_skills ───────────────────────────────────────────────────────────────
@@ -319,16 +374,27 @@ async def _execute_skill_handler(args: dict, context) -> dict:
     if getattr(skill, "allowed_tools", None) and not is_focused_legal_qa(getattr(context, "current_request", "")):
         instruction += f"**Pre-approved tools**: {skill.allowed_tools}\n\n"
 
+    # Tool results are cut at TOOL_RESULT_MAX_CHARS, so a long procedure is served in
+    # parts; otherwise the agent would silently follow only its first steps.
+    parts = [procedure[start:start + SKILL_PROCEDURE_PART_CHARS]
+             for start in range(0, len(procedure), SKILL_PROCEDURE_PART_CHARS)] or [""]
+    try:
+        part = min(max(int(args.get("part") or 1), 1), len(parts))
+    except (TypeError, ValueError):
+        part = 1
+    more = (f"\n\n**This is part {part} of {len(parts)} of the procedure.** Before acting on later steps, "
+            f"call execute_skill again with name=\"{skill.name}\" and part={part + 1}.") if part < len(parts) else ""
     instruction += (
-        f"**Procedure**:\n\n{procedure}\n\n"
+        f"**Procedure**{f' (part {part} of {len(parts)})' if len(parts) > 1 else ''}:\n\n{parts[part - 1]}{more}\n\n"
         "Follow the procedure above step by step. "
         "Use the available tools to accomplish each step. "
         "If a step references a script or file, check the skill's directory first. "
         "Report progress as you complete each step."
     )
 
-    # Track usage
-    crud_skill.increment_usage(context.db, skill.id)
+    # Track usage once per activation, not once per part.
+    if part == 1:
+        crud_skill.increment_usage(context.db, skill.id)
 
     try:
         allowed_tool_names, _ = _normalize_allowed_tools(getattr(skill, "allowed_tools", None))
@@ -358,7 +424,10 @@ async def _execute_skill_handler(args: dict, context) -> dict:
         "skill_name": skill.name,
         "scope": skill.scope,
         "description": skill.description,
-        "procedure": procedure,
+        # The procedure is inside ``instruction`` (once, possibly in parts); repeating it
+        # here doubled the result and pushed later steps past the size limit.
+        "procedure_part": part,
+        "procedure_parts": len(parts),
         "instruction": instruction,
         "arguments": skill_args,
         "has_file_backing": bool(skill.file_path),
@@ -366,6 +435,9 @@ async def _execute_skill_handler(args: dict, context) -> dict:
         "allowed_tool_names": allowed_tool_names,
         "enforce_tools": enforce_tools,
     }
+
+
+SKILL_PROCEDURE_PART_CHARS = 8000
 
 
 # ── delete_skill ──────────────────────────────────────────────────────────────
@@ -468,7 +540,7 @@ tool_registry.register(ToolDef(
     parameters_schema={
         "type": "object",
         "properties": {
-            "file_path": {"type": "string", "description": "Absolute path to SKILL.md file"},
+            "file_path": {"type": "string", "description": "Path of a SKILL.md in the Job's files, e.g. 'outputs/SKILL.md'"},
             "overwrite": {"type": "boolean", "default": False, "description": "Overwrite if skill already exists"},
         },
         "required": ["file_path"],
@@ -485,7 +557,7 @@ tool_registry.register(ToolDef(
         "properties": {
             "name": {"type": "string", "description": "Skill name to export"},
             "bundle": {"type": "boolean", "default": False, "description": "Export as ZIP bundle instead of markdown"},
-            "output_dir": {"type": "string", "description": "Directory to write exported file (optional)"},
+            "output_dir": {"type": "string", "description": "Folder in the Job's files to write to, e.g. 'outputs' (optional; otherwise the content is returned)"},
         },
         "required": ["name"],
     },
@@ -519,6 +591,7 @@ tool_registry.register(ToolDef(
         "properties": {
             "name": {"type": "string", "description": "Name of the skill to execute"},
             "arguments": {"type": "object", "description": "Variable values for template substitution (e.g. {'customer_name': 'ACME'})"},
+            "part": {"type": "integer", "minimum": 1, "description": "Part of a long procedure to load (the result says when there are more parts)"},
         },
         "required": ["name"],
     },

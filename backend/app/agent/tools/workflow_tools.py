@@ -88,20 +88,6 @@ async def _list_workflow_skills_handler(args: dict, context) -> dict:
     return await _list_skills_handler({}, context)
 
 
-async def _list_integrations_handler(args: dict, context) -> dict:
-    type_filter = args.get("type_filter")
-    q = context.db.query(Integration).filter(Integration.user_id == context.user_id)
-    out = []
-    for i in q.all():
-        itype = i.type.value if hasattr(i.type, "value") else str(i.type)
-        istatus = i.status.value if hasattr(i.status, "value") else str(i.status)
-        if type_filter and itype != type_filter:
-            continue
-        # No secrets — id/name/type/status only.
-        out.append({"id": str(i.id), "name": i.name, "type": itype, "status": istatus})
-    return {"count": len(out), "integrations": out}
-
-
 async def _list_ai_providers_handler(args: dict, context) -> dict:
     providers = context.db.query(AISettings).filter(AISettings.is_active == True).all()  # noqa: E712
     out = [{
@@ -347,11 +333,43 @@ async def _save_workflow_handler(args: dict, context) -> dict:
             wf.next_run_at = compute_next_run(schedule_cron, datetime.now(timezone.utc))
         except Exception:
             return {"ok": False, "error": f"cron ไม่ถูกต้อง: {schedule_cron}"}
+    # A retry after an unclear failure must not create a second copy.
+    duplicate = _recent_duplicate_workflow(db, owner.id, name, definition, description=description,
+                                           schedule_cron=schedule_cron, schedule_enabled=schedule_enabled)
+    if duplicate is not None:
+        return {"ok": True, "workflow_id": str(duplicate.id), "name": duplicate.name, "already_saved": True,
+                "warnings": [i for i in issues if i["level"] == "warning"]}
     db.add(wf)
-    db.commit()
+    try:
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        return {"ok": False, "error": f"Could not save the workflow: {type(exc).__name__}"}
     db.refresh(wf)
     return {"ok": True, "workflow_id": str(wf.id), "name": wf.name,
             "warnings": [i for i in issues if i["level"] == "warning"]}
+
+
+DUPLICATE_SAVE_WINDOW_MINUTES = 30
+
+
+def _recent_duplicate_workflow(db, user_id, name: str, definition: dict, *, description=None,
+                               schedule_cron=None, schedule_enabled=False):
+    """The identical workflow saved by this user in the last few minutes.
+
+    Everything saved must match, schedule included: saving again with a new
+    schedule is a real change, not a retry.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    since = datetime.now(timezone.utc) - timedelta(minutes=DUPLICATE_SAVE_WINDOW_MINUTES)
+    candidates = (db.query(Workflow)
+                  .filter(Workflow.user_id == user_id, Workflow.name == name, Workflow.created_at >= since)
+                  .all())
+    return next((wf for wf in candidates
+                 if wf.definition == definition and (wf.description or None) == (description or None)
+                 and (wf.schedule_cron or None) == (schedule_cron or None)
+                 and bool(wf.schedule_enabled) == bool(schedule_enabled)), None)
 
 
 _JSON_OBJ = {"type": "object", "properties": {}, "required": []}
@@ -367,9 +385,7 @@ def _register():
         parameters_schema={"type": "object", "properties": {"types": {"type": "array", "items": {"type": "string"}}}}, handler=_list_node_types_handler)
     reg(name="list_workflow_skills", description="List available Skills with real IDs for Agent nodes; never invent skill IDs.",
         parameters_schema=_JSON_OBJ, handler=_list_workflow_skills_handler)
-    reg(name="list_integrations", description="แสดง integration ของผู้ใช้ (llm/gdrive/onedrive/api) โดยไม่มีความลับ",
-        parameters_schema={"type": "object", "properties": {"type_filter": {"type": "string", "enum": ["api", "workflow", "llm", "gdrive", "onedrive"]}}, "required": []},
-        handler=_list_integrations_handler)
+    # list_integrations is defined once in integration_tools (also offered to this agent).
     reg(name="list_ai_providers", description="แสดง AI provider (Setting AI) ที่ใช้กับโหนด llm ได้",
         parameters_schema=_JSON_OBJ, handler=_list_ai_providers_handler)
     reg(name="inspect_job_data", description="ดูฟิลด์จริงและตัวอย่างข้อมูลของ Job เพื่อวางเทมเพลต {{...}} ให้ถูกต้อง",

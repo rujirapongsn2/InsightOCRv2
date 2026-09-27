@@ -18,6 +18,8 @@ class ToolDef:
     handler: Callable
     requires_confirmation: bool = False
     requires_job_context: bool = True
+    # Other agent categories that may also use this tool (one definition, one name).
+    also_categories: tuple[str, ...] = ()
 
 
 class ToolRegistry:
@@ -25,6 +27,10 @@ class ToolRegistry:
         self._tools: dict[str, ToolDef] = {}
 
     def register(self, tool: ToolDef):
+        existing = self._tools.get(tool.name)
+        if existing is not None and existing.handler is not tool.handler:
+            # Two different tools under one name silently replaced each other before.
+            raise ValueError(f"Agent tool '{tool.name}' is already registered")
         self._tools[tool.name] = tool
 
     def tool_catalog(self) -> list[dict]:
@@ -57,7 +63,7 @@ class ToolRegistry:
     ) -> list[dict]:
         result = []
         for tool in self._tools.values():
-            if categories and tool.category not in categories:
+            if categories and tool.category not in categories and not set(tool.also_categories) & set(categories):
                 continue
             if allowed_names is not None and tool.name not in allowed_names:
                 continue
@@ -81,6 +87,14 @@ class ToolRegistry:
                 "error": f"Tool '{name}' is not allowed by the active skill policy",
                 "blocked_by_skill_policy": True,
             }
+        check = getattr(context, "run_active_check", None)
+        if callable(check):
+            try:
+                active = check()
+            except Exception:  # noqa: BLE001 — never block a tool on a failed status read
+                active = True
+            if not active:
+                return {"error": "The run was stopped, so this action was not carried out", "run_stopped": True}
         try:
             result = await asyncio.wait_for(
                 tool.handler(args=args, context=context),
@@ -98,6 +112,14 @@ class ToolRegistry:
                 "timeout": True,
             }
         except Exception as e:
+            # A failed query leaves the shared session unusable; without a rollback the
+            # next message save fails and the whole run ends with a generic error.
+            db = getattr(context, "db", None)
+            if db is not None:
+                try:
+                    db.rollback()
+                except Exception:  # noqa: BLE001
+                    pass
             return {"error": f"Tool '{name}' raised {type(e).__name__}: {e}"}
 
 

@@ -13,6 +13,10 @@ from app.agent.tools.registry import ToolDef, tool_registry
 MAX_RESULTS = 8
 
 
+class WebSearchUnavailable(RuntimeError):
+    pass
+
+
 def _search_sync(query: str, max_results: int, region: str, safesearch: str) -> list[dict[str, Any]]:
     try:
         from ddgs import DDGS
@@ -20,7 +24,7 @@ def _search_sync(query: str, max_results: int, region: str, safesearch: str) -> 
         try:
             from duckduckgo_search import DDGS
         except Exception as exc:
-            return [{"error": f"ddgs/duckduckgo_search is not installed: {exc}"}]
+            raise WebSearchUnavailable("Web search is not available on this server (ddgs is not installed)") from exc
 
     results: list[dict[str, Any]] = []
     with DDGS() as ddgs:
@@ -49,6 +53,9 @@ async def _web_search_handler(args: dict, context) -> dict:
 
     try:
         results = await asyncio.to_thread(_search_sync, query, max_results, region, safesearch)
+    except WebSearchUnavailable as exc:
+        # Top-level "error" so the loop counts it as a failed tool, not an empty success.
+        return {"error": str(exc), "unavailable": True}
     except Exception as exc:
         return {"error": f"web search failed: {exc}"}
 

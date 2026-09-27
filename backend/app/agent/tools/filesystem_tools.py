@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 SAFE_PREFIX = "outputs/"
 MAX_FILE_SIZE_READ = 500_000   # 500KB max for read_file
 MAX_FILE_SIZE_WRITE = 5_000_000  # 5MB max for write_file
+READ_WINDOW_CHARS = 10_000  # text returned per read_file call (tool results are cut at ~12k)
 ALLOWED_EXTENSIONS = {
     # Text formats
     ".txt", ".md", ".csv", ".json", ".jsonl", ".yaml", ".yml",
@@ -323,6 +324,8 @@ def _safe_read(
     storage,
     path: str,
     max_size: int = MAX_FILE_SIZE_READ,
+    offset: int = 0,
+    limit: int | None = None,
     return_base64: bool = False,
     display_path: str | None = None,
 ) -> dict:
@@ -338,24 +341,9 @@ def _safe_read(
             ext = Path(path).suffix.lower()
 
             if ext in BINARY_EXTENSIONS:
-                if return_base64:
-                    if file_size > max_size:
-                        return {
-                            "error": f"File too large ({file_size} bytes, max {max_size})",
-                            "size": file_size,
-                            "binary": True,
-                        }
-                    data = local.read_bytes()
-                    return {
-                        "content": None,
-                        "content_base64": base64.b64encode(data).decode("ascii"),
-                        "binary": True,
-                        "path": display_path,
-                        "size": file_size,
-                        "extension": ext,
-                        "mime_type": _content_type_for_extension(ext),
-                        "note": "Binary content returned as base64. In execute_python, decode it to /tmp or BytesIO before editing.",
-                    }
+                # Base64 of a real file is far longer than a tool result may be, so it
+                # reached the model cut short and decoded into a corrupt file. The
+                # sandbox now reads Job files directly.
                 return {
                     "content": None,
                     "binary": True,
@@ -363,7 +351,8 @@ def _safe_read(
                     "size": file_size,
                     "extension": ext,
                     "mime_type": _content_type_for_extension(ext),
-                    "note": "Binary file; call read_file with return_base64=true to edit it in execute_python, or download from the UI.",
+                    "note": (f"Binary file. To read or edit it, call execute_python with input_files=[\"{display_path}\"] "
+                             f"and open /tmp/inputs/{Path(display_path).name} in the code."),
                 }
 
             if file_size > max_size:
@@ -376,7 +365,20 @@ def _safe_read(
             content = local.read_text(encoding="utf-8", errors="replace")
             content = content.replace("\x00", "")
 
-        return {"content": content, "size": file_size, "binary": False}
+        # Tool results are cut at ~12k characters, so text is returned a window at a
+        # time with the offset of the next window; the agent reads on instead of
+        # answering from the start of the file only.
+        total = len(content)
+        start = min(max(int(offset or 0), 0), total)
+        window = min(max(int(limit or READ_WINDOW_CHARS), 1), READ_WINDOW_CHARS)
+        chunk = content[start:start + window]
+        end = start + len(chunk)
+        result = {"content": chunk, "size": file_size, "binary": False,
+                  "offset": start, "total_chars": total, "complete": end >= total}
+        if end < total:
+            result["next_offset"] = end
+            result["note"] = f"Showing characters {start}-{end} of {total}. Call read_file with offset={end} to continue."
+        return result
     except Exception as e:
         return {"error": f"Read failed: {str(e)}"}
 
@@ -385,7 +387,9 @@ def _safe_write(storage, path: str, content: str, display_path: str, max_size: i
     """Write text content to a file."""
     ext = Path(display_path).suffix.lower()
     if ext in BINARY_EXTENSIONS:
-        return {"error": f"Binary extension '{ext}' requires content_base64. Use _save_file() in execute_python and pass its base64 value to write_file."}
+        return {"error": f"'{ext}' is a binary format. Create it in execute_python, save it to /tmp and call "
+                         "_save_file('/tmp/<name>') in the code; the file is stored automatically. "
+                         "Do not pass its content through write_file."}
 
     content_bytes = content.encode("utf-8")
     if len(content_bytes) > max_size:
@@ -450,10 +454,18 @@ async def _read_file_handler(args: dict, context) -> dict:
         return {"error": str(e)}
 
     storage = get_storage_service()
+    ceiling = MAX_FILE_SIZE_WRITE if args.get("return_base64") else MAX_FILE_SIZE_READ
+    try:
+        # The model may lower the limit, never raise it past the server's ceiling.
+        max_size = min(int(args.get("max_size") or ceiling), ceiling)
+    except (TypeError, ValueError):
+        max_size = ceiling
     return _safe_read(
         storage,
         scoped,
-        max_size=args.get("max_size", MAX_FILE_SIZE_WRITE if args.get("return_base64") else MAX_FILE_SIZE_READ),
+        max_size=max_size,
+        offset=args.get("offset") or 0,
+        limit=args.get("limit"),
         return_base64=bool(args.get("return_base64")),
         display_path=path,
     )
@@ -1025,7 +1037,7 @@ tool_registry.register(ToolDef(
     description=(
         "Read the contents of a file from the job's storage. "
         "Files up to 500KB are returned as text. "
-        "Binary files return metadata by default; set return_base64=true to retrieve binary content for editing in execute_python. "
+        "Binary files (xlsx/pdf/docx) return metadata only; to edit one, pass its path to execute_python input_files. "
         "Use this to read previously saved outputs, reports, or data files. "
         "Never assume /tmp files from earlier execute_python calls still exist; sandbox /tmp is ephemeral."
     ),
@@ -1043,7 +1055,15 @@ tool_registry.register(ToolDef(
             "return_base64": {
                 "type": "boolean",
                 "default": False,
-                "description": "Return base64 for binary files such as xlsx/pdf/docx so execute_python can modify the saved file.",
+                "description": "Deprecated: binary content is no longer returned here; use execute_python input_files instead.",
+            },
+            "offset": {
+                "type": "integer", "minimum": 0,
+                "description": "Character offset to start reading text from; use next_offset from the previous call to continue",
+            },
+            "limit": {
+                "type": "integer", "minimum": 1,
+                "description": f"Characters to return (max {READ_WINDOW_CHARS})",
             },
         },
         "required": ["path"],

@@ -65,7 +65,7 @@ interface PendingAction {
 interface AgentRun {
     id: string
     conversation_id: string
-    status: "queued" | "running" | "succeeded" | "failed"
+    status: "queued" | "running" | "succeeded" | "failed" | "cancelled"
     error?: string | null
     pending_action?: PendingAction | null
 }
@@ -178,6 +178,24 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
             await reloadActiveMessages()
         } catch { }
     }, [apiBase, headers, reloadActiveMessages])
+
+    const [stopping, setStopping] = useState(false)
+    const stopRun = useCallback(async () => {
+        if (!activeConversation || !activeRun) return
+        setStopping(true)
+        try {
+            const res = await fetch(`${apiBase}/agent/conversations/${activeConversation}/runs/${activeRun.id}/cancel`,
+                { method: "POST", headers: headers() })
+            if (res.ok) {
+                const data = await res.json()
+                setActiveRun(data.run)
+                setStreaming(false)
+                await reloadActiveMessages()
+            }
+        } catch { } finally {
+            setStopping(false)
+        }
+    }, [activeConversation, activeRun, apiBase, headers, reloadActiveMessages])
 
     const restoreActiveRun = useCallback(async (conversationId: string) => {
         try {
@@ -886,6 +904,15 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
                             <div className="px-3 py-2 text-xs text-slate-gray">ไม่พบ skill ที่ตรงกับคำค้น</div>
                         )}
                     </div>
+                </div>
+            )}
+            {activeConversation && !showStartComposer && streaming && activeRun && (
+                <div className="flex items-center justify-between gap-2 border-t border-hairline bg-[#F7FBFE] px-4 py-2 text-xs text-slate-gray">
+                    <span className="flex items-center gap-1.5"><Loader2 className="h-3.5 w-3.5 animate-spin" />Agent กำลังทำงาน</span>
+                    <button type="button" onClick={stopRun} disabled={stopping}
+                        className="rounded border border-hairline bg-white px-2.5 py-1 font-medium text-red-700 hover:bg-red-50 disabled:opacity-50">
+                        {stopping ? "กำลังหยุด..." : "หยุด"}
+                    </button>
                 </div>
             )}
             {activeConversation && !showStartComposer && (

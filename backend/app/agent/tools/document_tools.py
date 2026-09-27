@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from datetime import datetime, timezone
 import json
 import re
@@ -187,19 +189,55 @@ async def _compare_documents_handler(args: dict, context) -> dict:
 
 
 async def _update_document_field_handler(args: dict, context) -> dict:
-    doc = context.db.query(Document).filter(Document.id == args["doc_id"], Document.job_id == context.job_id).first()
+    import uuid as _uuid
+    from app.models.schema import DocumentSchema
+
+    try:
+        doc_id = _uuid.UUID(str(args["doc_id"]))
+    except (ValueError, TypeError):
+        return {"error": f"doc_id is not a valid document id: {args.get('doc_id')}"}
+    doc = context.db.query(Document).filter(Document.id == doc_id, Document.job_id == context.job_id).first()
     if not doc:
         return {"error": "Document not found"}
-    reviewed_data = dict(doc.reviewed_data or doc.extracted_data or {})
-    reviewed_data[args["field"]] = args["value"]
-    doc.reviewed_data = reviewed_data
+    field = str(args["field"]).strip()
+
+    # A misspelled field used to be stored as a new key and reported as verified.
+    schema = context.db.query(DocumentSchema).filter(DocumentSchema.id == doc.schema_id).first() if doc.schema_id else None
+    field_names = [item.get("name") for item in (schema.fields or [])] if schema else []
+    current = doc.reviewed_data if doc.reviewed_data is not None else doc.extracted_data
+    if field_names and field not in field_names:
+        return {"error": f"'{field}' is not a field of schema '{schema.name}'", "fields": field_names}
+    if not field_names and isinstance(current, dict) and current and field not in current:
+        return {"error": f"'{field}' is not a field of this document", "fields": sorted(current)}
+
+    # Multi-record documents (a list of records) need the record to change.
+    index = args.get("record_index")
+    if isinstance(current, list):
+        if index is None:
+            return {"error": f"This document has {len(current)} records; pass record_index (0-{len(current) - 1})"}
+        try:
+            index = int(index)
+            if index < 0:
+                raise IndexError(index)  # -1 would silently edit the last record
+            record = current[index]
+        except (TypeError, ValueError, IndexError):
+            return {"error": f"record_index must be between 0 and {len(current) - 1}"}
+        if not isinstance(record, dict):
+            return {"error": f"Record {index} is not a set of fields"}
+        updated: Any = [dict(item) if isinstance(item, dict) else item for item in current]
+        updated[index][field] = args["value"]
+    else:
+        updated = dict(current or {})
+        updated[field] = args["value"]
+    doc.reviewed_data = updated
     try:
         context.db.commit()
     except Exception as e:
         context.db.rollback()
         return {"ok": False, "error": f"DB commit failed: {type(e).__name__}: {e}"}
     context.db.refresh(doc)
-    actual = (doc.reviewed_data or {}).get(args["field"])
+    saved = doc.reviewed_data
+    actual = (saved[index] if isinstance(saved, list) else saved or {}).get(field)
     if actual != args["value"]:
         return {
             "ok": False,
@@ -207,13 +245,40 @@ async def _update_document_field_handler(args: dict, context) -> dict:
             "expected": args["value"],
             "actual": actual,
         }
-    return {"ok": True, "verified": True, "doc_id": str(doc.id), "field": args["field"], "value": args["value"]}
+    result = {"ok": True, "verified": True, "doc_id": str(doc.id), "field": field, "value": args["value"]}
+    if isinstance(saved, list):
+        result["record_index"] = index
+    return result
+
+
+def _review_target(args: dict, context):
+    """(document, error) for the review tools: validate the id and scope it to the Job."""
+    import uuid as _uuid
+
+    try:
+        doc_id = _uuid.UUID(str(args["doc_id"]))
+    except (ValueError, TypeError):
+        return None, {"error": f"doc_id is not a valid document id: {args.get('doc_id')}"}
+    doc = context.db.query(Document).filter(Document.id == doc_id, Document.job_id == context.job_id).first()
+    return (doc, None) if doc else (None, {"error": "Document not found"})
+
+
+def _already_decided(doc, decision: str) -> dict | None:
+    """Idempotency: repeating a decision changes nothing and logs nothing."""
+    if doc.status == "reviewed" and doc.review_decision == decision:
+        return {"ok": True, "verified": True, "unchanged": True, "doc_id": str(doc.id), "filename": doc.filename,
+                "status": "reviewed", "note": f"Already {decision}; nothing changed."}
+    return None
 
 
 async def _approve_document_handler(args: dict, context) -> dict:
-    doc = context.db.query(Document).filter(Document.id == args["doc_id"], Document.job_id == context.job_id).first()
-    if not doc:
-        return {"error": "Document not found"}
+    doc, error = _review_target(args, context)
+    if error:
+        return error
+    done = _already_decided(doc, "approved")
+    if done:
+        return done
+    previous = doc.review_decision if doc.status == "reviewed" else None
     doc.status = "reviewed"
     doc.review_decision = "approved"
     doc.reviewed_at = datetime.now(timezone.utc)
@@ -235,14 +300,26 @@ async def _approve_document_handler(args: dict, context) -> dict:
         }
     log_activity(context.db, user_id=context.user_id, action="review_document",
                  resource_type="document", resource_id=str(doc.id),
-                 details={"decision": "approved", "agent_initiated": True, "note": args.get("note")})
-    return {"ok": True, "verified": True, "doc_id": str(doc.id), "filename": doc.filename, "status": "reviewed"}
+                 details={"decision": "approved", "agent_initiated": True, "note": args.get("note"),
+                          "previous_decision": previous})
+    result = {"ok": True, "verified": True, "doc_id": str(doc.id), "filename": doc.filename, "status": "reviewed"}
+    if previous:
+        result["changed_from"] = previous  # say so: an earlier decision was reversed
+    return result
 
 
 async def _reject_document_handler(args: dict, context) -> dict:
-    doc = context.db.query(Document).filter(Document.id == args["doc_id"], Document.job_id == context.job_id).first()
-    if not doc:
-        return {"error": "Document not found"}
+    doc, error = _review_target(args, context)
+    if error:
+        return error
+    done = _already_decided(doc, "rejected")
+    if done:
+        return done
+    previous = doc.review_decision if doc.status == "reviewed" else None
+    if previous and not args.get("reverse_previous_decision"):
+        # Rejecting an approved document used to happen silently.
+        return {"ok": False, "error": f"This document is already {previous}. Ask the user, then call again with "
+                                      "reverse_previous_decision=true to change it.", "current_decision": previous}
     doc.status = "reviewed"
     doc.review_decision = "rejected"
     doc.reviewed_at = datetime.now(timezone.utc)
@@ -262,8 +339,11 @@ async def _reject_document_handler(args: dict, context) -> dict:
         }
     log_activity(context.db, user_id=context.user_id, action="review_document",
                  resource_type="document", resource_id=str(doc.id),
-                 details={"decision": "rejected", "agent_initiated": True})
-    return {"ok": True, "verified": True, "doc_id": str(doc.id), "filename": doc.filename, "status": "reviewed"}
+                 details={"decision": "rejected", "agent_initiated": True, "previous_decision": previous})
+    result = {"ok": True, "verified": True, "doc_id": str(doc.id), "filename": doc.filename, "status": "reviewed"}
+    if previous:
+        result["changed_from"] = previous
+    return result
 
 
 async def _bulk_approve_handler(args: dict, context) -> dict:
@@ -271,7 +351,12 @@ async def _bulk_approve_handler(args: dict, context) -> dict:
     if args.get("min_confidence"):
         q = q.filter(Document.extraction_confidence >= args["min_confidence"])
     docs = q.all()
-    target_ids = [str(d.id) for d in docs]
+    if not docs:
+        # "Approved 0 documents" used to be reported as a verified success.
+        return {"ok": False, "nothing_to_approve": True, "approved_count": 0,
+                "error": "No documents are waiting for review" + (
+                    f" with confidence ≥ {args['min_confidence']}" if args.get("min_confidence") else "") + "; nothing was approved."}
+    target_ids = [d.id for d in docs]
     for d in docs:
         d.status = "reviewed"
         d.review_decision = "approved"
@@ -336,7 +421,12 @@ tool_registry.register(ToolDef(
 tool_registry.register(ToolDef(
     name="update_document_field", category="document",
     description="Update a single field in a document's reviewed_data.",
-    parameters_schema={"type": "object", "properties": {"doc_id": {"type": "string"}, "field": {"type": "string"}, "value": {}}, "required": ["doc_id", "field", "value"]},
+    parameters_schema={"type": "object", "properties": {
+        "doc_id": {"type": "string"},
+        "field": {"type": "string", "description": "A field name of the document's schema"},
+        "value": {},
+        "record_index": {"type": "integer", "minimum": 0, "description": "Which record to change when the document holds several"},
+    }, "required": ["doc_id", "field", "value"]},
     handler=_update_document_field_handler,
     requires_confirmation=True,
 ))
@@ -352,7 +442,10 @@ tool_registry.register(ToolDef(
 tool_registry.register(ToolDef(
     name="reject_document", category="document",
     description="Reject a document — sets status to 'reviewed' with decision 'rejected'.",
-    parameters_schema={"type": "object", "properties": {"doc_id": {"type": "string"}}, "required": ["doc_id"]},
+    parameters_schema={"type": "object", "properties": {
+        "doc_id": {"type": "string"},
+        "reverse_previous_decision": {"type": "boolean", "description": "Set only after the user agreed to change an existing decision"},
+    }, "required": ["doc_id"]},
     handler=_reject_document_handler,
     requires_confirmation=True,
 ))

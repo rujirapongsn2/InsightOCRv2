@@ -138,6 +138,45 @@ def _redispatch_lost_runs(db, now) -> int:
     return n
 
 
+# An agent run is capped at AGENT_MAX_RUNTIME_S (900 s) inside a task hard-killed at
+# 2100 s; still "running" past that means its worker died. Queued runs that no
+# worker picked up within an hour are failed too: agent runs are interactive,
+# and a locked conversation is worse than asking the user to send again.
+AGENT_RUNNING_STALE = timedelta(seconds=2100 + 300)
+AGENT_QUEUED_STALE = timedelta(hours=1)
+
+
+def _reconcile_agent_runs(db, now: datetime) -> int:
+    from app.models.agent_run import AgentRun
+
+    running = (
+        db.query(AgentRun)
+        .filter(AgentRun.status == "running", AgentRun.started_at.isnot(None),
+                AgentRun.started_at < now - AGENT_RUNNING_STALE)
+        .update({"status": "failed", "finished_at": now,
+                 "error": "Agent DOC stopped responding (worker restarted or timed out). Send the message again."},
+                synchronize_session=False)
+    )
+    queued = (
+        db.query(AgentRun)
+        .filter(AgentRun.status == "queued", AgentRun.created_at < now - AGENT_QUEUED_STALE)
+        .update({"status": "failed", "finished_at": now,
+                 "error": "Agent DOC did not start in time. Send the message again."},
+                synchronize_session=False)
+    )
+    # A stopped run whose worker never reported back would lock its conversation.
+    from sqlalchemy import func as sql_func
+
+    # Aged from when the worker started (like running runs), not from queueing.
+    stopping = (
+        db.query(AgentRun)
+        .filter(AgentRun.status == "cancelled", AgentRun.finished_at.is_(None),
+                sql_func.coalesce(AgentRun.started_at, AgentRun.created_at) < now - AGENT_RUNNING_STALE)
+        .update({"finished_at": now}, synchronize_session=False)
+    )
+    return running + queued + stopping
+
+
 @celery_app.task
 def reconcile_stale_states():
     now = datetime.now(timezone.utc)
@@ -174,6 +213,7 @@ def reconcile_stale_states():
                 synchronize_session=False,
             )
         )
+        stale_agent_runs = _reconcile_agent_runs(db, now)
         active_document_task_ids = _active_document_task_ids()
         stale_docs = 0
         if active_document_task_ids is not None:
@@ -213,11 +253,11 @@ def reconcile_stale_states():
             )
         )
         db.commit()
-        if any((stale_running, stale_queued, stale_docs, stale_queued_docs)):
+        if any((stale_running, stale_queued, stale_docs, stale_queued_docs, stale_agent_runs)):
             logger.warning(
                 "Reconciled stale states: %s running runs, %s queued runs, "
-                "%s processing docs, %s queued docs",
-                stale_running, stale_queued, stale_docs, stale_queued_docs,
+                "%s processing docs, %s queued docs, %s agent runs",
+                stale_running, stale_queued, stale_docs, stale_queued_docs, stale_agent_runs,
             )
 
         # Recover queued rows whose broker message was lost (queue drained but

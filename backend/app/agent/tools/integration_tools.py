@@ -4,14 +4,53 @@ from app.agent.tools.registry import ToolDef, tool_registry
 from app.crud.crud_integration import integration as crud_integration
 
 
+def _value(field) -> str:
+    return field.value if hasattr(field, "value") else str(field)
+
+
+def _visible_to(integration, user_id) -> bool:
+    """The user's own integrations and shared ones (no owner); never another user's.
+
+    Same rule the workflow validator applies to integration references.
+    """
+    owner = getattr(integration, "user_id", None)
+    return owner is None or str(owner) == str(user_id)
+
+
+def _accessible_integrations(db, user_id, *, active_only: bool = True) -> list:
+    from app.models.integration import Integration
+
+    query = db.query(Integration)
+    if active_only:
+        query = query.filter(Integration.status == "active")
+    return [integration for integration in query.all() if _visible_to(integration, user_id)]
+
+
+def _find_integration(db, user_id, *, integration_id=None, integration_name=None, itype=None):
+    """Resolve by id or name among the integrations this user may use."""
+    if integration_id:
+        integration = crud_integration.get(db, integration_id=integration_id)
+        return integration if integration is not None and _visible_to(integration, user_id) else None
+    name = (integration_name or "").strip().lower()
+    matches = [integration for integration in _accessible_integrations(db, user_id)
+               if integration.name and integration.name.strip().lower() == name
+               and (itype is None or _value(integration.type) == itype)]
+    # Prefer the user's own over a shared integration with the same name.
+    matches.sort(key=lambda integration: getattr(integration, "user_id", None) is None)
+    return matches[0] if matches else None
+
+
 async def _list_integrations_handler(args: dict, context) -> dict:
-    integrations = crud_integration.get_all_active(context.db)
-    result = [
-        {"id": str(i.id), "name": i.name, "type": i.type.value if hasattr(i.type, "value") else str(i.type), "description": i.description}
-        for i in integrations
-        if (i.type.value if hasattr(i.type, "value") else str(i.type)) in ("api", "workflow")
-    ]
-    return {"count": len(result), "integrations": result}
+    type_filter = args.get("type_filter")
+    out = []
+    for integration in _accessible_integrations(context.db, context.user_id, active_only=False):
+        itype = _value(integration.type)
+        if type_filter and itype != type_filter:
+            continue
+        # No secrets: id/name/type/status/description only.
+        out.append({"id": str(integration.id), "name": integration.name, "type": itype,
+                    "status": _value(integration.status), "description": getattr(integration, "description", None)})
+    return {"count": len(out), "integrations": out}
 
 
 async def _call_api_integration_handler(args: dict, context) -> dict:
@@ -23,14 +62,8 @@ async def _call_api_integration_handler(args: dict, context) -> dict:
     query_params = args.get("query_params") or {}
     body = args.get("body")
 
-    integration = None
-    if integration_id:
-        integration = crud_integration.get(db, integration_id=integration_id)
-    elif integration_name:
-        for i in crud_integration.get_all_active(db):
-            if i.name and i.name.strip().lower() == integration_name.strip().lower():
-                integration = i
-                break
+    integration = _find_integration(db, context.user_id, integration_id=integration_id,
+                                    integration_name=integration_name)
 
     if not integration:
         return {"error": f"Integration not found: {integration_id or integration_name}"}
@@ -88,12 +121,7 @@ async def _send_to_workflow_handler(args: dict, context) -> dict:
     integration_name = args.get("integration_name")
     payload = args.get("payload", {})
 
-    integration = None
-    for i in crud_integration.get_all_active(db):
-        itype = i.type.value if hasattr(i.type, "value") else str(i.type)
-        if itype == "workflow" and i.name and i.name.strip().lower() == (integration_name or "").strip().lower():
-            integration = i
-            break
+    integration = _find_integration(db, context.user_id, integration_name=integration_name, itype="workflow")
 
     if not integration:
         return {"error": f"Workflow integration not found: {integration_name}"}
@@ -113,10 +141,14 @@ async def _send_to_workflow_handler(args: dict, context) -> dict:
 # ── Tool Registrations ──
 
 tool_registry.register(ToolDef(
-    name="list_integrations", category="integration",
-    description="List active API and Workflow integrations available. Use before calling call_api_integration.",
-    parameters_schema={"type": "object", "properties": {}, "required": []},
+    name="list_integrations", category="integration", also_categories=("workflow",),
+    description="List the integrations you can use (api, workflow, llm, gdrive, onedrive), without secrets. "
+                "Use before call_api_integration or when a workflow node needs an integration.",
+    parameters_schema={"type": "object", "properties": {
+        "type_filter": {"type": "string", "enum": ["api", "workflow", "llm", "gdrive", "onedrive"]},
+    }, "required": []},
     handler=_list_integrations_handler,
+    requires_job_context=False,
 ))
 
 tool_registry.register(ToolDef(

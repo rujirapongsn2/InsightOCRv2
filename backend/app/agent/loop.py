@@ -20,6 +20,8 @@ from sqlalchemy.orm import Session
 from openai import AsyncOpenAI
 import httpx
 
+from app.db.session import SessionLocal  # noqa: E402
+
 logger = logging.getLogger(__name__)
 
 from app.agent.context import (
@@ -51,7 +53,10 @@ LLM_RETRY_BASE_DELAY_S = 2.0
 # Hard cap for one agent run. The run lives inside the HTTP request, so
 # without a cap a hung tool or provider keeps the connection (and its DB
 # session) open until the proxy kills it.
-AGENT_MAX_RUNTIME_S = int(os.environ.get("AGENT_MAX_RUNTIME_S", "900"))
+# Clamped below the Celery soft limit (1800 s) so a run always ends in its own
+# handler with a clear message instead of being killed by the worker.
+AGENT_MAX_RUNTIME_CEILING_S = 1700
+AGENT_MAX_RUNTIME_S = min(int(os.environ.get("AGENT_MAX_RUNTIME_S", "900")), AGENT_MAX_RUNTIME_CEILING_S)
 
 
 _CONTEXT_LENGTH_ERROR_MARKERS = (
@@ -64,6 +69,59 @@ _CONTEXT_LENGTH_ERROR_MARKERS = (
     "prompt is too long",
     "context_length",
 )
+
+
+COMPACT_TOOL_RESULT_CHARS = 1500
+
+
+def _is_context_overflow(error: Exception) -> bool:
+    return "exceeds the model's context window" in str(error) or _is_context_length_error(error)
+
+
+def _compact_for_context(messages: list[dict]) -> list[dict] | None:
+    """A shorter transcript: system messages, then only the latest user turn onward,
+    with long tool results cut. ``None`` when nothing could be removed."""
+    last_user = max((index for index, message in enumerate(messages) if message.get("role") == "user"), default=None)
+    if last_user is None:
+        return None
+    compacted = [message for message in messages[:last_user] if message.get("role") == "system"]
+    changed = len(compacted) < last_user
+    for message in messages[last_user:]:
+        content = message.get("content")
+        if message.get("role") == "tool" and isinstance(content, str) and len(content) > COMPACT_TOOL_RESULT_CHARS:
+            message = {**message, "content": content[:COMPACT_TOOL_RESULT_CHARS]
+                       + "\n[shortened to fit the model's context window; call the tool again with a narrower request for more]"}
+            changed = True
+        compacted.append(message)
+    return compacted if changed else None
+
+
+def _user_facing_llm_error(error: Exception) -> str:
+    """A short, safe explanation of a provider failure.
+
+    Raw provider errors can carry base URLs, request ids or key fragments and
+    were shown to users and stored on the run; they now go to the server log only.
+    """
+    logger.warning("AI provider error (%s): %s", type(error).__name__, error)
+    text = str(error)
+    lowered = text.lower()
+    status = getattr(error, "status_code", None) or getattr(getattr(error, "response", None), "status_code", None)
+    if "exceeds the model's context window" in text or _is_context_length_error(error):
+        return ("The request is too long for the selected AI model. Start a new conversation, ask about fewer "
+                "documents at a time, or choose a model with a larger context window.")
+    if status in (401, 403) or any(word in lowered for word in ("api key", "unauthorized", "authentication", "permission denied")):
+        return "The AI provider rejected the credentials. Check the API key of the selected provider in Settings."
+    if status == 429 or "rate limit" in lowered or "quota" in lowered:
+        return "The AI provider is limiting requests right now (rate limit or quota). Wait a moment and try again."
+    if isinstance(error, (TimeoutError, asyncio.TimeoutError)) or "timed out" in lowered or "timeout" in type(error).__name__.lower():
+        return "The AI provider did not answer in time. Try again, or choose a faster model."
+    if status == 404 or ("model" in lowered and "not found" in lowered):
+        return "The selected AI model was not found at the provider. Check the model name in Settings."
+    if "connection" in lowered or "connect" in type(error).__name__.lower():
+        return "Could not reach the AI provider. Check the provider URL and the network, then try again."
+    if isinstance(status, int) and status >= 500:
+        return "The AI provider had an internal error. Try again shortly."
+    return f"The AI provider could not complete the request ({type(error).__name__}). Try again or check the provider in Settings."
 
 
 def _is_context_length_error(exc: Exception) -> bool:
@@ -863,7 +921,9 @@ class AgentLoop:
         request_timeout_seconds: float | None = None,
         max_output_tokens: int | None = None,
         max_request_attempts: int | None = None,
+        run_id: UUID | None = None,
     ):
+        self.run_id = run_id
         self.db = db
         self.conversation_id = conversation_id
         self.user_id = user_id
@@ -882,6 +942,8 @@ class AgentLoop:
         self.max_output_tokens = max_output_tokens
         self.max_request_attempts = max_request_attempts
         self.context = AgentContext(db=db, user_id=user_id, job_id=job_id, conversation_id=conversation_id, kind=kind)
+        # Checked before every tool call: a stopped run must not start another action.
+        self.context.run_active_check = self._run_active if run_id is not None else None
 
     def _build_system_prompt(self, user_message: str) -> str:
         prompt = self.system_prompt_override or build_system_prompt(self.context, user_message)
@@ -914,7 +976,7 @@ class AgentLoop:
         except Exception as e:
             logger.error("AgentLoop.run crashed (unhandled): %s", e, exc_info=True)
             try:
-                yield sse_event(SSEEventType.ERROR, {"message": f"ระบบพบข้อผิดพลาดที่ไม่คาดคิด: {str(e)}"})
+                yield sse_event(SSEEventType.ERROR, {"message": f"ระบบพบข้อผิดพลาดที่ไม่คาดคิด ({type(e).__name__}) กรุณาลองใหม่อีกครั้ง"})
             except Exception:
                 pass
         finally:
@@ -1067,13 +1129,29 @@ class AgentLoop:
                 if self.max_output_tokens:
                     request_kwargs["max_tokens"] = self.max_output_tokens
                 self._awaited = None
-                async for keepalive in self._await_with_keepalive(
-                    _chat_with_retry(client, **request_kwargs)
-                ):
-                    yield keepalive
+                try:
+                    async for keepalive in self._await_with_keepalive(
+                        _chat_with_retry(client, **request_kwargs)
+                    ):
+                        yield keepalive
+                except Exception as first_error:
+                    compacted = _compact_for_context(messages) if _is_context_overflow(first_error) else None
+                    if not compacted:
+                        raise
+                    # Too long: retry once with older turns dropped and tool results shortened,
+                    # and keep using the shorter transcript for the rest of the run.
+                    logger.info("Context too long; retrying with a compacted transcript (%s → %s messages)",
+                                len(messages), len(compacted))
+                    messages[:] = compacted
+                    request_kwargs["messages"] = messages
+                    self._awaited = None
+                    async for keepalive in self._await_with_keepalive(
+                        _chat_with_retry(client, **request_kwargs)
+                    ):
+                        yield keepalive
                 response = self._awaited
             except Exception as e:
-                yield sse_event(SSEEventType.ERROR, {"message": f"LLM error: {str(e)}"})
+                yield sse_event(SSEEventType.ERROR, {"message": _user_facing_llm_error(e)})
                 return
 
             choice = response.choices[0]
@@ -1169,7 +1247,7 @@ class AgentLoop:
                             pending = crud_pending.create(
                                 self.db, conversation_id=self.conversation_id, user_id=self.user_id,
                                 tool_name=tool_name, tool_arguments=tool_args,
-                                description=describe_action(tool_name, tool_args),
+                                description=describe_action(tool_name, tool_args), run_id=self.run_id,
                             )
                             yield sse_event(SSEEventType.CONFIRMATION_REQUIRED, {
                                 "pending_action_id": str(pending.id),
@@ -2063,7 +2141,7 @@ class AgentLoop:
             pending = crud_pending.create(
                 self.db, conversation_id=self.conversation_id, user_id=self.user_id,
                 tool_name=tool_name, tool_arguments=tool_args,
-                description=describe_action(tool_name, tool_args),
+                description=describe_action(tool_name, tool_args), run_id=self.run_id,
             )
             yield sse_event(SSEEventType.CONFIRMATION_REQUIRED, {
                 "pending_action_id": str(pending.id), "tool_call_id": call_id,
@@ -2085,8 +2163,13 @@ class AgentLoop:
                     yield ": keepalive\n\n"
                 await asyncio.sleep(1)
             if approved is None:
-                crud_pending.resolve(self.db, pending.id, "rejected")
-                approved = False
+                if crud_pending.resolve(self.db, pending.id, "rejected"):
+                    approved = False
+                else:
+                    # Answered in the last second: honour the stored answer.
+                    self.db.expire_all()
+                    action = crud_pending.get(self.db, pending.id)
+                    approved = bool(action and action.status == "confirmed")
             if not approved:
                 result = {"error": "User rejected action", "tool_name": tool_name}
                 yield sse_event(SSEEventType.TOOL_REJECTED, {"id": call_id, "name": tool_name})
@@ -2129,7 +2212,7 @@ class AgentLoop:
                     yield ka
                 response = self._awaited
             except Exception as e:
-                yield sse_event(SSEEventType.ERROR, {"message": f"AI provider error: {str(e)}"})
+                yield sse_event(SSEEventType.ERROR, {"message": _user_facing_llm_error(e)})
                 return
 
             msg = response.choices[0].message
@@ -2180,7 +2263,9 @@ class AgentLoop:
         crud_msg.add(self.db, conversation_id=self.conversation_id, role="assistant",
                      content=final_text, iteration=self.max_iterations, model_used=model)
         yield sse_event(SSEEventType.DELTA, {"text": final_text})
-        yield sse_event(SSEEventType.DONE, {"iterations": self.max_iterations, "stopped": "max_iterations"})
+        yield sse_event(SSEEventType.DONE, {"iterations": self.max_iterations, "stopped": "max_iterations",
+                                            "success": False,
+                                            "failed_steps": ["Reached the step limit before the workflow was finished"]})
 
     async def _run_workflow_builder_json(self, user_message: str) -> AsyncGenerator[str, None]:
         """Workflow builder for completion_messages providers (no native function
@@ -2238,7 +2323,7 @@ objects in the same reply.
                     yield ka
                 answer = self._awaited
             except Exception as e:
-                yield sse_event(SSEEventType.ERROR, {"message": f"AI provider error: {str(e)}"})
+                yield sse_event(SSEEventType.ERROR, {"message": _user_facing_llm_error(e)})
                 return
 
             # A model may emit several action objects in one reply — parse them all.
@@ -2290,7 +2375,9 @@ objects in the same reply.
         crud_msg.add(self.db, conversation_id=self.conversation_id, role="assistant",
                      content=final_text, iteration=self.max_iterations, model_used=model_name)
         yield sse_event(SSEEventType.DELTA, {"text": final_text})
-        yield sse_event(SSEEventType.DONE, {"iterations": self.max_iterations, "stopped": "max_iterations"})
+        yield sse_event(SSEEventType.DONE, {"iterations": self.max_iterations, "stopped": "max_iterations",
+                                            "success": False,
+                                            "failed_steps": ["Reached the step limit before the workflow was finished"]})
 
     async def _run_completion_provider(self, user_message: str) -> AsyncGenerator[str, None]:
         model_name = self.llm_config.get("model", "default_ai_settings")
@@ -2350,7 +2437,7 @@ __TOOL_CATALOG__
                     yield keepalive
                 answer = self._awaited
             except Exception as e:
-                yield sse_event(SSEEventType.ERROR, {"message": f"AI provider error: {str(e)}"})
+                yield sse_event(SSEEventType.ERROR, {"message": _user_facing_llm_error(e)})
                 return
 
             action = _extract_json_object(answer)
@@ -2418,7 +2505,7 @@ __TOOL_CATALOG__
                 pending = crud_pending.create(
                     self.db, conversation_id=self.conversation_id, user_id=self.user_id,
                     tool_name=tool_name, tool_arguments=tool_args,
-                    description=describe_action(tool_name, tool_args),
+                    description=describe_action(tool_name, tool_args), run_id=self.run_id,
                 )
                 yield sse_event(SSEEventType.CONFIRMATION_REQUIRED, {
                     "pending_action_id": str(pending.id),
@@ -2477,17 +2564,49 @@ __TOOL_CATALOG__
             "success": False,
         })
 
+    def _run_active(self) -> bool:
+        """False once the run was stopped or reconciled (checked on a separate session)."""
+        if self.run_id is None:
+            return True
+        from app.models.agent_run import AgentRun
+        with SessionLocal() as check:
+            return check.query(AgentRun.status).filter(AgentRun.id == self.run_id).scalar() == "running"
+
     async def _wait_for_confirmation(self, pending_id: UUID, timeout_s: int = 300) -> bool:
-        for _ in range(timeout_s):
-            # End the read transaction before sleeping so the session does
-            # not sit idle-in-transaction on a pooled connection all night.
-            self.db.rollback()
-            await asyncio.sleep(1)
+        settled = False
+        try:
+            for _ in range(timeout_s):
+                if not self._run_active():
+                    # A stopped run must never carry out an action approved afterwards.
+                    crud_pending.resolve(self.db, pending_id, "rejected")
+                    settled = True
+                    return False
+                # End the read transaction before sleeping so the session does
+                # not sit idle-in-transaction on a pooled connection all night.
+                self.db.rollback()
+                await asyncio.sleep(1)
+                self.db.expire_all()
+                action = crud_pending.get(self.db, pending_id)
+                if action and action.status == "confirmed":
+                    settled = True
+                    return True
+                if action and action.status == "rejected":
+                    settled = True
+                    return False
+            if crud_pending.resolve(self.db, pending_id, "rejected"):
+                settled = True
+                return False
+            # The user answered at the last moment: honour that answer.
             self.db.expire_all()
             action = crud_pending.get(self.db, pending_id)
-            if action and action.status == "confirmed":
-                return True
-            if action and action.status == "rejected":
-                return False
-        crud_pending.resolve(self.db, pending_id, "rejected")
-        return False
+            settled = True
+            return bool(action and action.status == "confirmed")
+        finally:
+            if not settled:
+                # The run ended while waiting (runtime limit, Stop): the request must not
+                # stay "pending" and be approved later for a run that no longer exists.
+                try:
+                    self.db.rollback()
+                    crud_pending.resolve(self.db, pending_id, "rejected")
+                except Exception:  # noqa: BLE001
+                    logger.warning("Could not expire pending action %s", pending_id)

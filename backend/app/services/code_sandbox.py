@@ -10,6 +10,9 @@ Security model:
     — can be disabled per-execution via allow_network=False
   - Image auto-pulled on first use or at startup
 """
+import asyncio
+import socket
+import base64
 import json
 import logging
 import os
@@ -142,8 +145,13 @@ async def execute_python(
     timeout: int = DEFAULT_TIMEOUT,
     memory_mb: int = DEFAULT_MEMORY_MB,
     allow_network: bool = True,
+    files: dict[str, bytes] | None = None,
 ) -> dict:
     """Execute Python code in an isolated Docker container.
+
+    ``files`` ({name: bytes}) are written to /tmp/inputs/<name> before the code
+    runs. They travel over the container's stdin: a command-line argument is
+    limited to ~128 KB, far too small for a spreadsheet or PDF.
 
     Args:
         code: Python code to execute. Set 'result' variable to return data.
@@ -206,6 +214,11 @@ import subprocess  # now points to shim
 # ─────────────────────────────────────────────────────────────────────────
 
 inputs = json.loads({json.dumps(json.dumps(inputs, ensure_ascii=False))})
+if os.environ.get("INSIGHTDOC_INPUT_FILES") == "1":
+    os.makedirs("/tmp/inputs", exist_ok=True)
+    for __name, __data in json.loads(sys.stdin.buffer.read() or b"{{}}").items():
+        with open(os.path.join("/tmp/inputs", os.path.basename(__name)), "wb") as __handle:
+            __handle.write(base64.b64decode(__data))
 result = None
 __error__ = None
 __files__ = []
@@ -328,6 +341,43 @@ __output__ = {{
 print("__SANDBOX_OUTPUT__:" + json.dumps(__output__, ensure_ascii=False, default=str))
 """
 
+    # The Docker SDK is synchronous (run/wait/logs, and an image pull that can take
+    # minutes). Run it in a worker thread so one sandbox call never freezes the
+    # event loop, and with it every other request and agent stream.
+    stdin_payload = None
+    if files:
+        stdin_payload = json.dumps({name: base64.b64encode(data).decode("ascii") for name, data in files.items()}).encode()
+    return await asyncio.to_thread(_run_in_docker, wrapped, timeout, memory_mb, allow_network, stdin_payload)
+
+
+def _start_container(client, run_kwargs: dict, stdin_payload: bytes | None):
+    """Start detached; with a payload, stream it to stdin and close it (EOF) before the code reads it."""
+    if stdin_payload is None:
+        return client.containers.run(**run_kwargs)
+    kwargs = {key: value for key, value in run_kwargs.items() if key != "detach"}
+    kwargs["environment"] = {**kwargs.get("environment", {}), "INSIGHTDOC_INPUT_FILES": "1"}
+    # stdin_open also sets StdinOnce in docker-py: closing the attachment gives the code EOF.
+    container = client.containers.create(stdin_open=True, **kwargs)
+    try:
+        attached = container.attach_socket(params={"stdin": 1, "stream": 1})
+        container.start()
+        raw = getattr(attached, "_sock", attached)
+        raw.sendall(stdin_payload)
+        # Half-close the real socket: EOF must not depend on the wrapper's close().
+        try:
+            raw.shutdown(socket.SHUT_WR)
+        except OSError:
+            pass
+        attached.close()
+    except Exception:
+        container.remove(force=True)
+        raise
+    return container
+
+
+def _run_in_docker(wrapped: str, timeout: int, memory_mb: int, allow_network: bool,
+                   stdin_payload: bytes | None = None) -> dict:
+    """Blocking part of ``execute_python``: create, wait for and clean up the container."""
     try:
         import docker
 
@@ -362,7 +412,7 @@ print("__SANDBOX_OUTPUT__:" + json.dumps(__output__, ensure_ascii=False, default
         # Run detached and enforce the timeout ourselves: a blocking
         # containers.run() only times out the Docker HTTP client, leaving
         # the container running (and never removed) on timeout.
-        container = client.containers.run(**run_kwargs)
+        container = _start_container(client, run_kwargs, stdin_payload)
         try:
             exit_info = container.wait(timeout=timeout)
             output = container.logs(stdout=True, stderr=True).decode(
@@ -373,12 +423,16 @@ print("__SANDBOX_OUTPUT__:" + json.dumps(__output__, ensure_ascii=False, default
                     "error": "Container exited with error",
                     "stderr": output[-4000:],
                 }
-        except Exception:
+        except Exception as wait_error:
             try:
                 container.kill()
             except Exception:
                 pass
-            return {"error": f"Sandbox timed out after {timeout}s and was killed"}
+            if _is_timeout(wait_error):
+                return {"error": f"Sandbox timed out after {timeout}s and was killed"}
+            # Not a timeout: say what failed so the agent does not "fix" it by doing less work.
+            logger.warning("Sandbox container failed: %s", wait_error)
+            return {"error": f"Sandbox container failed ({type(wait_error).__name__}); this is not a timeout"}
         finally:
             try:
                 container.remove(force=True)
@@ -417,3 +471,25 @@ print("__SANDBOX_OUTPUT__:" + json.dumps(__output__, ensure_ascii=False, default
     except Exception as e:
         logger.error(f"Sandbox execution failed: {e}")
         return {"error": f"Sandbox failed: {str(e)}"}
+
+
+def _is_timeout(error: Exception) -> bool:
+    """True only for a read timeout from ``container.wait(timeout)``.
+
+    The Docker SDK reports that as a requests ConnectionError wrapping urllib3's
+    ReadTimeoutError; any other connection error (daemon gone, socket reset) is
+    a real failure and must not be reported as a timeout.
+    """
+    if isinstance(error, TimeoutError):
+        return True
+    try:
+        import requests
+        from urllib3.exceptions import ReadTimeoutError
+    except ImportError:
+        return "read timed out" in str(error).lower()
+    if isinstance(error, requests.exceptions.ReadTimeout):
+        return True
+    if isinstance(error, requests.exceptions.ConnectionError):
+        return any(isinstance(arg, ReadTimeoutError) for arg in error.args) or "read timed out" in str(error).lower()
+    return False
+

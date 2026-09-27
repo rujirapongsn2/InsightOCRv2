@@ -158,6 +158,47 @@ def _validate_report_result(value) -> tuple[bool, str]:
     return True, ""
 
 
+MAX_INPUT_FILES = 5
+MAX_INPUT_FILE_BYTES = 5_000_000
+MAX_INPUT_TOTAL_BYTES = 15_000_000
+
+
+def _load_input_files(paths, context) -> tuple[dict[str, bytes] | None, str | None]:
+    """Read Job files for the sandbox (/tmp/inputs/<name>) without passing them through the model."""
+    from app.agent.tools.filesystem_tools import _normalize_job_path, _resolve_path
+
+    if not paths:
+        return None, None
+    if not isinstance(paths, list) or not all(isinstance(path, str) and path.strip() for path in paths):
+        return None, "input_files must be a list of file paths in the Job's files"
+    if len(paths) > MAX_INPUT_FILES:
+        return None, f"Up to {MAX_INPUT_FILES} input_files per run"
+    if not getattr(context, "job_id", None):
+        return None, "input_files needs a Job"
+    storage = get_storage_service()
+    files: dict[str, bytes] = {}
+    total = 0
+    for path in paths:
+        try:
+            key = _resolve_path(str(context.job_id), _normalize_job_path(str(context.job_id), path))
+        except ValueError as exc:
+            return None, str(exc)
+        if not storage.exists(key):
+            return None, f"File not found: {path}"
+        with storage.get_local_path(key) as local_path:
+            data = Path(local_path).read_bytes()
+        if len(data) > MAX_INPUT_FILE_BYTES:
+            return None, f"{path} is larger than {MAX_INPUT_FILE_BYTES // 1_000_000} MB"
+        total += len(data)
+        if total > MAX_INPUT_TOTAL_BYTES:
+            return None, f"input_files together exceed {MAX_INPUT_TOTAL_BYTES // 1_000_000} MB"
+        name = Path(path).name
+        if name in files:
+            return None, f"Two input_files are named {name}; use files with different names"
+        files[name] = data
+    return files, None
+
+
 async def _execute_python_handler(args: dict, context) -> dict:
     code = args.get("code", "")
     if not code.strip():
@@ -172,10 +213,15 @@ async def _execute_python_handler(args: dict, context) -> dict:
     allow_network = args.get("allow_network", True)
     timeout = min(int(args.get("timeout", 30)), 60)  # cap at 60s
 
+    files, error = _load_input_files(args.get("input_files") or [], context)
+    if error:
+        return {"error": error}
+
     execution = await execute_python(
         code=code, inputs=inputs,
         timeout=timeout,
         allow_network=allow_network,
+        files=files,
     )
     if execution.get("error"):
         return execution
@@ -416,9 +462,10 @@ tool_registry.register(ToolDef(
         "If a package is missing, call `_pip_install('pkg1 pkg2')` — this is the ONLY safe install method. "
         "NEVER call subprocess pip install directly; the filesystem is read-only so direct pip will always fail. "
         "For binary output files (xlsx, pdf, docx, pptx, png): save to /tmp/<filename> then call `_save_file('/tmp/<filename>')` "
-        "to get base64 — then pass to write_file with `content_base64` to store. "
+        "inside the code — the file is stored in the Job's outputs automatically; do not call write_file with its base64. "
         "PDF with Thai text: use fpdf2 with `_thai_font_path()` and pdf.add_font(...); built-in fonts (Helvetica/Times) do NOT support Thai. "
         "Excel: use openpyxl or xlsxwriter. CSV: use csv.StringIO/TextIO patterns and UTF-8. "
+        "To edit an existing Job file (xlsx/docx/pdf), list it in `input_files` and open /tmp/inputs/<file name>. "
         "Set `allow_network=false` to disable outbound network if not needed. "
         "For HTML reports, prefer run_report_code because it validates and writes the report safely."
     ),
@@ -444,6 +491,11 @@ tool_registry.register(ToolDef(
                 "maximum": 60,
                 "default": 30,
                 "description": "Execution timeout in seconds.",
+            },
+            "input_files": {
+                "type": "array", "items": {"type": "string"}, "maxItems": MAX_INPUT_FILES,
+                "description": "Job file paths (e.g. 'outputs/report.xlsx') copied into the sandbox as /tmp/inputs/<file name> "
+                               "before the code runs. Use this to edit existing xlsx/docx/pdf files; do not pass file content through inputs.",
             },
         },
         "required": ["code"],

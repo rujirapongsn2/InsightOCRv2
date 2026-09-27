@@ -27,6 +27,22 @@ class CRUDAgentConversation:
     def get_by_job(self, db: Session, job_id: UUID, user_id: UUID) -> List[AgentConversation]:
         return db.query(AgentConversation).filter(AgentConversation.job_id == job_id, AgentConversation.user_id == user_id).order_by(AgentConversation.updated_at.desc()).all()
 
+    def get_recent_turns(self, db: Session, conversation_id: UUID, turns: int = 6,
+                         max_messages: int = 120) -> List[AgentMessage]:
+        """Messages from the last ``turns`` user messages onward (capped), oldest first."""
+        starts = (
+            db.query(AgentMessage.created_at)
+            .filter(AgentMessage.conversation_id == conversation_id, AgentMessage.role == "user")
+            .order_by(AgentMessage.created_at.desc())
+            .limit(turns)
+            .all()
+        )
+        query = db.query(AgentMessage).filter(AgentMessage.conversation_id == conversation_id)
+        if starts:
+            query = query.filter(AgentMessage.created_at >= starts[-1][0])
+        messages = query.order_by(AgentMessage.created_at.desc()).limit(max_messages).all()
+        return list(reversed(messages))
+
     def get_messages(self, db: Session, conversation_id: UUID, limit: int = 50) -> List[AgentMessage]:
         # Keep the newest messages in context while preserving chronological order.
         # The previous ASC + LIMIT query returned the oldest messages, so long
