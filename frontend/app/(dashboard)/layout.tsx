@@ -6,7 +6,7 @@ import { usePathname } from "next/navigation"
 import { useEffect, useMemo, useRef, useState } from "react"
 import {
     LayoutDashboard, FileText, Settings, Users,
-    PanelLeftClose, PanelLeftOpen, User as UserIcon, LogOut, Plug, Workflow as WorkflowIcon,
+    PanelLeftClose, PanelLeftOpen, User as UserIcon, LogOut, Plug, Workflow as WorkflowIcon, Megaphone,
 } from "lucide-react"
 import { useAuth } from "@/components/auth-provider"
 import { Logo } from "@/components/logo"
@@ -139,6 +139,14 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                                 </Link>
                             )}
                             <Link
+                                href="/updates"
+                                className="flex items-center gap-2 px-4 py-2.5 text-sm text-[#0D1B2A] hover:bg-[#F8F9FA] transition-colors"
+                                onClick={() => setUserMenuOpen(false)}
+                            >
+                                <Megaphone className="h-4 w-4 text-[#778DA9]" />
+                                <span>Update</span>
+                            </Link>
+                            <Link
                                 href="/profile"
                                 className="flex items-center gap-2 px-4 py-2.5 text-sm text-[#0D1B2A] hover:bg-[#F8F9FA] transition-colors"
                                 onClick={() => setUserMenuOpen(false)}
@@ -194,6 +202,11 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                                             Settings
                                         </Link>
                                     )}
+                                    <Link href="/updates" className="flex items-center gap-2 px-4 py-2.5 text-sm text-[#0D1B2A] hover:bg-[#F8F9FA]"
+                                        onClick={() => setMobileUserMenuOpen(false)}>
+                                        <Megaphone className="h-4 w-4 text-[#778DA9]" />
+                                        Update
+                                    </Link>
                                     <Link href="/profile" className="flex items-center gap-2 px-4 py-2.5 text-sm text-[#0D1B2A] hover:bg-[#F8F9FA]"
                                         onClick={() => setMobileUserMenuOpen(false)}>
                                         <UserIcon className="h-4 w-4 text-[#778DA9]" />
