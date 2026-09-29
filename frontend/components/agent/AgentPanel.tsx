@@ -1,7 +1,7 @@
 "use client"
 
-import { useState, useEffect, useRef, useCallback, type KeyboardEvent } from "react"
-import { X, Plus, Trash2, Bot, ChevronDown, AlertTriangle, Loader2, Brain, Library, Sparkles, ListChecks, Check, Circle, ShieldCheck, ShieldAlert, FileText, GitCompare, CheckCircle2, Send } from "lucide-react"
+import { useState, useEffect, useRef, useCallback, type KeyboardEvent, type ReactNode } from "react"
+import { X, Plus, Trash2, Bot, ChevronDown, AlertTriangle, Loader2, Brain, Library, Sparkles, ListChecks, Check, Circle, ShieldCheck, ShieldAlert, FileText, GitCompare, CheckCircle2, Send, ArrowUpRight } from "lucide-react"
 import { getApiBaseUrl } from "@/lib/api"
 import AgentMessage from "./AgentMessage"
 import AgentToolCalls from "./AgentToolCalls"
@@ -440,13 +440,13 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
         <div key={key} className="mx-3 rounded-lg border border-softnix-blue/30 bg-softnix-blue/5 p-3">
             <div className="flex items-center gap-1.5 mb-2">
                 <ListChecks className="h-3.5 w-3.5 text-softnix-blue" />
-                <span className="text-[11px] font-semibold text-softnix-deep">แผนการทำงาน</span>
+                <span className="text-xs font-semibold text-softnix-deep">แผนการทำงาน</span>
                 {isLive && !refl && <Loader2 className="h-3 w-3 animate-spin text-softnix-blue ml-auto" />}
-                {refl?.complete && <span className="ml-auto text-[10px] text-emerald-600 font-medium">ตรวจสอบครบถ้วน ✓</span>}
+                {refl?.complete && <span className="ml-auto text-xs text-emerald-600 font-medium">ตรวจสอบครบถ้วน ✓</span>}
             </div>
             <ul className="space-y-1">
                 {steps.map((step, i) => (
-                    <li key={i} className="flex items-start gap-1.5 text-[11px] text-slate-gray">
+                    <li key={i} className="flex items-start gap-1.5 text-xs text-slate-gray">
                         {refl?.complete
                             ? <Check className="h-3 w-3 mt-0.5 text-emerald-500 flex-shrink-0" />
                             : <Circle className="h-3 w-3 mt-0.5 text-mute-gray flex-shrink-0" />}
@@ -454,25 +454,20 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
                     </li>
                 ))}
             </ul>
-            {refl && !refl.complete && refl.missing.length > 0 && (
-                <div className="mt-2 pt-2 border-t border-amber-200">
-                    <p className="text-[10px] font-medium text-amber-700 mb-0.5">งานที่ยังขาด:</p>
-                    <ul className="space-y-0.5">
-                        {refl.missing.map((m, i) => (
-                            <li key={i} className="text-[10px] text-amber-600">• {m}</li>
-                        ))}
-                    </ul>
-                </div>
-            )}
         </div>
     )
+
+    const isIncompletePlan = (msg: Message) => {
+        const reflection = msg.tool_result?.reflection
+        return msg.role === "plan" && Boolean(reflection) && !reflection.complete
+    }
 
     const renderPersistedMessage = (msg: Message) => {
         if (msg.role === "tool") return null
         if (msg.role === "assistant" && !msg.content?.trim() && !(msg.tool_calls?.length)) return null
         if (msg.role === "plan") {
             const tr = msg.tool_result || {}
-            return renderPlanCard(tr.steps || [], tr.reflection || null, false, msg.id)
+            return isIncompletePlan(msg) ? renderPlanCard(tr.steps || [], tr.reflection || null, false, msg.id) : null
         }
         if (msg.role === "assistant" && Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) {
             const calls = msg.tool_calls.map((toolCall: any, index: number) => ({
@@ -501,6 +496,46 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
                 conversationId={activeConversation || undefined}
             />
         )
+    }
+
+    const renderMessageList = () => {
+        const nodes: ReactNode[] = []
+        let pendingCalls: any[] = []
+        let pendingKey = ""
+        const flushCalls = () => {
+            if (pendingCalls.length === 0) return
+            nodes.push(
+                <AgentToolCalls
+                    key={`tools-${pendingKey}`}
+                    calls={pendingCalls}
+                    results={persistedToolResultsMap}
+                    conversationId={activeConversation || undefined}
+                />,
+            )
+            pendingCalls = []
+        }
+        messages.forEach((msg, index) => {
+            if (index === currentRunPersistedPlanIndex) return
+            const isToolCallMessage = msg.role === "assistant" && Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0
+            if (isToolCallMessage) {
+                if (pendingCalls.length === 0) pendingKey = String(msg.id)
+                const messageCalls: any[] = msg.tool_calls || []
+                messageCalls.forEach((toolCall: any, callIndex: number) => {
+                    pendingCalls.push({
+                        id: toolCall.id || `${msg.id}-${callIndex}`,
+                        name: toolCall.function?.name || toolCall.name,
+                        arguments: parseToolArguments(toolCall.function?.arguments || toolCall.arguments),
+                    })
+                })
+                return
+            }
+            const rendersNothing = msg.role === "tool" || (msg.role === "plan" && !isIncompletePlan(msg)) || (msg.role === "assistant" && !msg.content?.trim())
+            if (rendersNothing) return
+            flushCalls()
+            nodes.push(renderPersistedMessage(msg))
+        })
+        flushCalls()
+        return nodes
     }
 
     const latestUserMessageIndex = messages.reduce(
@@ -660,17 +695,17 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
                             <option value="job">Job</option>
                         </select>
                     </div>
-                    <p className="text-[11px] text-amber-700">Read-only inspector. Memories are preferences or hints, not source of truth.</p>
+                    <p className="text-xs text-amber-700">Read-only inspector. Memories are preferences or hints, not source of truth.</p>
                     {loadingMemories && <div className="flex justify-center py-3"><Loader2 className="h-4 w-4 animate-spin text-amber-600" /></div>}
                     {!loadingMemories && memories.length === 0 && <p className="text-xs text-amber-700 text-center py-2">No saved memories</p>}
                     {!loadingMemories && memories.map(memory => (
                         <div key={memory.id} className="rounded-lg border border-amber-200 bg-white p-2">
                             <div className="flex items-center justify-between gap-2">
                                 <span className="text-xs font-semibold text-ink-navy truncate">{memory.key}</span>
-                                <span className="text-[10px] rounded-full bg-amber-100 text-amber-700 px-2 py-0.5">{memory.memory_type}</span>
+                                <span className="text-xs rounded-full bg-amber-100 text-amber-700 px-2 py-0.5">{memory.memory_type}</span>
                             </div>
                             <p className="text-xs text-charcoal mt-1 whitespace-pre-wrap">{memory.content}</p>
-                            <div className="mt-2 flex items-center justify-between text-[10px] text-mute-gray">
+                            <div className="mt-2 flex items-center justify-between text-xs text-mute-gray">
                                 <span>{memory.scope}</span>
                                 <span>importance {memory.importance}</span>
                             </div>
@@ -683,22 +718,24 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
             <div className="flex-1 overflow-y-auto py-4 space-y-3">
                 {loading && <div className="flex justify-center py-8"><Loader2 className="h-5 w-5 animate-spin text-mute-gray" /></div>}
                 {showStartComposer && (
-                    <div className="flex min-h-[58vh] items-center justify-center px-5 py-8">
-                        <div className="w-full max-w-3xl">
-                            <div className="mb-7">
-                                <div className="mb-3 flex items-center justify-center gap-2 text-[0.9375rem] font-semibold text-softnix-deep">
-                                    <Sparkles className="h-4 w-4" />
-                                    Softnix Agent DOC
-                                </div>
-                                <h3 className="text-center text-[2rem] font-semibold leading-tight text-ink-navy">
-                                    วันนี้ให้ Agent ช่วยจัดการอะไรดี?
+                    <div className="relative flex items-center justify-center overflow-hidden px-5 py-4">
+                        <div
+                            aria-hidden="true"
+                            className="pointer-events-none absolute inset-x-0 top-0 h-[360px] bg-[radial-gradient(ellipse_at_top,rgba(39,134,194,0.16),transparent_65%)]"
+                        />
+                        <div className="relative w-full max-w-3xl">
+                            <div className="mb-5 flex flex-col items-center text-center">
+                                <h3 className="text-balance text-[2rem] font-bold leading-tight tracking-tight text-ink-navy">
+                                    วันนี้ให้{" "}
+                                    <span className="bg-gradient-to-r from-softnix-deep to-softnix-blue bg-clip-text text-transparent">Agent</span>
+                                    {" "}ช่วยจัดการอะไรดี?
                                 </h3>
-                                <p className="mx-auto mt-3 max-w-xl text-center text-[0.9375rem] leading-6 text-slate-gray">
-                                    พิมพ์ภารกิจหรือเลือกตัวอย่างด้านล่าง
+                                <p className="mx-auto mt-2 max-w-xl text-[0.9375rem] leading-6 text-slate-gray">
+                                    บอกสิ่งที่ต้องการเป็นภาษาปกติ Agent จะอ่านเอกสาร ตรวจข้อมูล และเตรียมส่งต่อให้
                                 </p>
                             </div>
 
-                            <div className="rounded-[24px] border border-hairline bg-white shadow-[0_18px_45px_rgba(13,27,42,0.10)]">
+                            <div className="rounded-[24px] border border-hairline bg-white shadow-[0_18px_45px_rgba(13,27,42,0.10)] transition-shadow focus-within:border-softnix-blue/50 focus-within:shadow-[0_18px_45px_rgba(39,134,194,0.18)] focus-within:ring-4 focus-within:ring-softnix-blue/10">
                                 <textarea
                                     ref={startInputRef}
                                     value={inputValue}
@@ -711,8 +748,8 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
                                     placeholder="เช่น ตรวจใบเสร็จที่ review แล้ว และเตรียมข้อมูลสำหรับส่ง integration"
                                     disabled={streaming}
                                     maxLength={10000}
-                                    rows={5}
-                                    className="min-h-[148px] w-full resize-none rounded-t-[24px] px-6 py-5 text-[1rem] leading-7 text-ink-navy placeholder:text-slate-400 focus:outline-none disabled:opacity-50"
+                                    rows={3}
+                                    className="min-h-[104px] w-full resize-none rounded-t-[24px] px-6 py-4 text-[1rem] leading-7 text-ink-navy placeholder:text-slate-400 focus:outline-none disabled:opacity-50"
                                 />
                                 {autoConfirm && (
                                     <div className="mx-4 mb-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-left">
@@ -740,10 +777,11 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
                                     <button
                                         type="button"
                                         onClick={() => setShowSkillLibrary(true)}
-                                        className="flex h-9 w-9 items-center justify-center rounded-full text-charcoal transition-colors hover:bg-off-white"
+                                        className="inline-flex h-9 items-center gap-2 rounded-full px-3 text-[0.875rem] font-medium text-slate-gray transition-colors hover:bg-off-white hover:text-ink-navy"
                                         title="Skill Library"
                                     >
                                         <Library className="h-4 w-4" />
+                                        <span className="hidden sm:inline">คลัง Skill</span>
                                     </button>
                                     <button
                                         type="button"
@@ -761,11 +799,14 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
                                         type="button"
                                         onClick={() => sendMessage()}
                                         disabled={!inputValue.trim() || streaming}
-                                        className="ml-auto flex h-11 w-11 items-center justify-center rounded-full bg-softnix-blue text-white shadow-sm transition-colors hover:bg-softnix-deep disabled:cursor-not-allowed disabled:opacity-40"
-                                        title="ส่งข้อความ"
+                                        className="ml-auto flex h-11 w-11 items-center justify-center rounded-full bg-gradient-to-br from-softnix-blue to-softnix-deep text-white shadow-[0_6px_16px_rgba(39,134,194,0.35)] transition-all hover:scale-105 disabled:cursor-not-allowed disabled:opacity-40 disabled:shadow-none disabled:hover:scale-100"
+                                        title="ส่งข้อความ (Enter)"
                                     >
                                         {streaming ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
                                     </button>
+                                    <p className="hidden w-full text-right text-xs text-mute-gray sm:block">
+                                        Enter เพื่อส่ง · Shift+Enter ขึ้นบรรทัดใหม่ · พิมพ์ / เพื่อเลือก Skill
+                                    </p>
                                 </div>
                                 {startSkillPickerVisible && (
                                     <div className="border-t border-hairline bg-[#F7FBFE] px-4 py-3">
@@ -777,7 +818,7 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
                                             <button
                                                 type="button"
                                                 onClick={() => setShowStartSkillPicker(false)}
-                                                className="text-[0.75rem] font-medium text-slate-gray hover:text-ink-navy"
+                                                className="text-xs font-medium text-slate-gray hover:text-ink-navy"
                                             >
                                                 ปิด
                                             </button>
@@ -804,10 +845,10 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
                                                     >
                                                         <div className="flex items-center justify-between gap-2">
                                                             <code className="truncate text-[0.8125rem] font-semibold text-softnix-deep">/{skill.name}</code>
-                                                            <span className="shrink-0 rounded-full bg-slate-100 px-2 py-0.5 text-[0.625rem] font-bold uppercase tracking-wide text-slate-gray">{skill.scope}</span>
+                                                            <span className="shrink-0 rounded-full bg-slate-100 px-2 py-0.5 text-xs font-bold uppercase tracking-wide text-slate-gray">{skill.scope}</span>
                                                         </div>
                                                         {skill.description && (
-                                                            <p className="mt-1 line-clamp-1 text-[0.75rem] leading-5 text-slate-gray">{skill.description}</p>
+                                                            <p className="mt-1 line-clamp-1 text-xs leading-5 text-slate-gray">{skill.description}</p>
                                                         )}
                                                     </button>
                                                 ))}
@@ -821,7 +862,8 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
                                 )}
                             </div>
 
-                            <div className="mt-7 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                            <p className="mb-2 mt-5 text-xs font-semibold uppercase tracking-wider text-mute-gray">เริ่มต้นอย่างรวดเร็ว</p>
+                            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                                 {suggestionPrompts.map(item => {
                                     const Icon = item.icon
                                     return (
@@ -829,15 +871,16 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
                                             key={item.label}
                                             type="button"
                                             onClick={() => applySuggestion(item.prompt)}
-                                            className="group flex items-start gap-3 rounded-xl px-3 py-3 text-left transition-colors hover:bg-white hover:shadow-sm"
+                                            className="group flex items-center gap-3 rounded-2xl border border-hairline bg-white px-4 py-2.5 text-left transition-all hover:-translate-y-0.5 hover:border-softnix-blue/40 hover:shadow-[0_8px_20px_rgba(39,134,194,0.12)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-softnix-blue"
                                         >
-                                            <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[#EBF4FB] text-softnix-blue transition-colors group-hover:bg-softnix-blue group-hover:text-white">
-                                                <Icon className="h-4 w-4" />
+                                            <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#EBF4FB] text-softnix-blue transition-colors group-hover:bg-softnix-blue group-hover:text-white">
+                                                <Icon className="h-5 w-5" />
                                             </span>
-                                            <span className="min-w-0">
+                                            <span className="min-w-0 flex-1">
                                                 <span className="block text-[0.9375rem] font-semibold leading-5 text-ink-navy">{item.label}</span>
                                                 <span className="mt-0.5 block text-[0.8125rem] leading-5 text-slate-gray">{item.description}</span>
                                             </span>
+                                            <ArrowUpRight className="h-4 w-4 shrink-0 text-slate-300 transition-colors group-hover:text-softnix-blue" />
                                         </button>
                                     )
                                 })}
@@ -845,9 +888,7 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
                         </div>
                     </div>
                 )}
-                {messages.map((msg, index) => (
-                    index === currentRunPersistedPlanIndex ? null : renderPersistedMessage(msg)
-                ))}
+                {renderMessageList()}
                 {streaming && planSteps.length > 0 && renderPlanCard(planSteps, reflection, true, "live-plan")}
                 {events.filter(e => e.type === "tool_call").length > 0 && (
                     <AgentToolCalls
@@ -896,9 +937,9 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
                             >
                                 <div className="flex items-center justify-between gap-2">
                                     <code className="text-xs font-semibold text-softnix-deep truncate">/{skill.name}</code>
-                                    <span className="text-[10px] uppercase tracking-wide text-slate-gray">{skill.scope}</span>
+                                    <span className="text-xs uppercase tracking-wide text-slate-gray">{skill.scope}</span>
                                 </div>
-                                <p className="mt-0.5 line-clamp-1 text-[11px] text-slate-gray">{skill.description}</p>
+                                <p className="mt-0.5 line-clamp-1 text-xs text-slate-gray">{skill.description}</p>
                             </button>
                         )) : (
                             <div className="px-3 py-2 text-xs text-slate-gray">ไม่พบ skill ที่ตรงกับคำค้น</div>
@@ -922,7 +963,7 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
                     onSend={sendMessage}
                     disabled={!activeConversation}
                     streaming={streaming}
-                    tips={<p className="text-[11px] text-slate-gray">Tips: พิมพ์ <code className="rounded bg-slate-100 px-1 font-mono">/</code> เพื่อเลือก Skill ที่ต้องการใช้งาน</p>}
+                    tips={<p className="text-xs text-slate-gray">Tips: พิมพ์ <code className="rounded bg-slate-100 px-1 font-mono">/</code> เพื่อเลือก Skill ที่ต้องการใช้งาน</p>}
                 />
             )}
         </div>

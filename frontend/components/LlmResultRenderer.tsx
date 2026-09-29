@@ -191,7 +191,7 @@ function GenericJsonView({ data }: { data: any }) {
       const keys = Array.from(new Set(data.flatMap(item => Object.keys(item))))
       return (
         <div className="overflow-x-auto rounded-[8px] shadow-sm my-2">
-          <table className="min-w-full text-[12px] border-collapse">
+          <table className="min-w-full text-xs border-collapse">
             <thead>
               <tr className="bg-[#1a365d] text-white">
                 {keys.map(k => (
@@ -307,7 +307,7 @@ function ValidationTable({ rules }: { rules: ValidationRule[] }) {
               return (
                 <tr key={rule.rule_id} className={`border-b border-[#e2e8f0] ${idx % 2 === 0 ? "bg-white" : "bg-[#f7fafc]"} hover:bg-[#ebf8ff] transition-colors`}>
                   <td className="px-3 py-[9px] text-[#718096] font-mono text-xs align-top">{idx + 1}</td>
-                  <td className="px-3 py-[9px] text-[#2d3748] align-top">{rule.rule_name} <span className="text-[#718096] text-[11px] font-mono bg-[#edf2f7] px-1.5 rounded">({rule.category.split(" ").map((w: string) => w[0]).join("")})</span></td>
+                  <td className="px-3 py-[9px] text-[#2d3748] align-top">{rule.rule_name} <span className="text-[#718096] text-xs font-mono bg-[#edf2f7] px-1.5 rounded">({rule.category.split(" ").map((w: string) => w[0]).join("")})</span></td>
                   <td className="px-3 py-[9px] text-[#718096] text-xs align-top">{docsStr}</td>
                   <td className="px-3 py-[9px] text-center align-top">
                     <span className={`inline-block text-xs font-bold px-2.5 py-0.5 rounded-full ${statusColor(rule.status)}`}>
@@ -382,7 +382,7 @@ function DocumentsReviewed({ docs }: { docs: DocumentReviewed[] }) {
           <div key={i} className="flex items-center gap-2 px-3 py-1.5 bg-[#f7fafc] rounded-[8px] border border-[#e2e8f0] text-[13px] shadow-[0_2px_10px_rgba(0,0,0,0.05)]">
             <span className="font-bold text-[#1a365d]">{d.type}</span>
             <span className="text-[#2d3748]">{d.doc_number}</span>
-            <span className="text-[11px] text-[#718096]">{d.date}</span>
+            <span className="text-xs text-[#718096]">{d.date}</span>
           </div>
         ))}
       </div>
@@ -941,31 +941,31 @@ function TorVerificationReportView({ report }: { report: TorVerificationReport }
           {s.total_requirements != null && (
             <div className="flex-1 min-w-[80px] rounded-[8px] bg-white border border-[#e2e8f0] py-3 text-center shadow-sm">
               <div className="text-2xl font-[800] text-[#1a365d]">{s.total_requirements}</div>
-              <div className="text-[11px] text-[#718096] mt-0.5">Total</div>
+              <div className="text-xs text-[#718096] mt-0.5">Total</div>
             </div>
           )}
           {s.pass_count != null && (
             <div className="flex-1 min-w-[80px] rounded-[8px] bg-[#f0fff4] border border-[#c6f6d5] py-3 text-center shadow-sm">
               <div className="text-2xl font-[800] text-[#276749]">{s.pass_count}</div>
-              <div className="text-[11px] text-[#718096] mt-0.5">PASS</div>
+              <div className="text-xs text-[#718096] mt-0.5">PASS</div>
             </div>
           )}
           {s.partial_count != null && (
             <div className="flex-1 min-w-[80px] rounded-[8px] bg-[#fffaf0] border border-[#feebc8] py-3 text-center shadow-sm">
               <div className="text-2xl font-[800] text-[#c05621]">{s.partial_count}</div>
-              <div className="text-[11px] text-[#718096] mt-0.5">PARTIAL</div>
+              <div className="text-xs text-[#718096] mt-0.5">PARTIAL</div>
             </div>
           )}
           {s.fail_count != null && (
             <div className="flex-1 min-w-[80px] rounded-[8px] bg-[#fff5f5] border border-[#fed7d7] py-3 text-center shadow-sm">
               <div className="text-2xl font-[800] text-[#c53030]">{s.fail_count}</div>
-              <div className="text-[11px] text-[#718096] mt-0.5">FAIL</div>
+              <div className="text-xs text-[#718096] mt-0.5">FAIL</div>
             </div>
           )}
           {s.coverage_percent != null && (
             <div className="flex-1 min-w-[80px] rounded-[8px] bg-white border border-[#e2e8f0] py-3 text-center shadow-sm">
               <div className="text-2xl font-[800] text-[#2b6cb0]">{s.coverage_percent}%</div>
-              <div className="text-[11px] text-[#718096] mt-0.5">Coverage</div>
+              <div className="text-xs text-[#718096] mt-0.5">Coverage</div>
             </div>
           )}
         </div>
@@ -980,7 +980,7 @@ function TorVerificationReportView({ report }: { report: TorVerificationReport }
         <div>
           <h3 className="text-[15px] font-bold text-[#2b6cb0] border-l-4 border-[#2b6cb0] pl-3 mb-3">รายการ Requirements</h3>
           <div className="overflow-x-auto rounded-[10px] shadow-[0_2px_10px_rgba(0,0,0,0.05)]">
-            <table className="min-w-full text-[12px] border-collapse">
+            <table className="min-w-full text-xs border-collapse">
               <thead>
                 <tr className="bg-[#1a365d] text-white">
                   <th className="px-3 py-2.5 text-left font-semibold w-10">#</th>

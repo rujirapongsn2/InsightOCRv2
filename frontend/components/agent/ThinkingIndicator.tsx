@@ -27,7 +27,7 @@ export default function ThinkingIndicator({ iteration, compact = false }: Thinki
                 <div className="flex items-center gap-2 mb-1.5">
                     <span className="text-xs font-medium text-softnix-blue">Agent is thinking</span>
                     {iteration && (
-                        <span className="text-[10px] text-[#5EADD6] bg-[#EBF4FB] rounded-full px-2 py-0.5 font-mono">
+                        <span className="text-xs text-[#5EADD6] bg-[#EBF4FB] rounded-full px-2 py-0.5 font-mono">
                             iteration {iteration}
                         </span>
                     )}
@@ -45,7 +45,7 @@ export default function ThinkingIndicator({ iteration, compact = false }: Thinki
                         className="w-2 h-2 rounded-full bg-[#5EADD6] animate-bounce"
                         style={{ animationDelay: "300ms" }}
                     />
-                    <span className="text-[11px] text-[#5EADD6] ml-1">analyzing context, planning actions...</span>
+                    <span className="text-xs text-[#5EADD6] ml-1">analyzing context, planning actions...</span>
                 </div>
             </div>
         </div>

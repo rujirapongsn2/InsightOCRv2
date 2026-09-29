@@ -134,7 +134,7 @@ export default function SkillEditor({ skill, tools, onSave, onClose }: SkillEdit
                             maxLength={1024}
                             className="w-full text-sm border border-hairline rounded-lg px-3 py-2 focus:ring-2 focus:ring-softnix-blue"
                         />
-                        <p className="text-[10px] text-mute-gray">{description.length}/1024</p>
+                        <p className="text-xs text-mute-gray">{description.length}/1024</p>
                     </div>
 
                     {/* Procedure */}
@@ -179,7 +179,7 @@ export default function SkillEditor({ skill, tools, onSave, onClose }: SkillEdit
                                         <span className="min-w-0">
                                             <span className="block font-medium text-charcoal">{tool.name}</span>
                                             <span
-                                                className="block truncate text-[10px] text-mute-gray"
+                                                className="block truncate text-xs text-mute-gray"
                                                 title={tool.description}
                                             >
                                                 {tool.category}{tool.requires_confirmation ? " · confirmation" : ""}

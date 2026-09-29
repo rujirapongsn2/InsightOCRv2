@@ -179,15 +179,15 @@ function WfNode({ id, data, selected }: NodeProps) {
                 </span>
                 <div className="min-w-0">
                     <div className="text-xs font-semibold text-[#0D1B2A] truncate">{d.label}</div>
-                    <div className="text-[10px] text-[#94A3B8]">{d.nodeType}</div>
+                    <div className="text-xs text-[#94A3B8]">{d.nodeType}</div>
                 </div>
             </div>
             {isCondition ? (
                 <>
                     <Handle id="true" type="source" position={Position.Right} style={{ top: "35%" }} className="!w-2.5 !h-2.5 !bg-emerald-500" />
                     <Handle id="false" type="source" position={Position.Right} style={{ top: "75%" }} className="!w-2.5 !h-2.5 !bg-red-400" />
-                    <div className="absolute right-1.5 text-[9px] text-emerald-600 font-semibold" style={{ top: "calc(35% - 7px)" }}>T</div>
-                    <div className="absolute right-1.5 text-[9px] text-red-500 font-semibold" style={{ top: "calc(75% - 7px)" }}>F</div>
+                    <div className="absolute right-1.5 text-xs text-emerald-600 font-semibold" style={{ top: "calc(35% - 7px)" }}>T</div>
+                    <div className="absolute right-1.5 text-xs text-red-500 font-semibold" style={{ top: "calc(75% - 7px)" }}>F</div>
                 </>
             ) : isJevChoice ? (
                 <>
@@ -661,12 +661,12 @@ const RUN_STATUS_COLOR: Record<string, string> = {
 /** Collapsible JSON tree — แทน raw &lt;pre&gt; เล็กๆ */
 function JsonTree({ data, depth = 0 }: { data: any; depth?: number }) {
     const [collapsed, setCollapsed] = useState(depth > 0)
-    if (data === null || data === undefined) return <span className="text-slate-400 text-[10px]">{String(data)}</span>
-    if (typeof data === "boolean") return <span className="text-purple-500 text-[10px]">{String(data)}</span>
-    if (typeof data === "number") return <span className="text-blue-500 text-[10px]">{data}</span>
+    if (data === null || data === undefined) return <span className="text-slate-400 text-xs">{String(data)}</span>
+    if (typeof data === "boolean") return <span className="text-purple-500 text-xs">{String(data)}</span>
+    if (typeof data === "number") return <span className="text-blue-500 text-xs">{data}</span>
     if (typeof data === "string") {
         const display = data.length > 120 ? data.slice(0, 120) + "…" : data
-        return <span className="text-emerald-600 text-[10px]">"{display}"</span>
+        return <span className="text-emerald-600 text-xs">"{display}"</span>
     }
     const isArr = Array.isArray(data)
     const entries: [string | number, any][] = isArr
@@ -674,26 +674,26 @@ function JsonTree({ data, depth = 0 }: { data: any; depth?: number }) {
         : Object.entries(data)
     const count = entries.length
     const [o, c] = isArr ? ["[", "]"] : ["{", "}"]
-    if (count === 0) return <span className="text-slate-500 text-[10px]">{o}{c}</span>
+    if (count === 0) return <span className="text-slate-500 text-xs">{o}{c}</span>
     const visible = entries.slice(0, 60)
     return (
         <span>
             <button type="button" onClick={() => setCollapsed(!collapsed)}
-                className="text-[10px] text-slate-500 hover:text-[#2786C2] select-none">
+                className="text-xs text-slate-500 hover:text-[#2786C2] select-none">
                 {collapsed ? "▸" : "▾"} {o}{collapsed ? <span className="text-[#94A3B8]"> …{count} </span> : null}
             </button>
             {!collapsed && (
                 <div className="pl-3 border-l border-slate-200 ml-0.5">
                     {visible.map(([k, v]) => (
                         <div key={String(k)} className="flex items-start gap-0.5 py-0.5">
-                            <span className="text-[10px] text-slate-600 shrink-0 mr-0.5">{isArr ? `[${k}]` : `"${k}"`}:</span>
+                            <span className="text-xs text-slate-600 shrink-0 mr-0.5">{isArr ? `[${k}]` : `"${k}"`}:</span>
                             <JsonTree data={v} depth={depth + 1} />
                         </div>
                     ))}
-                    {entries.length > 60 && <div className="text-[10px] text-slate-400">…{entries.length - 60} รายการเพิ่มเติม</div>}
+                    {entries.length > 60 && <div className="text-xs text-slate-400">…{entries.length - 60} รายการเพิ่มเติม</div>}
                 </div>
             )}
-            {!collapsed && <span className="text-slate-500 text-[10px]">{c}</span>}
+            {!collapsed && <span className="text-slate-500 text-xs">{c}</span>}
         </span>
     )
 }
@@ -768,18 +768,18 @@ function NodeRunRow({ nr, runId }: { nr: WorkflowRun["node_runs"][0]; runId: str
                     {open ? <ChevronDown className="h-3.5 w-3.5 text-[#94A3B8]" /> : <ChevronRight className="h-3.5 w-3.5 text-[#94A3B8]" />}
                     <Icon className={`h-4 w-4 ${RUN_STATUS_COLOR[nr.status]} ${nr.status === "running" ? "animate-pulse" : ""}`} />
                     <span className="text-xs font-medium text-[#0D1B2A] flex-1 truncate">{nr.node_label || nr.node_id}</span>
-                    <span className="text-[10px] text-[#94A3B8]">{nr.status}</span>
+                    <span className="text-xs text-[#94A3B8]">{nr.status}</span>
                 </button>
                 {open && (
                     <div className="px-3 pb-3 space-y-2">
                         {nr.logs && (
-                            <pre className="text-[10px] bg-[#0D1B2A] text-emerald-200 rounded-lg p-2 overflow-auto max-h-32 whitespace-pre-wrap">{nr.logs}</pre>
+                            <pre className="text-xs bg-[#0D1B2A] text-emerald-200 rounded-lg p-2 overflow-auto max-h-32 whitespace-pre-wrap">{nr.logs}</pre>
                         )}
-                        {nr.error && <pre className="text-[10px] bg-red-50 text-red-600 rounded-lg p-2 overflow-auto max-h-32 whitespace-pre-wrap">{nr.error}</pre>}
+                        {nr.error && <pre className="text-xs bg-red-50 text-red-600 rounded-lg p-2 overflow-auto max-h-32 whitespace-pre-wrap">{nr.error}</pre>}
                         {nr.output != null && (
                             <div className="rounded-lg bg-[#F8F9FA] border border-[#E2E8F0] p-2">
                                 <div className="flex items-center justify-between mb-1">
-                                    <span className="text-[9px] uppercase tracking-wide text-[#94A3B8] font-semibold">Output</span>
+                                    <span className="text-xs uppercase tracking-wide text-[#94A3B8] font-semibold">Output</span>
                                     <button
                                         type="button"
                                         onClick={() => setExpandOutput(true)}
@@ -789,7 +789,7 @@ function NodeRunRow({ nr, runId }: { nr: WorkflowRun["node_runs"][0]; runId: str
                                         <Maximize2 className="h-3 w-3" />
                                     </button>
                                 </div>
-                                <div className="text-[10px] font-mono overflow-auto max-h-48">
+                                <div className="text-xs font-mono overflow-auto max-h-48">
                                     <JsonTree data={nr.output} depth={0} />
                                 </div>
                             </div>
@@ -804,12 +804,12 @@ function NodeRunRow({ nr, runId }: { nr: WorkflowRun["node_runs"][0]; runId: str
                                     {downloading ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
                                     ดาวน์โหลด {outputFile}
                                 </button>
-                                {downloadError && <p className="text-[10px] text-red-600 mt-1">{downloadError}</p>}
+                                {downloadError && <p className="text-xs text-red-600 mt-1">{downloadError}</p>}
                             </div>
                         )}
                         {artifacts.length > 0 && (
                             <div className="space-y-1.5">
-                                <span className="text-[9px] uppercase tracking-wide text-[#94A3B8] font-semibold">Files</span>
+                                <span className="text-xs uppercase tracking-wide text-[#94A3B8] font-semibold">Files</span>
                                 {artifacts.map((artifact: any, artifactIndex: number) => {
                                     const filename = String(artifact?.filename || artifact?.path || "download")
                                         .replace(/\\/g, "/")
@@ -827,11 +827,11 @@ function NodeRunRow({ nr, runId }: { nr: WorkflowRun["node_runs"][0]; runId: str
                                         >
                                             {isDownloading ? <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0" /> : <Download className="h-3.5 w-3.5 shrink-0" />}
                                             <span className="min-w-0 flex-1 truncate">{filename}</span>
-                                            {artifact?.type && <span className="shrink-0 text-[9px] uppercase text-[#94A3B8]">{artifact.type}</span>}
+                                            {artifact?.type && <span className="shrink-0 text-xs uppercase text-[#94A3B8]">{artifact.type}</span>}
                                         </button>
                                     )
                                 })}
-                                {downloadError && <p className="text-[10px] text-red-600">{downloadError}</p>}
+                                {downloadError && <p className="text-xs text-red-600">{downloadError}</p>}
                             </div>
                         )}
                     </div>
@@ -1049,11 +1049,11 @@ function InsertVariableButton({ upstream, onInsert }: { upstream: UpstreamNode[]
             }}
             className="bg-[#0D1B2A] border border-[#2786C2]/40 rounded-xl shadow-2xl p-2.5 flex flex-col gap-1 overflow-hidden"
         >
-            <p className="text-[9px] text-[#94A3B8] uppercase tracking-wide font-semibold shrink-0">ค่าจาก run ล่าสุด</p>
-            <code className="text-[10px] text-[#2786C2] font-mono break-all leading-relaxed shrink-0">
+            <p className="text-xs text-[#94A3B8] uppercase tracking-wide font-semibold shrink-0">ค่าจาก run ล่าสุด</p>
+            <code className="text-xs text-[#2786C2] font-mono break-all leading-relaxed shrink-0">
                 {`{{${hovered.nodeId}${hovered.path ? "." + hovered.path : ""}}}`}
             </code>
-            <div className="mt-1 text-[10px] font-mono text-emerald-300 whitespace-pre-wrap break-all leading-relaxed overflow-y-auto">
+            <div className="mt-1 text-xs font-mono text-emerald-300 whitespace-pre-wrap break-all leading-relaxed overflow-y-auto">
                 {hoveredNode?.output == null
                     ? <span className="text-[#778DA9]">(ยังไม่มีข้อมูล — รัน workflow ก่อนเพื่อดูค่าจริง)</span>
                     : formatPreview(hoveredValue)
@@ -1069,14 +1069,14 @@ function InsertVariableButton({ upstream, onInsert }: { upstream: UpstreamNode[]
                 <button
                     type="button"
                     onClick={() => setMode(mode === "manual" ? null : "manual")}
-                    className="flex items-center gap-1 text-[10px] text-[#2786C2] hover:text-[#1F6FA3] font-medium"
+                    className="flex items-center gap-1 text-xs text-[#2786C2] hover:text-[#1F6FA3] font-medium"
                 >
                     <Plus className="h-3 w-3" /> แทรกข้อมูลจากโหนดก่อนหน้า
                 </button>
                 <button
                     type="button"
                     onClick={() => setMode(mode === "ai" ? null : "ai")}
-                    className="flex items-center gap-1 text-[10px] font-medium bg-gradient-to-r from-[#7C3AED] to-[#2786C2] bg-clip-text text-transparent hover:opacity-80"
+                    className="flex items-center gap-1 text-xs font-medium bg-gradient-to-r from-[#7C3AED] to-[#2786C2] bg-clip-text text-transparent hover:opacity-80"
                 >
                     <Sparkles className="h-3 w-3 text-[#7C3AED]" /> ค้นหาด้วย AI
                 </button>
@@ -1087,7 +1087,7 @@ function InsertVariableButton({ upstream, onInsert }: { upstream: UpstreamNode[]
                 <div className="absolute z-30 mt-1">
                     <div className="w-64 max-h-80 overflow-y-auto bg-white border border-[#E2E8F0] rounded-xl shadow-lg p-1.5">
                         {upstream.length === 0 ? (
-                            <p className="text-[10px] text-[#94A3B8] px-2 py-2">ยังไม่มีโหนดก่อนหน้า — ลากเส้นเชื่อมจากโหนดอื่นมายังโหนดนี้ก่อน</p>
+                            <p className="text-xs text-[#94A3B8] px-2 py-2">ยังไม่มีโหนดก่อนหน้า — ลากเส้นเชื่อมจากโหนดอื่นมายังโหนดนี้ก่อน</p>
                         ) : upstream.map((n) => (
                             <div key={n.id}>
                                 <button
@@ -1096,8 +1096,8 @@ function InsertVariableButton({ upstream, onInsert }: { upstream: UpstreamNode[]
                                     className="w-full flex items-center gap-1.5 px-2 py-1.5 rounded-lg hover:bg-[#F8F9FA] text-left"
                                 >
                                     {expanded === n.id ? <ChevronDown className="h-3 w-3 text-[#94A3B8]" /> : <ChevronRight className="h-3 w-3 text-[#94A3B8]" />}
-                                    <span className="text-[11px] font-medium text-[#0D1B2A] flex-1 truncate">{n.label}</span>
-                                    <span className="text-[9px] text-[#94A3B8]">{n.id}</span>
+                                    <span className="text-xs font-medium text-[#0D1B2A] flex-1 truncate">{n.label}</span>
+                                    <span className="text-xs text-[#94A3B8]">{n.id}</span>
                                 </button>
                                 {expanded === n.id && (
                                     <div className="pl-5 pb-1">
@@ -1106,7 +1106,7 @@ function InsertVariableButton({ upstream, onInsert }: { upstream: UpstreamNode[]
                                             onClick={() => { onInsert(`{{${n.id}}}`); setMode(null) }}
                                             onMouseEnter={(e) => onEnter(e, n.id, "")}
                                             onMouseLeave={() => setHovered(null)}
-                                            className="block w-full text-left px-2 py-1 rounded text-[10px] text-[#778DA9] hover:bg-[#EBF4FB] hover:text-[#2786C2] italic"
+                                            className="block w-full text-left px-2 py-1 rounded text-xs text-[#778DA9] hover:bg-[#EBF4FB] hover:text-[#2786C2] italic"
                                         >
                                             ทั้งโหนด ({"{{"}{n.id}{"}}"})
                                         </button>
@@ -1117,13 +1117,13 @@ function InsertVariableButton({ upstream, onInsert }: { upstream: UpstreamNode[]
                                                 onClick={() => { onInsert(`{{${n.id}.${f.name}}}`); setMode(null) }}
                                                 onMouseEnter={(e) => onEnter(e, n.id, f.name)}
                                                 onMouseLeave={() => setHovered(null)}
-                                                className="block w-full text-left px-2 py-1 rounded text-[10px] text-[#0D1B2A] hover:bg-[#EBF4FB] hover:text-[#2786C2]"
+                                                className="block w-full text-left px-2 py-1 rounded text-xs text-[#0D1B2A] hover:bg-[#EBF4FB] hover:text-[#2786C2]"
                                             >
                                                 {f.label} <span className="text-[#94A3B8]">· {f.name}</span>
                                             </button>
                                         ))}
                                         {n.fields.length === 0 && (
-                                            <p className="px-2 py-1 text-[9px] text-[#94A3B8]">ไม่มีฟิลด์ที่ทราบล่วงหน้า — ลองรันโหนดนี้ก่อนเพื่อดูฟิลด์จริง</p>
+                                            <p className="px-2 py-1 text-xs text-[#94A3B8]">ไม่มีฟิลด์ที่ทราบล่วงหน้า — ลองรันโหนดนี้ก่อนเพื่อดูฟิลด์จริง</p>
                                         )}
                                     </div>
                                 )}
@@ -1137,7 +1137,7 @@ function InsertVariableButton({ upstream, onInsert }: { upstream: UpstreamNode[]
             {mode === "ai" && (
                 <div className="absolute z-30 mt-1">
                     <div className="w-80 max-h-96 overflow-y-auto bg-white border border-[#7C3AED]/30 rounded-xl shadow-xl p-2.5">
-                        <p className="text-[10px] text-[#64748B] mb-1.5 flex items-center gap-1">
+                        <p className="text-xs text-[#64748B] mb-1.5 flex items-center gap-1">
                             <Sparkles className="h-3 w-3 text-[#7C3AED]" /> พิมพ์ข้อมูลที่ต้องการเป็นภาษาธรรมชาติ
                         </p>
                         <div className="flex gap-1.5">
@@ -1160,32 +1160,32 @@ function InsertVariableButton({ upstream, onInsert }: { upstream: UpstreamNode[]
                         </div>
 
                         {candidates.length === 0 && (
-                            <p className="text-[10px] text-amber-600 mt-2">ยังไม่มีโหนดก่อนหน้า — เชื่อมโหนดและรัน workflow ก่อนเพื่อให้ AI รู้จักตัวแปร</p>
+                            <p className="text-xs text-amber-600 mt-2">ยังไม่มีโหนดก่อนหน้า — เชื่อมโหนดและรัน workflow ก่อนเพื่อให้ AI รู้จักตัวแปร</p>
                         )}
-                        {aiError && <p className="text-[10px] text-amber-600 mt-2">{aiError}</p>}
+                        {aiError && <p className="text-xs text-amber-600 mt-2">{aiError}</p>}
 
                         {aiResults && (
                             <div className="mt-2 space-y-1.5">
                                 {aiResults.length === 0 ? (
-                                    <p className="text-[10px] text-[#94A3B8]">ไม่พบตัวแปรที่ตรง — ลองอธิบายใหม่ หรือใช้เมนูแทรกแบบเลือกเอง</p>
+                                    <p className="text-xs text-[#94A3B8]">ไม่พบตัวแปรที่ตรง — ลองอธิบายใหม่ หรือใช้เมนูแทรกแบบเลือกเอง</p>
                                 ) : aiResults.map((s) => {
                                     const cand = sampleByToken.get(s.token)
                                     const meta = CONFIDENCE_META[s.confidence] || CONFIDENCE_META.medium
                                     return (
                                         <div key={s.token} className="border border-[#E2E8F0] rounded-lg p-2 hover:border-[#7C3AED]/40">
                                             <div className="flex items-center gap-1.5 mb-0.5">
-                                                <span className="text-[11px] font-medium text-[#0D1B2A] flex-1 truncate">{cand?.label || s.token}</span>
-                                                <span className={`text-[9px] font-semibold ${meta.cls}`} title={meta.label}>{meta.stars}</span>
+                                                <span className="text-xs font-medium text-[#0D1B2A] flex-1 truncate">{cand?.label || s.token}</span>
+                                                <span className={`text-xs font-semibold ${meta.cls}`} title={meta.label}>{meta.stars}</span>
                                             </div>
-                                            <code className="block text-[9px] text-[#2786C2] font-mono break-all">{s.token}</code>
+                                            <code className="block text-xs text-[#2786C2] font-mono break-all">{s.token}</code>
                                             {cand?.sample && (
-                                                <p className="text-[9px] text-emerald-600 font-mono mt-0.5 break-all line-clamp-2">ตัวอย่าง: {cand.sample}</p>
+                                                <p className="text-xs text-emerald-600 font-mono mt-0.5 break-all line-clamp-2">ตัวอย่าง: {cand.sample}</p>
                                             )}
-                                            {s.reason && <p className="text-[9px] text-[#94A3B8] mt-0.5">↳ {s.reason}</p>}
+                                            {s.reason && <p className="text-xs text-[#94A3B8] mt-0.5">↳ {s.reason}</p>}
                                             <button
                                                 type="button"
                                                 onClick={() => { onInsert(s.token); setMode(null) }}
-                                                className="mt-1.5 w-full text-[10px] py-1 rounded-lg bg-[#EBF4FB] text-[#2786C2] hover:bg-[#7C3AED] hover:text-white font-medium transition-colors"
+                                                className="mt-1.5 w-full text-xs py-1 rounded-lg bg-[#EBF4FB] text-[#2786C2] hover:bg-[#7C3AED] hover:text-white font-medium transition-colors"
                                             >
                                                 แทรกตัวแปรนี้
                                             </button>
@@ -1247,11 +1247,11 @@ function ConfigField({
     if (field.type === "skill_multi_select") {
         const selected = new Set(Array.isArray(value) ? value : [])
         if (agentSkillsLoading) {
-            return <p className="rounded-lg border border-[#E2E8F0] px-3 py-2 text-[10px] text-[#64748B]">กำลังโหลด Skills...</p>
+            return <p className="rounded-lg border border-[#E2E8F0] px-3 py-2 text-xs text-[#64748B]">กำลังโหลด Skills...</p>
         }
         if (agentSkillsError) {
             return (
-                <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[10px] text-red-600">
+                <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-600">
                     <p>โหลด Skills ไม่สำเร็จ</p>
                     <button type="button" onClick={onRetryAgentSkills} className="mt-1 font-semibold underline">ลองใหม่</button>
                 </div>
@@ -1274,11 +1274,11 @@ function ConfigField({
                         />
                         <span className="min-w-0">
                             <span className="block text-xs font-semibold text-[#0D1B2A]">{skill.name}</span>
-                            <span className="mt-0.5 block text-[10px] leading-snug text-[#64748B] line-clamp-2">{skill.description}</span>
+                            <span className="mt-0.5 block text-xs leading-snug text-[#64748B] line-clamp-2">{skill.description}</span>
                         </span>
                     </label>
                 ))}
-                {agentSkills.length === 0 && <p className="px-2 py-3 text-[10px] text-amber-600">ยังไม่มี Skill ที่ใช้งานได้</p>}
+                {agentSkills.length === 0 && <p className="px-2 py-3 text-xs text-amber-600">ยังไม่มี Skill ที่ใช้งานได้</p>}
             </div>
         )
     }
@@ -1342,7 +1342,7 @@ function ConfigField({
                     {!known && <option value={selectedValue}>{`${selectedValue} (ไม่พร้อมใช้งานในโหมดนี้)`}</option>}
                 </select>
                 {agentMode && aiOptions.length + integrationOptions.length === 0 && (
-                    <p className="mt-1 text-[10px] text-amber-600">
+                    <p className="mt-1 text-xs text-amber-600">
                         ยังไม่มี provider ที่รองรับ Agent tools — เปิดใช้ native tool calling ใน Settings หรือ Integration ก่อน
                     </p>
                 )}
@@ -1369,7 +1369,7 @@ function ConfigField({
                     {value && !known && <option value={value}>{`${value} (ไม่พบในรายการ)`}</option>}
                 </select>
                 {activeProviders.length === 0 && (
-                    <p className="text-[10px] text-amber-600 mt-1">
+                    <p className="text-xs text-amber-600 mt-1">
                         ยังไม่มี AI provider — ไปตั้งค่าที่ <a href="/settings" className="underline">Setting AI</a> ก่อน
                     </p>
                 )}
@@ -1394,12 +1394,12 @@ function ConfigField({
                     {value && !known && !selected && <option value={value}>{`${value} (ไม่พบในรายการ)`}</option>}
                 </select>
                 {matches.length === 0 && (
-                    <p className="text-[10px] text-amber-600 mt-1">
+                    <p className="text-xs text-amber-600 mt-1">
                         ยังไม่มีบัญชีชนิดนี้ที่พร้อมใช้งาน — ไปตรวจสอบที่ <a href="/integrations" className="underline">เมนู Integration</a>
                     </p>
                 )}
                 {selected && selected.status !== "active" && (
-                    <p className="text-[10px] text-amber-600 mt-1">บัญชีนี้ถูกพักไว้ ต้องเปิดใช้งานก่อนจึงจะรัน workflow ได้</p>
+                    <p className="text-xs text-amber-600 mt-1">บัญชีนี้ถูกพักไว้ ต้องเปิดใช้งานก่อนจึงจะรัน workflow ได้</p>
                 )}
             </div>
         )
@@ -1561,7 +1561,7 @@ function ScheduleTriggerSettings({
                     <p className="text-xs font-semibold text-[#0D1B2A] flex items-center gap-1.5">
                         <CalendarClock className="h-3.5 w-3.5 text-[#D97706]" /> ตั้งเวลารันอัตโนมัติ
                     </p>
-                    <p className="text-[10px] text-[#778DA9] mt-0.5 leading-snug">
+                    <p className="text-xs text-[#778DA9] mt-0.5 leading-snug">
                         เมื่อเปิดใช้งาน workflow นี้จะรันเองตามเวลาที่เลือก โดยไม่ต้องเปิดหน้าเว็บค้างไว้
                     </p>
                 </div>
@@ -1576,7 +1576,7 @@ function ScheduleTriggerSettings({
             </div>
 
             <div>
-                <label className="block text-[10px] uppercase tracking-wide text-[#94A3B8] font-semibold mb-1">
+                <label className="block text-xs uppercase tracking-wide text-[#94A3B8] font-semibold mb-1">
                     ความถี่
                 </label>
                 <select
@@ -1595,7 +1595,7 @@ function ScheduleTriggerSettings({
 
             {["daily", "weekdays", "weekly", "monthly"].includes(preset) && (
                 <div>
-                    <label className="block text-[10px] uppercase tracking-wide text-[#94A3B8] font-semibold mb-1">
+                    <label className="block text-xs uppercase tracking-wide text-[#94A3B8] font-semibold mb-1">
                         เวลา
                     </label>
                     <input
@@ -1609,7 +1609,7 @@ function ScheduleTriggerSettings({
 
             {preset === "hourly" && (
                 <div>
-                    <label className="block text-[10px] uppercase tracking-wide text-[#94A3B8] font-semibold mb-1">
+                    <label className="block text-xs uppercase tracking-wide text-[#94A3B8] font-semibold mb-1">
                         รันที่นาทีที่
                     </label>
                     <input
@@ -1628,7 +1628,7 @@ function ScheduleTriggerSettings({
 
             {preset === "weekly" && (
                 <div>
-                    <label className="block text-[10px] uppercase tracking-wide text-[#94A3B8] font-semibold mb-1">
+                    <label className="block text-xs uppercase tracking-wide text-[#94A3B8] font-semibold mb-1">
                         วันในสัปดาห์
                     </label>
                     <select
@@ -1643,7 +1643,7 @@ function ScheduleTriggerSettings({
 
             {preset === "monthly" && (
                 <div>
-                    <label className="block text-[10px] uppercase tracking-wide text-[#94A3B8] font-semibold mb-1">
+                    <label className="block text-xs uppercase tracking-wide text-[#94A3B8] font-semibold mb-1">
                         วันที่ของเดือน
                     </label>
                     <input
@@ -1659,7 +1659,7 @@ function ScheduleTriggerSettings({
 
             {preset === "custom" && (
                 <div>
-                    <label className="block text-[10px] uppercase tracking-wide text-[#94A3B8] font-semibold mb-1">
+                    <label className="block text-xs uppercase tracking-wide text-[#94A3B8] font-semibold mb-1">
                         Cron ขั้นสูง
                     </label>
                     <input
@@ -1672,10 +1672,10 @@ function ScheduleTriggerSettings({
             )}
 
             <div className="rounded-md bg-white border border-[#E2E8F0] px-2.5 py-2">
-                <p className="text-[10px] text-[#94A3B8]">สรุปการตั้งค่า</p>
-                <p className="text-[11px] text-[#0D1B2A]">{summarizeSchedule(cfg)}</p>
+                <p className="text-xs text-[#94A3B8]">สรุปการตั้งค่า</p>
+                <p className="text-xs text-[#0D1B2A]">{summarizeSchedule(cfg)}</p>
                 {preset === "custom" && (
-                    <code className="block mt-1 text-[10px] text-[#94A3B8]">{cronPreview || "ยังไม่ได้ตั้งค่า"}</code>
+                    <code className="block mt-1 text-xs text-[#94A3B8]">{cronPreview || "ยังไม่ได้ตั้งค่า"}</code>
                 )}
             </div>
         </div>
@@ -2106,7 +2106,7 @@ function Builder() {
                     value={workflow.name}
                     onChange={(e) => { setWorkflow({ ...workflow, name: e.target.value }); setDirty(true) }}
                 />
-                {dirty && <span className="text-[10px] text-amber-600 bg-amber-50 px-2 py-0.5 rounded-full">unsaved</span>}
+                {dirty && <span className="text-xs text-amber-600 bg-amber-50 px-2 py-0.5 rounded-full">unsaved</span>}
 
                 <div className="flex-1" />
 
@@ -2160,12 +2160,12 @@ function Builder() {
             <div className="flex flex-1 min-h-0">
                 {/* ── Palette ── */}
                 <aside className="w-56 bg-white border-r border-[#E2E8F0] overflow-y-auto p-3 space-y-4">
-                    <p className="text-[10px] uppercase tracking-wide text-[#94A3B8] font-semibold">ลาก node ไปวางบน canvas</p>
+                    <p className="text-xs uppercase tracking-wide text-[#94A3B8] font-semibold">ลาก node ไปวางบน canvas</p>
                     {Object.entries(grouped).map(([cat, defs]) => {
                         const style = CATEGORY_STYLE[cat] || CATEGORY_STYLE.action
                         return (
                             <div key={cat}>
-                                <p className="text-[10px] uppercase tracking-wide font-semibold mb-1.5" style={{ color: style.color }}>{cat}</p>
+                                <p className="text-xs uppercase tracking-wide font-semibold mb-1.5" style={{ color: style.color }}>{cat}</p>
                                 <div className="space-y-1.5">
                                     {defs.map((d) => {
                                         const Icon = TYPE_ICON[d.type] || style.icon
@@ -2225,25 +2225,25 @@ function Builder() {
                                 {activeRun ? (
                                     <>
                                         <div className="flex items-center gap-2 text-xs">
-                                            <span className={`px-2 py-0.5 rounded-full text-[10px] font-medium ${
+                                            <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
                                                 activeRun.status === "succeeded" ? "bg-emerald-50 text-emerald-600"
                                                 : activeRun.status === "failed" ? "bg-red-50 text-red-600"
                                                 : "bg-[#EBF4FB] text-[#2786C2]"
                                             }`}>
                                                 {activeRun.status}
                                             </span>
-                                            <span className="text-[#94A3B8] text-[10px]">{TRIGGER_TYPE_LABEL[activeRun.trigger_type] || activeRun.trigger_type}</span>
+                                            <span className="text-[#94A3B8] text-xs">{TRIGGER_TYPE_LABEL[activeRun.trigger_type] || activeRun.trigger_type}</span>
                                             {["queued", "running"].includes(activeRun.status) && <Loader2 className="h-3 w-3 animate-spin text-[#2786C2]" />}
-                                            <button className="ml-auto text-[10px] text-[#2786C2] hover:underline" onClick={() => { setActiveRun(null); loadHistory() }}>
+                                            <button className="ml-auto text-xs text-[#2786C2] hover:underline" onClick={() => { setActiveRun(null); loadHistory() }}>
                                                 ← history
                                             </button>
                                         </div>
-                                        {activeRun.error && <p className="text-[10px] text-red-600 bg-red-50 rounded-lg p-2">{activeRun.error}</p>}
+                                        {activeRun.error && <p className="text-xs text-red-600 bg-red-50 rounded-lg p-2">{activeRun.error}</p>}
                                         {(activeRun.node_runs || []).map((nr) => <NodeRunRow key={nr.id} nr={nr} runId={activeRun.id} />)}
                                     </>
                                 ) : (
                                     <>
-                                        <p className="text-[10px] text-[#94A3B8]">ประวัติการรันล่าสุด</p>
+                                        <p className="text-xs text-[#94A3B8]">ประวัติการรันล่าสุด</p>
                                         {runHistory.length === 0 && <p className="text-xs text-[#778DA9]">ยังไม่มีการรัน</p>}
                                         {runHistory.map((r) => (
                                             <button
@@ -2254,10 +2254,10 @@ function Builder() {
                                                 {r.status === "succeeded" ? <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />
                                                     : r.status === "failed" ? <XCircle className="h-3.5 w-3.5 text-red-500" />
                                                     : <Loader2 className="h-3.5 w-3.5 text-[#2786C2] animate-spin" />}
-                                                <span className="text-[11px] text-[#0D1B2A] flex-1">
+                                                <span className="text-xs text-[#0D1B2A] flex-1">
                                                     {r.created_at ? new Date(r.created_at).toLocaleString() : r.id.slice(0, 8)}
                                                 </span>
-                                                <span className="text-[10px] text-[#94A3B8]">{TRIGGER_TYPE_LABEL[r.trigger_type] || r.trigger_type}</span>
+                                                <span className="text-xs text-[#94A3B8]">{TRIGGER_TYPE_LABEL[r.trigger_type] || r.trigger_type}</span>
                                             </button>
                                         ))}
                                     </>
@@ -2276,7 +2276,7 @@ function Builder() {
                                 <Trash2 className="h-3.5 w-3.5" />
                             </button>
                         </div>
-                        <p className="text-[10px] text-[#94A3B8] mb-3">{selectedDef.description}</p>
+                        <p className="text-xs text-[#94A3B8] mb-3">{selectedDef.description}</p>
 
                         {selectedNodeType === "trigger_schedule" && (
                             <ScheduleTriggerSettings
@@ -2291,21 +2291,21 @@ function Builder() {
                                     <span className="text-xs font-semibold text-[#0D1B2A] flex items-center gap-1.5">
                                         <Webhook className="h-3.5 w-3.5 text-[#2786C2]" /> Webhook URL
                                     </span>
-                                    <span className={`px-2 py-0.5 rounded-full text-[10px] ${
+                                    <span className={`px-2 py-0.5 rounded-full text-xs ${
                                         workflow.webhook_enabled ? "bg-emerald-50 text-emerald-600" : "bg-gray-100 text-gray-500"
                                     }`}>
                                         {workflow.webhook_enabled ? "enabled" : "disabled"}
                                     </span>
                                 </div>
                                 {workflow.webhook_enabled && !webhookUrl && (
-                                    <p className="text-[10px] text-[#778DA9] leading-snug mb-2">
+                                    <p className="text-xs text-[#778DA9] leading-snug mb-2">
                                         Webhook เปิดอยู่แล้ว แต่ URL แบบเต็มจะแสดงเฉพาะตอน generate/regenerate เพื่อความปลอดภัย
                                     </p>
                                 )}
                                 {webhookUrl && (
                                     <div className="mb-2 rounded-md bg-white border border-[#E2E8F0] p-2">
-                                        <p className="text-[10px] text-[#94A3B8] mb-1">คัดลอก URL นี้ไปใช้กับ web app หรือ LINE webhook</p>
-                                        <code className="block text-[10px] text-[#0D1B2A] break-all">{webhookUrl}</code>
+                                        <p className="text-xs text-[#94A3B8] mb-1">คัดลอก URL นี้ไปใช้กับ web app หรือ LINE webhook</p>
+                                        <code className="block text-xs text-[#0D1B2A] break-all">{webhookUrl}</code>
                                         <button
                                             onClick={async () => {
                                                 try {
@@ -2315,7 +2315,7 @@ function Builder() {
                                                     setNotice("คัดลอกไม่สำเร็จ กรุณาคัดลอกจากกล่อง URL")
                                                 }
                                             }}
-                                            className="mt-2 inline-flex items-center gap-1 text-[10px] text-[#2786C2] hover:underline"
+                                            className="mt-2 inline-flex items-center gap-1 text-xs text-[#2786C2] hover:underline"
                                         >
                                             <Copy className="h-3 w-3" /> Copy URL
                                         </button>
@@ -2355,7 +2355,7 @@ function Builder() {
                             </button>
                         )}
 
-                        <label className="block text-[10px] uppercase tracking-wide text-[#94A3B8] font-semibold mb-1">ชื่อโหนด</label>
+                        <label className="block text-xs uppercase tracking-wide text-[#94A3B8] font-semibold mb-1">ชื่อโหนด</label>
                         <input
                             className="w-full border border-[#E2E8F0] rounded-lg px-2.5 py-1.5 text-xs mb-4 focus:outline-none focus:ring-2 focus:ring-[#2786C2]/30"
                             value={(selectedNode.data as WfNodeData).label}
@@ -2367,7 +2367,7 @@ function Builder() {
                             {primaryConfigFields.map((f) => (
                                 <div key={f.name}>
                                     {f.type !== "boolean" && (
-                                        <label className="block text-[10px] uppercase tracking-wide text-[#94A3B8] font-semibold mb-1">
+                                        <label className="block text-xs uppercase tracking-wide text-[#94A3B8] font-semibold mb-1">
                                             {f.label}{f.required || (f.name === "skill_ids" && selectedConfig.mode === "agent") ? " *" : ""}
                                         </label>
                                     )}
@@ -2390,7 +2390,7 @@ function Builder() {
                                         onRetryAgentSkills={loadAgentSkills}
                                         mode={selectedConfig.mode || "llm"}
                                     />
-                                    {f.hint && <p className="text-[10px] text-[#94A3B8] mt-1 leading-snug">{f.hint}</p>}
+                                    {f.hint && <p className="text-xs text-[#94A3B8] mt-1 leading-snug">{f.hint}</p>}
                                 </div>
                             ))}
                             {advancedConfigFields.length > 0 && (
@@ -2399,7 +2399,7 @@ function Builder() {
                                     <div className="space-y-3 border-t border-[#E2E8F0] p-3">
                                         {advancedConfigFields.map((f) => (
                                             <div key={f.name}>
-                                                <label className="mb-1 block text-[10px] font-semibold uppercase text-[#94A3B8]">{f.label}</label>
+                                                <label className="mb-1 block text-xs font-semibold uppercase text-[#94A3B8]">{f.label}</label>
                                                 <ConfigField
                                                     field={f}
                                                     value={selectedConfig[f.name]}
@@ -2415,7 +2415,7 @@ function Builder() {
                                                     onRetryAgentSkills={loadAgentSkills}
                                                     mode={selectedConfig.mode || "llm"}
                                                 />
-                                                {f.hint && <p className="mt-1 text-[10px] leading-snug text-[#94A3B8]">{f.hint}</p>}
+                                                {f.hint && <p className="mt-1 text-xs leading-snug text-[#94A3B8]">{f.hint}</p>}
                                             </div>
                                         ))}
                                     </div>
@@ -2425,7 +2425,7 @@ function Builder() {
                         )}
 
                         {selectedHelp && (
-                            <div className="mt-5 rounded-lg border border-[#E2E8F0] bg-[#F8F9FA] text-[10px] text-[#778DA9]">
+                            <div className="mt-5 rounded-lg border border-[#E2E8F0] bg-[#F8F9FA] text-xs text-[#778DA9]">
                                 <button
                                     type="button"
                                     onClick={() => setHelpOpen((open) => !open)}

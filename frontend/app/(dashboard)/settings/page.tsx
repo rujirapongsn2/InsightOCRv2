@@ -674,14 +674,14 @@ export default function SettingsPage() {
         <div className="flex flex-col gap-2 md:flex-row md:items-center">
           {systemTabs.length > 0 && (
             <div className="flex min-w-0 flex-1 flex-col gap-1.5 border-b border-slate-200 pb-2 md:border-b-0 md:border-r md:pb-0 md:pr-2">
-              <span className="px-2 text-[11px] font-semibold uppercase tracking-wide text-slate-400">System & Connections</span>
+              <span className="px-2 text-xs font-semibold uppercase tracking-wide text-slate-400">System & Connections</span>
               <div className="grid grid-cols-1 gap-1 sm:grid-cols-3">
                 {systemTabs.map(renderSettingsTab)}
               </div>
             </div>
           )}
           <div className="flex min-w-0 flex-1 flex-col gap-1.5">
-            <span className="px-2 text-[11px] font-semibold uppercase tracking-wide text-slate-400">Access & Agent</span>
+            <span className="px-2 text-xs font-semibold uppercase tracking-wide text-slate-400">Access & Agent</span>
             <div className="grid grid-cols-2 gap-1 sm:grid-cols-4">
               {accessTabs.map(renderSettingsTab)}
             </div>

@@ -1269,8 +1269,8 @@ export default function JobDetailPage() {
                                                     </span>
                                                 </div>
                                                 <div className="flex items-center gap-1.5 flex-shrink-0">
-                                                    <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded ${typeBgColor}`}>{typeBadge}</span>
-                                                    <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full ${r.status === "success" ? "bg-[#f0fff4] text-[#276749]" : "bg-[#fff5f5] text-[#c53030]"}`}>
+                                                    <span className={`text-xs font-medium px-1.5 py-0.5 rounded ${typeBgColor}`}>{typeBadge}</span>
+                                                    <span className={`text-xs font-bold px-1.5 py-0.5 rounded-full ${r.status === "success" ? "bg-[#f0fff4] text-[#276749]" : "bg-[#fff5f5] text-[#c53030]"}`}>
                                                         {r.status === "success" ? "PASS" : "FAILED"}
                                                     </span>
                                                 </div>
@@ -1880,7 +1880,7 @@ export default function JobDetailPage() {
                                             <span className="min-w-0 flex-1">
                                                 <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
                                                     <span className="text-[1rem] font-semibold leading-6 text-slate-950">{integration.name}</span>
-                                                    <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[0.6875rem] font-bold uppercase tracking-wide text-slate-600">
+                                                    <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-bold uppercase tracking-wide text-slate-600">
                                                         {integration.type}
                                                     </span>
                                                 </span>

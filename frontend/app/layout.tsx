@@ -14,7 +14,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" data-theme="light" data-astryx-theme="neutral">
+    <html lang="th" data-theme="light" data-astryx-theme="neutral">
       <body className="antialiased font-sans">
         <AuthProvider>
           <AstryxProvider>

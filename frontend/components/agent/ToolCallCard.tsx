@@ -61,7 +61,7 @@ export default function ToolCallCard({ call, result, conversationId, autoConfirm
                 <span>{icon}</span>
                 <code className="font-mono text-charcoal flex-1">{call.name}</code>
                 {autoConfirmed && (
-                    <span className="inline-flex items-center gap-1 rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700" title="Auto-confirmed โดย Confirm All toggle">
+                    <span className="inline-flex items-center gap-1 rounded bg-emerald-100 px-1.5 py-0.5 text-xs font-medium text-emerald-700" title="Auto-confirmed โดย Confirm All toggle">
                         <ShieldCheck className="h-3 w-3" />
                         auto
                     </span>
@@ -71,7 +71,7 @@ export default function ToolCallCard({ call, result, conversationId, autoConfirm
                 <ChevronDown className={`h-3.5 w-3.5 text-mute-gray transition-transform ${expanded ? "rotate-180" : ""}`} />
             </button>
             {errorMessage && !expanded && (
-                <div className="px-3 pb-2 text-[11px] text-red-600 line-clamp-2">
+                <div className="px-3 pb-2 text-xs text-red-600 line-clamp-2">
                     {errorMessage}
                 </div>
             )}
@@ -81,7 +81,7 @@ export default function ToolCallCard({ call, result, conversationId, autoConfirm
                         type="button"
                         onClick={event => { event.stopPropagation(); handleDownload() }}
                         disabled={downloading}
-                        className="inline-flex items-center gap-1.5 rounded-md border border-softnix-blue/20 bg-white px-2.5 py-1 text-[11px] font-medium text-softnix-blue hover:bg-[#EEF8FD] disabled:opacity-60"
+                        className="inline-flex items-center gap-1.5 rounded-md border border-softnix-blue/20 bg-white px-2.5 py-1 text-xs font-medium text-softnix-blue hover:bg-[#EEF8FD] disabled:opacity-60"
                     >
                         <Download className="h-3.5 w-3.5" />
                         {downloading ? "Downloading..." : `Download ${normalizedPath}`}
@@ -89,7 +89,7 @@ export default function ToolCallCard({ call, result, conversationId, autoConfirm
                 </div>
             )}
             {downloadError && !expanded && (
-                <div className="px-3 pb-2 text-[11px] text-red-600 line-clamp-2">
+                <div className="px-3 pb-2 text-xs text-red-600 line-clamp-2">
                     {downloadError}
                 </div>
             )}
@@ -98,21 +98,21 @@ export default function ToolCallCard({ call, result, conversationId, autoConfirm
                     {["execute_python", "run_report_code"].includes(call.name || "") && call.arguments?.code ? (
                         <details open>
                             <summary className="cursor-pointer text-slate-gray hover:text-charcoal">Code</summary>
-                            <pre className="bg-slate-900 text-emerald-300 rounded p-3 overflow-auto mt-1 text-[11px] font-mono leading-relaxed max-h-64">{call.arguments.code}</pre>
+                            <pre className="bg-slate-900 text-emerald-300 rounded p-3 overflow-auto mt-1 text-xs font-mono leading-relaxed max-h-64">{call.arguments.code}</pre>
                         </details>
                     ) : (
                         <details open>
                             <summary className="cursor-pointer text-slate-gray hover:text-charcoal">Arguments</summary>
-                            <pre className="bg-white rounded p-2 overflow-auto mt-1 text-[11px]">{JSON.stringify(call.arguments, null, 2)}</pre>
+                            <pre className="bg-white rounded p-2 overflow-auto mt-1 text-xs">{JSON.stringify(call.arguments, null, 2)}</pre>
                         </details>
                     )}
                     {errorMessage && (
-                        <div className="rounded border border-red-200 bg-red-50 px-2 py-1.5 text-[11px] text-red-700">
+                        <div className="rounded border border-red-200 bg-red-50 px-2 py-1.5 text-xs text-red-700">
                             {errorMessage}
                         </div>
                     )}
                     {downloadError && (
-                        <div className="rounded border border-red-200 bg-red-50 px-2 py-1.5 text-[11px] text-red-700">
+                        <div className="rounded border border-red-200 bg-red-50 px-2 py-1.5 text-xs text-red-700">
                             {downloadError}
                         </div>
                     )}
@@ -130,7 +130,7 @@ export default function ToolCallCard({ call, result, conversationId, autoConfirm
                     {hasResult && (
                         <details open>
                             <summary className="cursor-pointer text-slate-gray hover:text-charcoal">Result</summary>
-                            <pre className="bg-white rounded p-2 overflow-auto mt-1 text-[11px]">{JSON.stringify(result, null, 2)}</pre>
+                            <pre className="bg-white rounded p-2 overflow-auto mt-1 text-xs">{JSON.stringify(result, null, 2)}</pre>
                         </details>
                     )}
                 </div>

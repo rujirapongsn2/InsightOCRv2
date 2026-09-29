@@ -45,7 +45,7 @@ export default function SkillCard({ skill, onEdit, onDelete, onExport, onPublish
                     <div className="flex items-center gap-2 min-w-0">
                         <span className="text-sm">{scopeIcon}</span>
                         <code className="text-xs font-mono text-softnix-deep truncate">{skill.name}</code>
-                        <span className="text-[10px] text-mute-gray bg-off-white rounded px-1.5 py-0.5">
+                        <span className="text-xs text-mute-gray bg-off-white rounded px-1.5 py-0.5">
                             {skill.success_count || 0} uses
                         </span>
                     </div>
@@ -63,12 +63,12 @@ export default function SkillCard({ skill, onEdit, onDelete, onExport, onPublish
                     <span className="text-lg">{scopeIcon}</span>
                     <code className="text-sm font-mono font-semibold text-softnix-deep truncate">{skill.name}</code>
                     {isSystem && (
-                        <span className="text-[10px] bg-[#D6EAF8] text-softnix-blue rounded-full px-2 py-0.5 font-medium">
+                        <span className="text-xs bg-[#D6EAF8] text-softnix-blue rounded-full px-2 py-0.5 font-medium">
                             {skill.source === "file" ? "Built-in" : "Shared"}
                         </span>
                     )}
                     {skill.source === "imported" && (
-                        <span className="text-[10px] bg-amber-100 text-amber-700 rounded-full px-2 py-0.5 font-medium">
+                        <span className="text-xs bg-amber-100 text-amber-700 rounded-full px-2 py-0.5 font-medium">
                             Imported
                         </span>
                     )}
@@ -115,7 +115,7 @@ export default function SkillCard({ skill, onEdit, onDelete, onExport, onPublish
             <p className="text-sm text-charcoal mb-3">{skill.description}</p>
 
             {/* Metadata */}
-            <div className="flex flex-wrap items-center gap-2 text-[11px] text-mute-gray mb-3">
+            <div className="flex flex-wrap items-center gap-2 text-xs text-mute-gray mb-3">
                 {skill.trigger_hint && (
                     <span className="bg-purple-50 text-purple-600 rounded-full px-2 py-0.5">
                         🎯 {skill.trigger_hint}
@@ -139,7 +139,7 @@ export default function SkillCard({ skill, onEdit, onDelete, onExport, onPublish
                 <summary className="text-xs text-mute-gray cursor-pointer hover:text-charcoal">
                     Show procedure ({skill.procedure.length} chars)
                 </summary>
-                <pre className="bg-off-white rounded-lg p-3 mt-2 text-[11px] text-charcoal font-mono whitespace-pre-wrap max-h-48 overflow-y-auto border border-hairline">
+                <pre className="bg-off-white rounded-lg p-3 mt-2 text-xs text-charcoal font-mono whitespace-pre-wrap max-h-48 overflow-y-auto border border-hairline">
                     {skill.procedure}
                 </pre>
             </details>

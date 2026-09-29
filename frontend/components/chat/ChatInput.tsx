@@ -68,7 +68,7 @@ export default function ChatInput({ value, onChange, onSend, disabled, streaming
                 <div className="mt-1 flex items-center justify-between gap-2">
                     <div className="min-w-0 flex-1">{tips}</div>
                     {value.length > 9000 && (
-                        <p className="text-[10px] text-amber-600 text-right">{value.length}/10,000</p>
+                        <p className="text-xs text-amber-600 text-right">{value.length}/10,000</p>
                     )}
                 </div>
             )}

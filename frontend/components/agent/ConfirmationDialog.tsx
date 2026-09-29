@@ -29,7 +29,7 @@ export default function ConfirmationDialog({ action, onConfirm, onReject }: Conf
             </div>
             <details className="mb-3">
                 <summary className="text-xs text-amber-600 cursor-pointer">Show arguments</summary>
-                <pre className="text-[11px] bg-white rounded p-2 mt-1 overflow-auto">{JSON.stringify(action.arguments, null, 2)}</pre>
+                <pre className="text-xs bg-white rounded p-2 mt-1 overflow-auto">{JSON.stringify(action.arguments, null, 2)}</pre>
             </details>
             <div className="flex gap-2">
                 <Button size="sm" onClick={onConfirm} className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white">

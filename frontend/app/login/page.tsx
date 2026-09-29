@@ -12,7 +12,7 @@ import { AlertCircle, ShieldCheck, Cpu, Zap } from "lucide-react"
 function SolutionBySoftnix() {
     return (
         <div className="flex items-center gap-2" aria-label="Solution by Softnix">
-            <span className="text-[11px] font-medium tracking-wide text-[#9BA8B4]">Solution by</span>
+            <span className="text-xs font-medium tracking-wide text-[#9BA8B4]">Solution by</span>
             <Image
                 src="/logo.png"
                 alt="Softnix"

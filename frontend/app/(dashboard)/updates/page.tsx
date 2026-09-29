@@ -97,7 +97,7 @@ export default function UpdatesPage() {
                                         <span className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-500">
                                             <span className={`rounded-full px-2 py-0.5 font-medium ${style.className}`}>{style.label}</span>
                                             <span>{formatDate(entry.date)}</span>
-                                            <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[11px] text-slate-600">{entry.commit}</code>
+                                            <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-xs text-slate-600">{entry.commit}</code>
                                         </span>
                                     </span>
                                 </button>

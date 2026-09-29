@@ -1221,19 +1221,19 @@ export default function IntegrationsPage() {
                                     <button type="button" className="flex-1 text-left min-w-0" onClick={() => toggleIntegrationDetails(integration.id)}>
                                         <div className="flex items-center gap-2 flex-wrap">
                                             <span className="text-[0.9375rem] font-semibold leading-5 text-slate-950">{integration.name}</span>
-                                            <span className={`rounded-full px-2.5 py-1 text-[0.75rem] font-semibold leading-none ${integration.status === "active" ? "bg-green-100 text-green-700" : "bg-amber-100 text-amber-700"}`}>
+                                            <span className={`rounded-full px-2.5 py-1 text-xs font-semibold leading-none ${integration.status === "active" ? "bg-green-100 text-green-700" : "bg-amber-100 text-amber-700"}`}>
                                                 {integration.status === "active" ? "Active" : "Paused"}
                                             </span>
                                             {integration.is_shared && (
                                                 <span title="ผู้ใช้ทุกคนใช้ integration นี้ใน Agent และ Workflow ได้ โดยไม่เห็นคีย์หรือรหัสผ่าน"
-                                                    className="rounded-full bg-blue-100 px-2.5 py-1 text-[0.75rem] font-semibold leading-none text-blue-700">
+                                                    className="rounded-full bg-blue-100 px-2.5 py-1 text-xs font-semibold leading-none text-blue-700">
                                                     แชร์ให้ทุกคน
                                                 </span>
                                             )}
                                             {isLlmIntegration && (
                                                 <span
                                                     title={agentTools?.error || (agentTools?.verifiedAt ? "พร้อมใช้กับ Workflow Agent" : "ระบบยังไม่ได้ยืนยัน Agent tools")}
-                                                    className={`rounded-full px-2.5 py-1 text-[0.75rem] font-semibold leading-none ${agentTools?.verifiedAt ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}
+                                                    className={`rounded-full px-2.5 py-1 text-xs font-semibold leading-none ${agentTools?.verifiedAt ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}
                                                 >
                                                     {agentTools?.verifiedAt ? "Agent tools ready" : "Agent tools unavailable"}
                                                 </span>

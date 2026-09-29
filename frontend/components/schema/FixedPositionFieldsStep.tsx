@@ -528,7 +528,7 @@ export function FixedPositionFieldsStep() {
                   <details className="rounded border border-slate-200 bg-slate-50 px-2 py-1.5">
                     <summary className="cursor-pointer text-xs font-medium text-slate-600">Fine-tune position</summary>
                     <div className="mt-2 grid grid-cols-5 gap-1">
-                      {(["page", "x", "y", "width", "height"] as const).map((key) => <label key={key} className="text-[11px] font-medium text-slate-500">{key === "width" ? "W (%)" : key === "height" ? "H (%)" : key === "page" ? "Page" : `${key.toUpperCase()} (%)`}<input aria-label={`${field.name} ${key}`} type="number" min={key === "page" ? 1 : 0} step={key === "page" ? 1 : 0.01} className="mt-1 w-full rounded border border-slate-300 px-1.5 py-1 text-xs text-slate-700" value={locator[key]} onChange={(event) => updateLocator(field.id!, key, event.target.value)} /></label>)}
+                      {(["page", "x", "y", "width", "height"] as const).map((key) => <label key={key} className="text-xs font-medium text-slate-500">{key === "width" ? "W (%)" : key === "height" ? "H (%)" : key === "page" ? "Page" : `${key.toUpperCase()} (%)`}<input aria-label={`${field.name} ${key}`} type="number" min={key === "page" ? 1 : 0} step={key === "page" ? 1 : 0.01} className="mt-1 w-full rounded border border-slate-300 px-1.5 py-1 text-xs text-slate-700" value={locator[key]} onChange={(event) => updateLocator(field.id!, key, event.target.value)} /></label>)}
                     </div>
                   </details>
                   <label className="flex items-center gap-2 text-xs text-slate-600">
@@ -545,8 +545,8 @@ export function FixedPositionFieldsStep() {
                         <span className="text-xs font-semibold text-slate-700">Table columns</span>
                         <Button type="button" variant="outline" size="sm" className="h-7 px-2 text-xs" onClick={() => addArrayColumn(field.id!)} disabled={field.array_config.columns.length >= 12} title="Split the widest column, then drag the divider on the document"><Plus className="mr-1 h-3.5 w-3.5" />Column</Button>
                       </div>
-                      <p className="text-[11px] leading-4 text-slate-600">Add a column, then drag the blue dividers on the document to match the table.</p>
-                      <div className="grid grid-cols-[minmax(0,1fr)_4.5rem_1.5rem] gap-1 text-[11px] font-medium text-slate-500">
+                      <p className="text-xs leading-4 text-slate-600">Add a column, then drag the blue dividers on the document to match the table.</p>
+                      <div className="grid grid-cols-[minmax(0,1fr)_4.5rem_1.5rem] gap-1 text-xs font-medium text-slate-500">
                         <span>Name</span><span>Type</span><span />
                       </div>
                       {field.array_config.columns.map((column, columnIndex) => (
@@ -559,16 +559,16 @@ export function FixedPositionFieldsStep() {
                         </div>
                       ))}
                       <div className="grid grid-cols-2 gap-2">
-                        <label className="text-[11px] font-medium text-slate-600">Rows
+                        <label className="text-xs font-medium text-slate-600">Rows
                           <select aria-label={`${field.name} row detection`} className="mt-1 w-full rounded border border-slate-300 px-1.5 py-1 text-xs" value={field.array_config.row_detection} onChange={(event) => updateArrayConfig(field.id!, { row_detection: event.target.value as ArrayConfig["row_detection"] })}>
                             <option value="anchor_column">Anchor column</option><option value="line">Each visual line</option>
                           </select>
                         </label>
-                        <label className="text-[11px] font-medium text-slate-600">Header rows
+                        <label className="text-xs font-medium text-slate-600">Header rows
                           <input aria-label={`${field.name} header rows`} type="number" min="0" step="1" className="mt-1 w-full rounded border border-slate-300 px-1.5 py-1 text-xs" value={field.array_config.header_rows} onChange={(event) => updateArrayConfig(field.id!, { header_rows: Number(event.target.value) })} />
                         </label>
                       </div>
-                      {field.array_config.row_detection === "anchor_column" && <label className="block text-[11px] font-medium text-slate-600">Row starts at
+                      {field.array_config.row_detection === "anchor_column" && <label className="block text-xs font-medium text-slate-600">Row starts at
                         <select aria-label={`${field.name} anchor column`} className="mt-1 w-full rounded border border-slate-300 px-1.5 py-1 text-xs" value={field.array_config.anchor_column || ""} onChange={(event) => updateArrayConfig(field.id!, { anchor_column: event.target.value })}>
                           {field.array_config.columns.map((column) => <option key={column.name} value={column.name}>{column.name}</option>)}
                         </select>
@@ -580,7 +580,7 @@ export function FixedPositionFieldsStep() {
                       {Array.isArray(previewValue) ? (
                         <div className="overflow-x-auto">
                           <p className="mb-1 font-medium text-emerald-700">Extracted {previewValue.length} rows</p>
-                          <table className="min-w-full border-collapse text-left text-[11px]">
+                          <table className="min-w-full border-collapse text-left text-xs">
                             <thead><tr>{field.array_config?.columns.map((column) => <th key={column.name} className="border-b border-slate-200 px-1 py-1 font-medium text-slate-600">{column.name}</th>)}</tr></thead>
                             <tbody>{previewValue.map((row, rowIndex) => <tr key={rowIndex}>{field.array_config?.columns.map((column) => <td key={column.name} className="border-b border-slate-100 px-1 py-1 text-slate-700">{String(row[column.name] ?? "")}</td>)}</tr>)}</tbody>
                           </table>

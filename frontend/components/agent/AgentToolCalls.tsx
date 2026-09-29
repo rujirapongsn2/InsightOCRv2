@@ -121,21 +121,21 @@ function DetailBlock({
             {isCodeTool ? (
                 <details open>
                     <summary className="cursor-pointer text-[#778DA9] hover:text-[#415A77]">Code</summary>
-                    <pre className="mt-1 max-h-64 overflow-auto rounded-md bg-[#0D1B2A] p-3 font-mono text-[11px] leading-relaxed text-[#A9CB2E]">{String((args as JsonRecord).code)}</pre>
+                    <pre className="mt-1 max-h-64 overflow-auto rounded-md bg-[#0D1B2A] p-3 font-mono text-xs leading-relaxed text-[#A9CB2E]">{String((args as JsonRecord).code)}</pre>
                 </details>
             ) : (
                 <details open>
                     <summary className="cursor-pointer text-[#778DA9] hover:text-[#415A77]">Arguments</summary>
-                    <pre className="mt-1 max-h-48 overflow-auto rounded-md bg-white p-2 text-[11px]">{stringify(args)}</pre>
+                    <pre className="mt-1 max-h-48 overflow-auto rounded-md bg-white p-2 text-xs">{stringify(args)}</pre>
                 </details>
             )}
             {errorMessage && (
-                <div className="rounded-md border border-red-200 bg-red-50 px-2 py-1.5 text-[11px] text-red-700">
+                <div className="rounded-md border border-red-200 bg-red-50 px-2 py-1.5 text-xs text-red-700">
                     {errorMessage}
                 </div>
             )}
             {downloadError && (
-                <div className="rounded-md border border-red-200 bg-red-50 px-2 py-1.5 text-[11px] text-red-700">
+                <div className="rounded-md border border-red-200 bg-red-50 px-2 py-1.5 text-xs text-red-700">
                     {downloadError}
                 </div>
             )}
@@ -144,7 +144,7 @@ function DetailBlock({
                     type="button"
                     onClick={() => onDownload(path)}
                     disabled={downloadingPath === path}
-                    className="inline-flex items-center gap-1.5 rounded-md border border-[#2786C2]/20 bg-white px-2.5 py-1 text-[11px] font-medium text-[#2786C2] hover:bg-[#EEF8FD] disabled:opacity-60"
+                    className="inline-flex items-center gap-1.5 rounded-md border border-[#2786C2]/20 bg-white px-2.5 py-1 text-xs font-medium text-[#2786C2] hover:bg-[#EEF8FD] disabled:opacity-60"
                 >
                     <Download className="h-3.5 w-3.5" />
                     {downloadingPath === path ? "Downloading..." : `Download ${path}`}
@@ -153,7 +153,7 @@ function DetailBlock({
             {result !== undefined && (
                 <details>
                     <summary className="cursor-pointer text-[#778DA9] hover:text-[#415A77]">Result</summary>
-                    <pre className="mt-1 max-h-48 overflow-auto rounded-md bg-white p-2 text-[11px]">{stringify(result)}</pre>
+                    <pre className="mt-1 max-h-48 overflow-auto rounded-md bg-white p-2 text-xs">{stringify(result)}</pre>
                 </details>
             )}
         </div>
@@ -184,7 +184,7 @@ export default function AgentToolCalls({ calls, results = {}, conversationId, au
         const status = getStatus(result)
         const autoConfirmed = autoConfirmedIds?.has(id)
         const stats: ReactNode = autoConfirmed ? (
-            <span className="inline-flex items-center gap-1 rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700">
+            <span className="inline-flex items-center gap-1 rounded bg-emerald-100 px-1.5 py-0.5 text-xs font-medium text-emerald-700">
                 <ShieldCheck className="h-3 w-3" />
                 auto
             </span>
@@ -214,7 +214,7 @@ export default function AgentToolCalls({ calls, results = {}, conversationId, au
 
     return (
         <div className="mx-3">
-            <ChatToolCalls calls={items} label={`${items.length} tool call${items.length === 1 ? "" : "s"}`} />
+            <ChatToolCalls calls={items} defaultIsExpanded={false} label={`${items.length} tool call${items.length === 1 ? "" : "s"}`} />
         </div>
     )
 }

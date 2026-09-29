@@ -146,7 +146,7 @@ function CredentialCard({ req, onSaved, onCancel }: {
                 <div>
                     <p className="text-sm font-semibold text-[#0D1B2A]">กรอกข้อมูล credential ({req.credential_kind})</p>
                     <p className="text-xs text-[#5B6B7E] mt-0.5">{req.purpose}</p>
-                    <p className="text-[11px] text-[#5B6B7E] mt-1">คีย์จะถูกบันทึกลงระบบโดยตรง ไม่ผ่านช่องแชท</p>
+                    <p className="text-xs text-[#5B6B7E] mt-1">คีย์จะถูกบันทึกลงระบบโดยตรง ไม่ผ่านช่องแชท</p>
                 </div>
             </div>
             <div className="space-y-2 mb-3">

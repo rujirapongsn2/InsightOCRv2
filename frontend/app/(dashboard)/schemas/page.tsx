@@ -226,7 +226,7 @@ function EditSchemaModal({ schemaId, onClose, onSaved }: { schemaId: string; onC
                                     {field.locator && (
                                         <div className="basis-full grid grid-cols-5 gap-2 rounded-md border border-blue-100 bg-blue-50/50 p-2">
                                             {(["page", "x", "y", "width", "height"] as const).map((key) => (
-                                                <label key={key} className="text-[11px] font-medium text-slate-600">
+                                                <label key={key} className="text-xs font-medium text-slate-600">
                                                     {key === "width" ? "W (%)" : key === "height" ? "H (%)" : key === "page" ? "Page" : `${key.toUpperCase()} (%)`}
                                                     <Input
                                                         aria-label={`${field.name} ${key}`}
