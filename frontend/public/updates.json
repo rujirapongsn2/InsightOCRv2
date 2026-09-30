@@ -1,5 +1,14 @@
 [
  {
+  "commit": "b78608f",
+  "date": "2026-09-30",
+  "type": "improvement",
+  "title": "ย้าย node Field Mapping, Score, Choice, Yes/No ไปหมวด LOGIC และใช้ชื่อ node ภาษาอังกฤษ",
+  "what": "node Field Mapping (Schema), Score, Choice และ Yes/No ย้ายจากหมวด data ไปอยู่หมวด logic ชื่อ node ที่เคยมีภาษาไทยเปลี่ยนเป็นภาษาอังกฤษ และเมื่อวางเมาส์บนชื่อ node บน canvas จะเห็นคำอธิบายหน้าที่ของ node นั้น",
+  "benefit": "หา node ตัดสินใจได้ในกลุ่มเดียวกับ Condition ชื่อ node อ่านง่ายและเป็นแบบเดียวกันทั้งหมด และไม่ต้องเปิดหน้าตั้งค่าเพื่อดูว่า node ทำอะไร",
+  "where": "หน้า Function Workflow (แถบ node ด้านซ้ายและ canvas)"
+ },
+ {
   "commit": "55d4d9e",
   "date": "2026-09-29",
   "type": "improvement",
