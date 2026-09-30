@@ -100,6 +100,7 @@ type WfNodeData = {
     label: string
     config: Record<string, any>
     category: string
+    description?: string
     runStatus?: string
 }
 
@@ -178,7 +179,7 @@ function WfNode({ id, data, selected }: NodeProps) {
                     <Icon className="h-4 w-4" style={{ color: style.color }} />
                 </span>
                 <div className="min-w-0">
-                    <div className="text-xs font-semibold text-[#0D1B2A] truncate">{d.label}</div>
+                    <div className="text-xs font-semibold text-[#0D1B2A] truncate" title={d.description}>{d.label}</div>
                     <div className="text-xs text-[#94A3B8]">{d.nodeType}</div>
                 </div>
             </div>
@@ -599,20 +600,27 @@ const summarizeSchedule = (config?: Record<string, any>) => {
 const categoryOf = (defs: NodeTypeDef[], type: string) =>
     defs.find((d) => d.type === type)?.category || "action"
 
+const HAS_THAI = /[\u0E00-\u0E7F]/
+
 const toFlowNodes = (wf: Workflow, defs: NodeTypeDef[]): Node[] =>
-    (wf.definition?.nodes || []).map((n) => ({
+    (wf.definition?.nodes || []).map((n) => {
+        const def = defs.find((d) => d.type === n.type)
+        const stored = n.data?.label
+        return {
         id: n.id,
         type: "wf",
         position: n.position || { x: 0, y: 0 },
         data: {
             nodeType: n.type,
-            label: n.data?.label || n.type,
+            label: (stored && !(def && HAS_THAI.test(stored)) ? stored : def?.label) || n.type,
+            description: def?.description,
             config: n.type === "trigger_schedule"
                 ? { ...parseCronToScheduleConfig(wf.schedule_cron, wf.schedule_enabled), ...(n.data?.config || {}) }
                 : n.data?.config || {},
             category: categoryOf(defs, n.type),
         },
-    }))
+        }
+    })
 
 const toFlowEdges = (wf: Workflow): Edge[] =>
     (wf.definition?.edges || []).map((e) => ({
@@ -1845,7 +1853,7 @@ function Builder() {
         const id = `${type}_${Date.now().toString(36)}`
         setNodes((nds) => [...nds, {
             id, type: "wf", position,
-            data: { nodeType: type, label: def.label, config, category: def.category },
+            data: { nodeType: type, label: def.label, config, category: def.category, description: def.description },
         }])
         setSelectedId(id)
         setDirty(true)

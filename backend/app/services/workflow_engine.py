@@ -148,7 +148,7 @@ NODE_TYPES: List[Dict[str, Any]] = [
     },
     {
         "type": "field_mapping",
-        "category": "data",
+        "category": "logic",
         "label": "Field Mapping (Schema)",
         "description": "ดึงค่าตามฟิลด์ใน Schema จากข้อความ OCR ของเอกสาร ใช้ระบบเดียวกับหน้า Jobs",
         "config_fields": [
@@ -183,8 +183,8 @@ NODE_TYPES: List[Dict[str, Any]] = [
     },
     {
         "type": "jev_score",
-        "category": "data",
-        "label": "Score – ให้คะแนน",
+        "category": "logic",
+        "label": "Score",
         "description": "ให้ Jev ให้คะแนนข้อมูลตามเกณฑ์ที่คุณกำหนด แล้วนำคะแนนไปใช้ตัดสินใจใน Condition",
         "config_fields": [
             {"name": "score_name", "label": "สิ่งที่ต้องการให้คะแนน", "type": "text", "required": True,
@@ -223,8 +223,8 @@ NODE_TYPES: List[Dict[str, Any]] = [
     },
     {
         "type": "jev_choice",
-        "category": "data",
-        "label": "Choice – เลือกเส้นทาง",
+        "category": "logic",
+        "label": "Choice",
         "description": "ให้ Jev เลือก 1 ตัวเลือกที่เข้ากับข้อมูลที่สุด แล้วส่งงานต่อตามเส้นทางของตัวเลือกนั้น",
         "config_fields": [
             {"name": "choice_name", "label": "เรื่องที่ต้องการให้เลือก", "type": "text", "required": True,
@@ -271,8 +271,8 @@ NODE_TYPES: List[Dict[str, Any]] = [
     },
     {
         "type": "jev_noul",
-        "category": "data",
-        "label": "Yes/No – ถามใช่หรือไม่",
+        "category": "logic",
+        "label": "Yes/No",
         "description": "ถามคำถามแบบใช่/ไม่ใช่ แล้ว Jev ตอบเป็นโอกาสที่คำตอบคือ “ใช่” (0–1) เพื่อนำไปใช้ใน Condition",
         "config_fields": [
             {"name": "noul_name", "label": "ชื่อคำถาม", "type": "text", "required": True,
@@ -531,7 +531,7 @@ NODE_TYPES: List[Dict[str, Any]] = [
     {
         "type": "gdrive_upload",
         "category": "storage",
-        "label": "Google Drive: อัปโหลด",
+        "label": "Google Drive: Upload",
         "description": "อัปโหลดผลลัพธ์ของ workflow ขึ้นโฟลเดอร์ Google Drive",
         "config_fields": [
             {"name": "integration_id", "label": "บัญชี Google Drive", "type": "integration_select",
@@ -557,7 +557,7 @@ NODE_TYPES: List[Dict[str, Any]] = [
     {
         "type": "gdrive_import",
         "category": "storage",
-        "label": "Google Drive: นำเข้า Job",
+        "label": "Google Drive: Import Job",
         "description": "ดึงทุกไฟล์จากโฟลเดอร์ Google Drive เข้า Job แล้วประมวลผล (OCR) ตามฟังก์ชัน Jobs",
         "config_fields": [
             {"name": "integration_id", "label": "บัญชี Google Drive", "type": "integration_select",
@@ -588,7 +588,7 @@ NODE_TYPES: List[Dict[str, Any]] = [
     {
         "type": "onedrive_upload",
         "category": "storage",
-        "label": "OneDrive: อัปโหลด",
+        "label": "OneDrive: Upload",
         "description": "อัปโหลดผลลัพธ์ของ workflow ขึ้นโฟลเดอร์ OneDrive / SharePoint",
         "config_fields": [
             {"name": "integration_id", "label": "บัญชี OneDrive", "type": "integration_select",
@@ -614,7 +614,7 @@ NODE_TYPES: List[Dict[str, Any]] = [
     {
         "type": "onedrive_import",
         "category": "storage",
-        "label": "OneDrive: นำเข้า Job",
+        "label": "OneDrive: Import Job",
         "description": "ดึงทุกไฟล์จากโฟลเดอร์ OneDrive / SharePoint เข้า Job แล้วประมวลผล (OCR)",
         "config_fields": [
             {"name": "integration_id", "label": "บัญชี OneDrive", "type": "integration_select",
