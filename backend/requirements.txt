@@ -1,8 +1,8 @@
 fastapi==0.115.6
 uvicorn
-sqlalchemy
+sqlalchemy>=2.0,<2.1
 alembic
-psycopg2-binary
+psycopg2-binary==2.9.13
 pydantic
 pydantic-settings
 python-jose[cryptography]

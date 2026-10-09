@@ -34,4 +34,17 @@ jobs:
           test "$(git branch --show-current)" = "main"
           test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
           docker compose ps
-          docker compose exec -T celery_workflow_worker celery -A app.celery_app inspect ping --timeout=10
+          docker compose exec -T backend curl --fail --silent http://localhost:8000/health
+          docker compose exec -T nginx wget --quiet --tries=1 --spider http://127.0.0.1/health
+          test "$(docker inspect --format '{{.State.Running}} {{.State.Restarting}}' "$(docker compose ps -q celery_beat)")" = "true false"
+          docker compose exec -T celery_worker sh -lc 'celery -A app.celery_app inspect ping -d "celery@$(hostname)" --timeout=10'
+          docker compose exec -T celery_workflow_worker sh -lc 'celery -A app.celery_app inspect ping -d "celery@$(hostname)" --timeout=10'
+
+      - name: Collect failed deployment diagnostics
+        if: failure()
+        shell: bash
+        run: |
+          cd /home/ubuntu/InsightOCRv2
+          docker compose ps --all
+          docker inspect --format '{{json .State.Health}}' softnix_ocr_backend
+          docker compose logs --tail=100 backend celery_worker celery_workflow_worker celery_beat

@@ -225,7 +225,14 @@ update_stack() {
   write_build_info "$after_sha" "$branch_name"
 
   echo "Rebuilding application services..."
-  $COMPOSE up -d --build --force-recreate backend celery_worker celery_workflow_worker celery_beat frontend gateway
+  $COMPOSE build backend celery_worker celery_workflow_worker celery_beat frontend gateway
+
+  echo "Checking application images before replacing running services..."
+  for svc in backend celery_worker celery_workflow_worker celery_beat; do
+    $COMPOSE run --rm --no-deps --entrypoint python "$svc" -m scripts.smoke_startup
+  done
+
+  $COMPOSE up -d --no-build --force-recreate backend celery_worker celery_workflow_worker celery_beat frontend gateway
 
   echo "Refreshing nginx..."
   $COMPOSE restart nginx
@@ -234,6 +241,7 @@ update_stack() {
   wait_for_healthy softnix_ocr_backend
   wait_for_healthy softnix_ocr_frontend
   wait_for_healthy softnix_ocr_nginx
+  wait_for_worker_ready
   wait_for_workflow_worker_ready
 
   if [ "$before_sha" = "$after_sha" ]; then

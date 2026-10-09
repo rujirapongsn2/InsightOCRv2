@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     # Database
     DB_USER: Optional[str] = "postgres"
     DB_PASSWORD: Optional[str] = "postgres"
-    DATABASE_URL: str = "postgresql://postgres:postgres@db:5432/softnix_ocr"
+    DATABASE_URL: str = "postgresql+psycopg2://postgres:postgres@db:5432/softnix_ocr"
 
     # Redis (for Celery task queue)
     REDIS_PASSWORD: Optional[str] = None

@@ -1309,3 +1309,35 @@ Date: 2026-06-30
   once with compact evidence and displays the recovered answer with source filenames.
 - If compact recovery is also empty, confirm the run reports failure and displays a
   non-empty evidence/diagnostic response instead of false success.
+
+# PostgreSQL driver deployment verification (2026-10-09)
+
+- Root cause: an unbounded SQLAlchemy upgrade to 2.1 changed the default
+  `postgresql://` driver to psycopg, which the image did not install.
+- Keep SQLAlchemy `>=2.0,<2.1` and psycopg2-binary `==2.9.13`.
+  Clean build resolved SQLAlchemy 2.0.54 and psycopg2 2.9.13.
+- Configuration defaults and all backend environment examples now specify
+  `postgresql+psycopg2://`. Compose reads the existing `backend/.env`; update
+  that URL scheme on production, preserving the current credentials and host.
+- `scripts/services.sh update` builds all images, checks API/Celery imports and
+  the database driver in each Python service image, then replaces services.
+  Import checks mock only startup migrations/seeds/sandbox warmup and never
+  connect to a database. Real migrations still run at normal API startup.
+- Verified a clean `docker build --no-cache -t insightocr-backend-driver-check
+  ./backend`, image import smoke checks, and real API startup against the
+  existing local database. Alembic remained at `0028_confirmed_review_decision`
+  before and after startup. No database, volume or uploaded object was deleted.
+- Regression tests cover explicit and legacy PostgreSQL URLs, missing driver,
+  API/Celery imports, serialized migrations and deployment stopping before
+  service replacement. Agent download tests verify XLSX HTTP 200, exact bytes,
+  MIME type, filenames and existing authorization/path protections.
+- Selected suite: 40 passed, covering `test_database_startup.py`, Agent file
+  download/verification/permissions, background runs, provider resolution,
+  automatic tool verification and maintenance recovery. Uvicorn in the new
+  image returned HTTP 200 with `{"status":"ok"}` from `/health`. Preflight
+  passed with Compose environments for backend and all three Celery services.
+- Production verification after deployment: check backend/nginx health, ping
+  both Celery workers, ensure Beat is not restarting, run `python -m alembic
+  current` inside backend, and download an existing Agent DOC XLSX in the UI.
+  These production checks require the production run; local success alone is
+  not proof of production health.
