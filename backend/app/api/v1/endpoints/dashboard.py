@@ -23,19 +23,18 @@ def get_dashboard_stats(
     - Recent jobs (last 5)
     """
     
-    # 1. Daily Usage (Last 7 Days)
+    # 1. Daily Usage (Last 7 Days) — documents processed per day, the same
+    # unit and window as schema usage so the two panels never contradict.
     today = datetime.utcnow().date()
     seven_days_ago = today - timedelta(days=6)
-    
-    # Query for job counts per day
-    # Note: This assumes created_at is a DateTime. We cast to Date for grouping.
+
     daily_stats = (
         db.query(
-            func.date(Job.created_at).label("day"),
-            func.count(Job.id).label("count")
+            func.date(Document.processed_at).label("day"),
+            func.count(Document.id).label("count")
         )
-        .filter(Job.created_at >= seven_days_ago)
-        .group_by(func.date(Job.created_at))
+        .filter(Document.processed_at >= seven_days_ago)
+        .group_by(func.date(Document.processed_at))
         .all()
     )
     
@@ -50,13 +49,14 @@ def get_dashboard_stats(
             "count": daily_usage_map.get(date_str, 0)
         })
 
-    # 2. Schema Usage (count documents per schema)
+    # 2. Schema Usage — documents per schema within the same 7-day window.
     schema_stats = (
         db.query(
             DocumentSchema.name,
             func.count(Document.id).label("count")
         )
         .join(Document, Document.schema_id == DocumentSchema.id)
+        .filter(Document.processed_at >= seven_days_ago)
         .group_by(DocumentSchema.name)
         .order_by(desc("count"))
         .limit(10) # Top 10 schemas

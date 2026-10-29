@@ -5,8 +5,7 @@ import Link from "next/link"
 import { useAuth } from "@/components/auth-provider"
 import { getApiBaseUrl } from "@/lib/api"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import { Button } from "@/components/ui/button"
-import { ArrowRight, FileText, LayoutDashboard, Plug, Settings } from "lucide-react"
+import { ArrowUpRight, FileText, Plug, Settings } from "lucide-react"
 
 type DailyUsage = { day: string; count: number }
 type SchemaUsage = { name: string; count: number }
@@ -30,6 +29,21 @@ const dateFormatter = new Intl.DateTimeFormat("en-GB", {
 
 const formatDateTime = (value: string) => dateFormatter.format(new Date(value))
 
+const quickLinks = [
+    { title: "Jobs", href: "/jobs", icon: FileText },
+    { title: "Schemas", href: "/schemas", icon: Settings },
+    { title: "Integration", href: "/integrations", icon: Plug },
+]
+
+// Job status vocabulary matches the review flow: amber = waiting for a human.
+const jobStatusBadge: Record<string, string> = {
+    processing: "bg-blue-50 text-blue-700 border-blue-200",
+    queued: "bg-slate-50 text-slate-600 border-slate-200",
+    extraction_completed: "bg-amber-50 text-amber-800 border-amber-200",
+    review: "bg-amber-50 text-amber-800 border-amber-200",
+    reviewed: "bg-emerald-50 text-emerald-800 border-emerald-200",
+}
+
 export default function DashboardPage() {
     const { user } = useAuth()
     const [stats, setStats] = useState<DashboardStats | null>(null)
@@ -49,53 +63,19 @@ export default function DashboardPage() {
                 const res = await fetch(`${apiUrl}/dashboard/stats`, {
                     headers: { Authorization: `Bearer ${token}` },
                 })
-
                 if (!res.ok) {
                     throw new Error("Failed to load dashboard data")
                 }
-
-                const data = await res.json()
-                setStats(data)
+                setStats(await res.json())
             } catch (err) {
                 console.error(err)
-                setError("Unable to load dashboard data")
+                setError("Unable to load dashboard data. Check that the API is reachable, then reload this page.")
             } finally {
                 setLoading(false)
             }
         }
-
         fetchData()
     }, [])
-
-    const quickLinks = [
-        {
-            title: "Jobs",
-            description: "View and manage OCR processing jobs",
-            href: "/jobs",
-            icon: FileText,
-        },
-        {
-            title: "Schemas",
-            description: "Manage extraction schemas for different document types",
-            href: "/schemas",
-            icon: Settings,
-        },
-        {
-            title: "Integration",
-            description: "Connect workflows, APIs, and LLM destinations",
-            href: "/integrations",
-            icon: Plug,
-        },
-    ]
-
-    const statusBadge = (status: string) => {
-        const map: Record<string, string> = {
-            processing: "bg-blue-100 text-blue-800",
-            extraction_completed: "bg-emerald-100 text-emerald-800",
-            reviewed: "bg-purple-100 text-purple-800",
-        }
-        return map[status] || "bg-slate-100 text-slate-800"
-    }
 
     const usageDisplay = useMemo(() => {
         if (!stats?.daily_usage) return []
@@ -106,152 +86,156 @@ export default function DashboardPage() {
         }))
     }, [stats])
 
+    const weekTotal = useMemo(() => usageDisplay.reduce((sum, d) => sum + d.count, 0), [usageDisplay])
     const maxUsage = useMemo(() => (usageDisplay.length ? Math.max(...usageDisplay.map((d) => d.count)) : 1), [usageDisplay])
     const maxSchema = useMemo(() => (stats?.schema_usage?.length ? Math.max(...stats.schema_usage.map((s) => s.count)) : 1), [stats])
 
     return (
-        <div className="space-y-8">
-            <div className="flex flex-col gap-2">
-                <h1 className="text-3xl font-bold text-slate-900 flex items-center gap-2">
-                    <LayoutDashboard className="h-7 w-7 text-slate-700" />
-                    Dashboard
-                </h1>
-                <p className="text-slate-600">
-                    Usage snapshot and recent activity for your OCR pipeline{user?.full_name ? `, ${user.full_name}` : ""}.
-                </p>
+        <div className="space-y-6">
+            <div className="flex flex-wrap items-end justify-between gap-3">
+                <div>
+                    <h1 className="text-2xl font-semibold text-slate-900">Dashboard</h1>
+                    <p className="mt-1 text-sm text-slate-500">
+                        {weekTotal} document{weekTotal === 1 ? "" : "s"} processed in the last 7 days
+                        {user?.full_name ? ` · ${user.full_name}` : ""}
+                    </p>
+                </div>
+                <nav aria-label="Quick links" className="flex items-center gap-1">
+                    {quickLinks.map((link) => {
+                        const Icon = link.icon
+                        return (
+                            <Link key={link.href} href={link.href}
+                                className="inline-flex h-8 items-center gap-1.5 rounded-md border border-slate-200 px-2.5 text-xs font-medium text-slate-600 transition-colors hover:border-blue-300 hover:bg-blue-50 hover:text-blue-700">
+                                <Icon className="h-3.5 w-3.5" aria-hidden="true" />
+                                {link.title}
+                                <ArrowUpRight className="h-3 w-3 opacity-50" aria-hidden="true" />
+                            </Link>
+                        )
+                    })}
+                </nav>
             </div>
 
             {error && (
-                <div className="rounded-lg border border-amber-200 bg-amber-50 text-amber-800 px-4 py-3">
+                <div role="alert" className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
                     {error}
                 </div>
             )}
 
-            <div>
-                <h2 className="text-xl font-semibold text-slate-900 mb-4">Quick Access</h2>
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                    {quickLinks.map((link) => {
-                        const Icon = link.icon
-                        return (
-                            <Card key={link.href} className="hover:shadow-lg transition-shadow">
-                                <CardHeader>
-                                    <div className="flex items-center space-x-3">
-                                        <div className="p-2 bg-slate-100 rounded-lg">
-                                            <Icon className="h-6 w-6 text-slate-700" />
-                                        </div>
-                                        <CardTitle>{link.title}</CardTitle>
+            {loading ? (
+                <div aria-busy="true" aria-label="Loading dashboard" className="space-y-6">
+                    <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
+                        <div className="lg:col-span-2">
+                            <div className="h-5 w-32 animate-pulse rounded bg-slate-100" />
+                            <div className="mt-4 flex h-48 items-end gap-3">
+                                {Array.from({ length: 7 }).map((_, i) => (
+                                    <div key={i} className="h-full flex-1 animate-pulse rounded-t bg-slate-100" style={{ animationDelay: `${i * 60}ms` }} />
+                                ))}
+                            </div>
+                        </div>
+                        <div className="space-y-3">
+                            {Array.from({ length: 5 }).map((_, i) => (
+                                <div key={i} className="h-8 animate-pulse rounded bg-slate-100" style={{ animationDelay: `${i * 60}ms` }} />
+                            ))}
+                        </div>
+                    </div>
+                    <div className="h-16 animate-pulse rounded-lg bg-slate-100" />
+                </div>
+            ) : (
+                <>
+                    <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
+                        <Card className="lg:col-span-2">
+                            <CardHeader>
+                                <CardTitle>Daily usage</CardTitle>
+                                <CardDescription>Documents processed per day</CardDescription>
+                            </CardHeader>
+                            <CardContent>
+                                {usageDisplay.length === 0 || weekTotal === 0 ? (
+                                    <div className="flex h-48 flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-slate-200 text-sm text-slate-500">
+                                        <span>No documents processed this week</span>
+                                        <Link href="/jobs/create" className="text-blue-700 underline-offset-4 hover:underline">Create a job to get started</Link>
                                     </div>
-                                    <CardDescription>{link.description}</CardDescription>
-                                </CardHeader>
-                                <CardContent>
-                                    <Link href={link.href}>
-                                        <Button variant="outline" className="w-full">
-                                            Go to {link.title}
-                                            <ArrowRight className="ml-2 h-4 w-4" />
-                                        </Button>
+                                ) : (
+                                    <div className="flex h-48 items-end gap-3" role="img" aria-label="Documents processed per day over the last 7 days">
+                                        {usageDisplay.map((item) => {
+                                            const height = item.count === 0 ? 2 : Math.max((item.count / maxUsage) * 100, 6)
+                                            return (
+                                                <div key={item.label} className="flex h-full flex-1 flex-col items-center justify-end gap-1.5">
+                                                    <span className="text-xs font-medium tabular-nums text-slate-600">{item.count}</span>
+                                                    <div
+                                                        className={`w-full max-w-10 rounded-t-sm ${item.isToday ? "bg-blue-600" : item.count === 0 ? "bg-slate-200" : "bg-blue-300"}`}
+                                                        style={{ height: `${height}%` }}
+                                                        aria-label={`${item.label}: ${item.count}`}
+                                                    />
+                                                    <span className={`text-xs ${item.isToday ? "font-semibold text-slate-800" : "text-slate-500"}`}>{item.label}</span>
+                                                </div>
+                                            )
+                                        })}
+                                    </div>
+                                )}
+                            </CardContent>
+                        </Card>
+
+                        <Card>
+                            <CardHeader>
+                                <CardTitle>Schema usage</CardTitle>
+                                <CardDescription>Most used schemas this week</CardDescription>
+                            </CardHeader>
+                            <CardContent className="space-y-4">
+                                {(!stats?.schema_usage || stats.schema_usage.length === 0) && (
+                                    <div className="flex h-32 items-center justify-center rounded-lg border border-dashed border-slate-200 text-sm text-slate-500">
+                                        No schema usage yet
+                                    </div>
+                                )}
+                                {(stats?.schema_usage || []).slice(0, 6).map((schema) => {
+                                    const percent = Math.round((schema.count / maxSchema) * 100)
+                                    return (
+                                        <div key={schema.name} className="space-y-1.5">
+                                            <div className="flex items-baseline justify-between gap-3 text-sm">
+                                                <span className="truncate font-medium text-slate-800" title={schema.name}>{schema.name}</span>
+                                                <span className="shrink-0 text-xs tabular-nums text-slate-500">{schema.count} · {percent}%</span>
+                                            </div>
+                                            <div className="h-1.5 rounded-full bg-slate-100">
+                                                <div className="h-1.5 rounded-full bg-blue-600" style={{ width: `${percent}%` }} />
+                                            </div>
+                                        </div>
+                                    )
+                                })}
+                                {(stats?.schema_usage?.length || 0) > 6 && (
+                                    <Link href="/schemas" className="inline-block pt-1 text-xs text-blue-700 underline-offset-4 hover:underline">
+                                        View all schemas →
                                     </Link>
-                                </CardContent>
-                            </Card>
-                        )
-                    })}
-                </div>
-            </div>
+                                )}
+                            </CardContent>
+                        </Card>
+                    </div>
 
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-                <Card className="lg:col-span-2">
-                    <CardHeader>
-                        <CardTitle>Daily Usage</CardTitle>
-                        <CardDescription>Number of document runs per day (last 7 days)</CardDescription>
-                    </CardHeader>
-                    <CardContent>
-                        <div className="grid grid-cols-7 gap-3">
-                            {usageDisplay.map((item) => {
-                                const height = maxUsage === 0 ? 0 : (item.count / maxUsage) * 180
-                                return (
-                                    <div key={item.label} className="flex flex-col items-center gap-2">
-                                        <div className="h-44 w-full bg-slate-100 rounded-lg flex items-end justify-center">
-                                            {item.count > 0 && (
-                                                <div
-                                                    className={`w-full rounded-md transition-[height] duration-300 ${item.isToday ? "bg-[#F28C28]" : "bg-[#2F8CC9]"}`}
-                                                    style={{ height: `${height}px` }}
-                                                    aria-label={`${item.label} usage ${item.count}`}
-                                                />
-                                            )}
-                                        </div>
-                                        <div className="text-xs text-slate-600">{item.label}</div>
-                                        <div className="text-sm font-semibold text-slate-800">{item.count}</div>
-                                    </div>
-                                )
-                            })}
-                            {usageDisplay.length === 0 && !loading && (
-                                <div className="col-span-7 text-sm text-slate-500">No usage data yet</div>
+                    <Card>
+                        <CardHeader>
+                            <CardTitle>Recent jobs</CardTitle>
+                            <CardDescription>Latest runs and their status</CardDescription>
+                        </CardHeader>
+                        <CardContent className="divide-y divide-slate-100">
+                            {(!stats?.recent_jobs || stats.recent_jobs.length === 0) && (
+                                <div className="flex h-24 items-center justify-center text-sm text-slate-500">No jobs yet</div>
                             )}
-                        </div>
-                    </CardContent>
-                </Card>
-
-                <Card>
-                    <CardHeader>
-                        <CardTitle>Schema Usage</CardTitle>
-                        <CardDescription>Most used schemas this week</CardDescription>
-                    </CardHeader>
-                    <CardContent className="space-y-4">
-                        {(!stats?.schema_usage || stats.schema_usage.length === 0) && !loading && <div className="text-sm text-slate-500">No schema usage yet</div>}
-                        {stats?.schema_usage?.map((schema) => {
-                            const percent = Math.round((schema.count / maxSchema) * 100)
-                            return (
-                                <div key={schema.name} className="space-y-1">
-                                    <div className="flex items-center justify-between text-sm">
-                                        <span className="font-medium text-slate-800">{schema.name}</span>
-                                        <span className="text-slate-500">{schema.count}</span>
+                            {stats?.recent_jobs?.map((job) => (
+                                <Link key={job.id} href={`/jobs/${job.id}`}
+                                    className="-mx-2 flex items-center justify-between gap-3 rounded-md px-2 py-3 transition-colors hover:bg-slate-50">
+                                    <div className="min-w-0">
+                                        <div className="truncate font-medium text-slate-900">{job.name || "Untitled job"}</div>
+                                        <div className="mt-0.5 text-xs tabular-nums text-slate-500">{formatDateTime(job.updated_at || job.created_at)}</div>
                                     </div>
-                                    <div className="h-2 rounded-full bg-slate-100">
-                                        <div
-                                            className="h-2 rounded-full bg-[#2F8CC9] transition-[width] duration-300"
-                                            style={{
-                                                width: `${percent}%`,
-                                            }}
-                                        />
+                                    <div className="flex shrink-0 items-center gap-3">
+                                        <span className={`rounded-md border px-2 py-0.5 text-xs font-medium ${jobStatusBadge[job.status] || "bg-slate-50 text-slate-600 border-slate-200"}`}>
+                                            {job.status.replace(/_/g, " ")}
+                                        </span>
+                                        <ArrowUpRight className="h-4 w-4 text-slate-400" aria-hidden="true" />
                                     </div>
-                                </div>
-                            )
-                        })}
-                    </CardContent>
-                </Card>
-            </div>
-
-            <Card>
-                <CardHeader>
-                    <CardTitle>Recent Jobs</CardTitle>
-                    <CardDescription>Latest job runs and their status</CardDescription>
-                </CardHeader>
-                <CardContent className="space-y-3">
-                    {(!stats?.recent_jobs || stats.recent_jobs.length === 0) && !loading && <div className="text-sm text-slate-500">No jobs yet</div>}
-                    {stats?.recent_jobs?.map((job) => (
-                        <div key={job.id} className="flex flex-col md:flex-row md:items-center md:justify-between gap-2 border rounded-lg px-4 py-3">
-                            <div>
-                                <div className="font-semibold text-slate-900">{job.name || "Untitled Job"}</div>
-                                <div className="text-xs text-slate-500">{formatDateTime(job.updated_at || job.created_at)}</div>
-                            </div>
-                            <div className="flex items-center gap-2">
-                                <span className={`px-3 py-1 rounded-full text-xs font-medium ${statusBadge(job.status)}`}>
-                                    {job.status.replace("_", " ")}
-                                </span>
-                                <Link href={`/jobs/${job.id}`}>
-                                    <Button variant="outline" size="sm">
-                                        View
-                                    </Button>
                                 </Link>
-                            </div>
-                        </div>
-                    ))}
-                </CardContent>
-            </Card>
-
-            {loading && (
-                <div className="fixed bottom-4 right-4 rounded-md bg-white/90 shadow px-3 py-2 text-sm text-slate-600 border">
-                    Loading dashboard data...
-                </div>
+                            ))}
+                        </CardContent>
+                    </Card>
+                </>
             )}
         </div>
     )
