@@ -528,9 +528,12 @@ def auto_mapping_routes(setting: Any, db: Any) -> tuple[list[str], list[dict]]:
     else:
         skipped.append({"provider": "jev", "status": "skipped", "category": "not_configured"})
     if getattr(setting, "mapping_fallback_enabled", True):
+        # LangExtract runs before the raw LLM fallback: same provider, but it
+        # grounds values to document spans so fields can verify automatically.
         if llm_mapping_configured(db, setting):
-            routes.append("llm")
+            routes.extend(["lx", "llm"])
         else:
+            skipped.append({"provider": "lx", "status": "skipped", "category": "not_configured"})
             skipped.append({"provider": "llm", "status": "skipped", "category": "not_configured"})
     return routes, skipped
 
@@ -617,8 +620,20 @@ def map_fields(text: str, schema: Any, db: Any, file_path: str | None = None,
                                   "reason": "No value returned; absence is not independently verified"}
                 return
             if name in values and values[name] != value:
+                grounded_span = bool(proof and proof.get("text_start") is not None)
+                if grounded_span and evidence[name].get("status") == "needs_review":
+                    # Grounded upgrade: a span-backed value replaces an unverified
+                    # incumbent; the displaced value stays visible as the alternative
+                    # and the span's honest "association not verified" reason is kept.
+                    old_value, old_provider = values[name], evidence[name].get("provider")
+                    values[name] = value
+                    evidence[name] = {**(proof or {}), "provider": provider,
+                                      "alternative": {"value": old_value, "provider": old_provider},
+                                      "upgraded_from_conflict": True}
+                    return
                 evidence[name].update(status="needs_review", reason="Providers returned conflicting values",
-                                      alternative={"value": value, "provider": provider})
+                                      alternative={"value": value, "provider": provider,
+                                                   **({"grounded": True} if grounded_span else {})})
                 return
             values[name] = value
             evidence[name] = {**(proof_evidence or source_evidence(value, text)), "provider": provider}

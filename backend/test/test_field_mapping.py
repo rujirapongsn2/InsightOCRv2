@@ -135,7 +135,80 @@ def test_auto_skips_unconfigured_mapping_engines(monkeypatch):
     jev.assert_not_called()
     llm.assert_not_called()
     assert all(a["status"] == "skipped" for a in report["attempts"])
-    assert {a["provider"] for a in report["attempts"]} == {"softnix", "jev", "llm"}
+    assert {a["provider"] for a in report["attempts"]} == {"softnix", "jev", "lx", "llm"}
+
+
+def _auto_chain_setting():
+    return SimpleNamespace(
+        mapping_engine="auto",
+        mapping_fallback_enabled=True,
+        api_token="token",
+        api_endpoint="http://ocr",
+        structured_output_endpoint="http://structured",
+        typesafe_endpoint="",
+        typesafe_api_key="",
+        mapping_fallback_provider_id=None,
+    )
+
+
+def test_grounded_value_replaces_unverified_conflicting_incumbent(monkeypatch):
+    """A span-backed value upgrades a needs_review incumbent; the old value stays as alternative."""
+    db = Mock()
+    setting = _auto_chain_setting()
+    provider = SimpleNamespace(api_url="http://llm", api_key="k")
+    db.query.return_value.first.return_value = setting
+    db.query.return_value.filter.return_value.first.return_value = provider
+    db.query.return_value.filter.return_value.filter.return_value.first.return_value = provider
+
+    # softnix answers first with a normalized value that is not verbatim in the text.
+    monkeypatch.setattr(mapping, "extract_structure",
+                        lambda *a, **k: {"total": "2,500.00"})
+    monkeypatch.setattr(mapping, "typesafe_is_configured", lambda setting: False)
+
+    def fake_lx_mapping(text, target, db, timeout, model=None):
+        return {"total": {"raw": "25", "text_start": 11, "text_end": 13}}, "lx:test-model", {}
+
+    monkeypatch.setattr(mapping, "lx_mapping", fake_lx_mapping)
+    monkeypatch.setattr(mapping, "llm_mapping", Mock(side_effect=AssertionError("llm should not run")))
+
+    text = "Invoice No: INV-42\nTotal: 25"
+    values, report = mapping.map_fields(text, schema({"name": "total", "type": "currency"}), db)
+    assert values == {"total": 25}
+    field = report["fields"]["total"]
+    assert field["status"] == "source_matched"
+    assert field["provider"] == "lx:test-model"
+    assert field["upgraded_from_conflict"] is True
+    assert field["alternative"] == {"value": 2500.0, "provider": "softnix"}
+    # The honest association caveat from the grounded proof is retained.
+    assert "not independently verified" in field["reason"]
+
+
+def test_conflict_against_verified_value_keeps_incumbent_and_flags_grounded_alternative(monkeypatch):
+    """A verified (source_matched) field leaves the pending queue, so later engines
+    never re-extract it and it cannot be pulled into a conflict."""
+    db = Mock()
+    setting = _auto_chain_setting()
+    provider = SimpleNamespace(api_url="http://llm", api_key="k")
+    db.query.return_value.first.return_value = setting
+    db.query.return_value.filter.return_value.first.return_value = provider
+    db.query.return_value.filter.return_value.filter.return_value.first.return_value = provider
+
+    monkeypatch.setattr(mapping, "extract_structure", lambda *a, **k: {"total": 25})
+    monkeypatch.setattr(mapping, "typesafe_is_configured", lambda setting: False)
+
+    def fake_lx_mapping(text, target, db, timeout, model=None):
+        raise AssertionError("lx should not run: no fields pending after softnix verified")
+
+    monkeypatch.setattr(mapping, "lx_mapping", fake_lx_mapping)
+    monkeypatch.setattr(mapping, "llm_mapping", Mock(side_effect=AssertionError("llm should not run")))
+
+    values, report = mapping.map_fields("Invoice No: INV-42\nTotal: 25",
+                                        schema({"name": "total", "type": "currency"}), db)
+    assert values == {"total": 25}
+    field = report["fields"]["total"]
+    assert field["status"] == "source_matched"
+    assert field["provider"] == "softnix"
+    assert "alternative" not in field
 
 
 def test_jev_engine_maps_candidates_and_marks_low_confidence_for_review(monkeypatch):
