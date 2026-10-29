@@ -41,6 +41,18 @@ export function evidenceSearchTexts(value: unknown, evidence?: { quote?: string;
     }
     add(evidence?.quote)
     add(evidence?.raw_text)
+    // OCR sometimes misreads one character ("Co." → "6๐.") making the whole
+    // verbatim quote unfindable in the PDF's real text layer. Prefix fragments
+    // before the error usually still match, so try the first 2–4 words of the
+    // quote and raw_text as shorter needles (most specific first: the full
+    // forms were already added above).
+    for (const source of [evidence?.quote, evidence?.raw_text]) {
+        if (typeof source !== "string") continue
+        const words = source.trim().split(/\s+/)
+        for (const count of [4, 3, 2]) {
+            if (words.length > count) add(words.slice(0, count).join(" "))
+        }
+    }
     if (value === null || value === undefined || typeof value === "object" || typeof value === "boolean") return texts
     const raw = String(value)
     add(raw)

@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useMemo, useRef } from "react"
 import { Document, Page, pdfjs } from "react-pdf"
-import { ZoomIn, ZoomOut, RotateCw, ChevronLeft, ChevronRight, SearchX } from "lucide-react"
+import { ZoomIn, ZoomOut, RotateCw, ChevronLeft, ChevronRight, SearchX, LocateFixed } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { findTextBox, findWordBox, type Box, type Highlight, type PageWord, type TextItemLike } from "@/lib/evidence-search"
 import "react-pdf/dist/Page/AnnotationLayer.css"
@@ -38,7 +38,7 @@ export function PDFViewer({ fileUrl, className = "", highlight, pageWords }: PDF
   const pdfRef = useRef<PdfProxy | null>(null)
   // Where the highlighted text was found: a stored bbox, or one located in the text layer.
   const [located, setLocated] = useState<{ page: number; bbox: Box } | null>(null)
-  const [searchState, setSearchState] = useState<"idle" | "searching" | "not_found">("idle")
+  const [searchState, setSearchState] = useState<"idle" | "searching" | "not_found" | "page_only">("idle")
   const boxRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
@@ -85,7 +85,18 @@ export function PDFViewer({ fileUrl, className = "", highlight, pageWords }: PDF
           return
         }
       }
-      if (!cancelled) setSearchState("not_found")
+      if (!cancelled) {
+        if (pageExists && highlight.page) {
+          // Grounded evidence knows the page even when the verbatim OCR quote
+          // cannot be located in the PDF's own text layer (OCR misreads like
+          // "Co." → "6๐."); show that page with an explanatory note instead
+          // of a bare not-found.
+          setPageNumber(highlight.page)
+          setSearchState("page_only")
+        } else {
+          setSearchState("not_found")
+        }
+      }
     })().catch(() => { if (!cancelled) setSearchState("not_found") })
     return () => { cancelled = true }
   }, [highlight, numPages, pageWords])
@@ -222,8 +233,11 @@ export function PDFViewer({ fileUrl, className = "", highlight, pageWords }: PDF
         </div>
 
         {highlight && searchState !== "idle" && (
-          <span role="status" className={`inline-flex items-center gap-1 text-xs ${searchState === "not_found" ? "text-amber-700" : "text-slate-500"}`}>
-            {searchState === "searching" ? "Finding the value in the document..." : <>
+          <span role="status" className={`inline-flex items-center gap-1 text-xs ${searchState === "not_found" ? "text-amber-700" : searchState === "page_only" ? "text-blue-700" : "text-slate-500"}`}>
+            {searchState === "searching" ? "Finding the value in the document..." : searchState === "page_only" ? <>
+              <LocateFixed className="h-3.5 w-3.5" />
+              {highlight.label ? `${highlight.label}: ` : ""}อยู่ในหน้า {highlight.page} — ข้อความ OCR ต่างจากตัวอักษรใน PDF จึงไฮไลต์จุดเดียวไม่ได้ (หาจากทั้งบรรทัดในหน้านี้)
+            </> : <>
               <SearchX className="h-3.5 w-3.5" />
               {highlight.label ? `${highlight.label}: ` : ""}not found in this document&apos;s text
             </>}

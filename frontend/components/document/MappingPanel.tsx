@@ -6,57 +6,81 @@ import { getApiBaseUrl } from "@/lib/api"
 
 type Evidence = { status?: string; reason?: string; quote?: string; raw_text?: string; page?: number; retained_previous_value?: boolean;
     alternative?: { value: unknown; provider: string };
-    bbox?: { x: number; y: number; width: number; height: number } }
+    bbox?: { x: number; y: number; width: number; height: number };
+    lx_candidate?: { value?: unknown } }
 export type MappingReport = { status?: string; fields?: Record<string, Evidence>; attempts?: unknown[] }
 
-export function MappingPanel({ documentId, report, onEvidence, onProposal }: {
+export type MappingResult = { mapping?: MappingReport; values?: Record<string, unknown> }
+
+/** Run a mapping retry (whole document or selected fields) and wait for it. */
+export async function runMappingRetry(documentId: string, engine: string, fields?: string[], signal?: AbortSignal): Promise<MappingResult> {
+    const headers = { Authorization: `Bearer ${localStorage.getItem("token")}`, "Content-Type": "application/json" }
+    const url = `${getApiBaseUrl()}/documents/${documentId}`
+    const response = await fetch(`${url}/retry-mapping`, {
+        method: "POST", headers, signal,
+        body: JSON.stringify({ engine, ...(fields?.length ? { fields } : {}) }),
+    })
+    if (!response.ok) throw new Error((await response.json()).detail || "Mapping retry failed")
+    const started = Date.now()
+    while (!signal?.aborted && Date.now() - started < 600_000) {
+        await new Promise<void>((resolve) => {
+            const timer = setTimeout(() => { signal?.removeEventListener("abort", done); resolve() }, 2000)
+            const done = () => { clearTimeout(timer); resolve() }
+            signal?.addEventListener("abort", done, { once: true })
+        })
+        if (signal?.aborted) throw new Error("aborted")
+        const result = await fetch(url, { headers, signal })
+        if (!result.ok) throw new Error("Unable to retrieve mapping status")
+        const doc = await result.json()
+        if (!["queued", "processing"].includes(doc.status)) {
+            if (doc.extraction_metadata?.mapping_retry?.status === "failed") {
+                throw new Error(doc.processing_error || "Mapping retry failed")
+            }
+            return { mapping: doc.extraction_metadata?.mapping, values: doc.extracted_data || {} }
+        }
+    }
+    throw new Error("Still processing. Reopen Preview to check the result.")
+}
+
+const STATUS_LABELS: Record<string, string> = {
+    source_matched: "Source matched", needs_review: "Needs review",
+    missing: "Not returned", failed: "Failed",
+}
+
+export function MappingPanel({ documentId, report, onEvidence, onProposal, onReport, engine, onEngineChange }: {
     documentId: string; report?: MappingReport;
     onEvidence: (name: string, evidence: Evidence) => void;
     onProposal: (values: Record<string, unknown>) => void;
+    onReport?: (report: MappingReport | undefined) => void;
+    engine: string;
+    onEngineChange: (engine: string) => void;
 }) {
-    const [engine, setEngine] = useState("auto")
     const [busy, setBusy] = useState(false)
     const [error, setError] = useState("")
     const [latest, setLatest] = useState(report)
-    const [proposal, setProposal] = useState<Record<string, unknown> | null>(null)
+    const [summary, setSummary] = useState<{ updated: number; review: number } | null>(null)
     const controller = useRef<AbortController | null>(null)
     useEffect(() => () => controller.current?.abort(), [])
 
+    async function applyResult(result: MappingResult) {
+        setLatest(result.mapping)
+        onReport?.(result.mapping)
+        const values = result.values || {}
+        onProposal(values)
+        const reviewCount = Object.values(result.mapping?.fields || {})
+            .filter((item) => (item?.status || "needs_review") === "needs_review").length
+        setSummary({ updated: Object.keys(values).length, review: reviewCount })
+    }
+
     async function retry(field?: string) {
-        setBusy(true); setError(""); setProposal(null)
+        setBusy(true); setError(""); setSummary(null)
         const abort = new AbortController()
         controller.current = abort
-        const headers = { Authorization: `Bearer ${localStorage.getItem("token")}`, "Content-Type": "application/json" }
-        const url = `${getApiBaseUrl()}/documents/${documentId}`
         try {
-            const response = await fetch(`${url}/retry-mapping`, {
-                method: "POST", headers, signal: abort.signal,
-                body: JSON.stringify({ engine, ...(field ? { fields: [field] } : {}) }),
-            })
-            if (!response.ok) throw new Error((await response.json()).detail || "Mapping retry failed")
-            const started = Date.now()
-            while (!abort.signal.aborted && Date.now() - started < 600_000) {
-                await new Promise<void>((resolve) => {
-                    const done = () => { clearTimeout(timer); abort.signal.removeEventListener("abort", done); resolve() }
-                    const timer = setTimeout(done, 2000)
-                    abort.signal.addEventListener("abort", done, { once: true })
-                })
-                if (abort.signal.aborted) return
-                const result = await fetch(url, { headers, signal: abort.signal })
-                if (!result.ok) throw new Error("Unable to retrieve mapping status")
-                const doc = await result.json()
-                if (!["queued", "processing"].includes(doc.status)) {
-                    setLatest(doc.extraction_metadata?.mapping)
-                    if (doc.extraction_metadata?.mapping_retry?.status === "failed") {
-                        throw new Error(doc.processing_error || "Mapping retry failed")
-                    }
-                    setProposal(doc.extracted_data || {})
-                    return
-                }
-            }
-            if (!abort.signal.aborted) setError("Still processing. Reopen Preview to check the result.")
+            const result = await runMappingRetry(documentId, engine, field ? [field] : undefined, abort.signal)
+            if (!abort.signal.aborted) await applyResult(result)
         } catch (e) {
-            if (!abort.signal.aborted) setError(e instanceof Error ? e.message : "Mapping retry failed")
+            if (!abort.signal.aborted) setError(e instanceof Error && e.message !== "aborted" ? e.message : "")
         } finally {
             if (!abort.signal.aborted) setBusy(false)
         }
@@ -65,9 +89,10 @@ export function MappingPanel({ documentId, report, onEvidence, onProposal }: {
     return <div className="mb-3 shrink-0 space-y-2 text-xs">
         <div className="flex flex-wrap items-end gap-2">
             <label className="space-y-1 text-slate-600">Mapping engine
-                <select aria-label="Mapping engine" value={engine} disabled={busy} onChange={e => setEngine(e.target.value)} className="block h-8 rounded border bg-white px-2">
+                <select aria-label="Mapping engine" value={engine} disabled={busy} onChange={e => onEngineChange(e.target.value)} className="block h-8 rounded border bg-white px-2">
                     <option value="auto">Auto</option><option value="softnix">Softnix Structured</option>
                     <option value="jev">TypeSafe Jev</option>
+                    <option value="lx">LangExtract (grounded)</option>
                     <option value="llm">Configured LLM provider</option><option value="fixed">Fixed position only</option>
                 </select>
             </label>
@@ -76,11 +101,9 @@ export function MappingPanel({ documentId, report, onEvidence, onProposal }: {
             </button>
         </div>
         {error && <p role="alert" className="text-red-700">{error}</p>}
-        {proposal && <details className="rounded border p-2" open>
-            <summary className="cursor-pointer font-medium">New mapping proposal</summary>
-            <pre className="my-2 max-h-48 overflow-auto whitespace-pre-wrap break-all">{JSON.stringify(proposal, null, 2)}</pre>
-            <button type="button" onClick={() => { onProposal(proposal); setProposal(null) }} className="rounded border px-2 py-1">Use proposal in editor</button>
-        </details>}
+        {summary && <p role="status" className="rounded border border-emerald-200 bg-emerald-50 px-2 py-1 text-emerald-800">
+            อัปเดต {summary.updated} ฟิลด์เข้าตัวแก้ไขแล้ว · รอตรวจ {summary.review} รายการ
+        </p>}
         {latest?.fields && <details className="rounded border p-2">
             <summary className="cursor-pointer font-medium">Field evidence</summary>
             <div className="max-h-56 space-y-2 overflow-auto pt-2">
