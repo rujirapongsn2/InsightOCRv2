@@ -116,6 +116,9 @@ class Settings(BaseSettings):
     # under which a mapped value is marked needs_review instead of accepted.
     MAPPING_JEV_REQUEST_TIMEOUT_SECONDS: int = 90
     MAPPING_JEV_CONFIDENCE_FLOOR: float = 0.7
+    # LangExtract (lx) grounded mapping engine: one request may chunk a long
+    # document, so it gets more headroom than a single-shot LLM call.
+    MAPPING_LX_REQUEST_TIMEOUT_SECONDS: int = 150
     JEV_DECISION_INPUT_MAX_CHARS: int = 24000
     JEV_DECISION_TIMEOUT_SECONDS: int = 60
 

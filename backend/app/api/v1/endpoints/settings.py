@@ -37,7 +37,7 @@ BUILD_INFO_PATH = Path(__file__).resolve().parents[4] / ".build-info.json"
 
 
 class MappingPolicy(BaseModel):
-    engine: Literal["auto", "softnix", "llm", "fixed", "jev"] = "auto"
+    engine: Literal["auto", "softnix", "llm", "fixed", "jev", "lx"] = "auto"
     fallback_provider_id: UUID | None = None
     fallback_enabled: bool = True
 

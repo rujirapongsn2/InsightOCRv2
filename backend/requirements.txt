@@ -31,3 +31,4 @@ ddgs
 croniter
 openpyxl
 python-docx
+langextract==1.7.1

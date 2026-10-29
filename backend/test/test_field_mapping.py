@@ -389,3 +389,121 @@ def test_keyless_local_llm_counts_as_configured():
     assert mapping.llm_mapping_configured(db, setting) is True
     provider.api_url = ""
     assert mapping.llm_mapping_configured(db, setting) is False
+
+
+def test_lx_engine_records_grounded_span_evidence(monkeypatch):
+    """Grounded extractions carry char spans into evidence, not forced review."""
+    db = Mock()
+    db.query.return_value.first.return_value = SimpleNamespace(
+        mapping_engine="lx", mapping_fallback_enabled=False)
+
+    def fake_lx_mapping(text, target, db, timeout, model=None):
+        grounded = {
+            "id": {"raw": "INV-42", "text_start": 11, "text_end": 17},
+        }
+        return grounded, "lx:test-model", {}
+
+    monkeypatch.setattr(mapping, "lx_mapping", fake_lx_mapping)
+    text = "Invoice No: INV-42\nTotal: 25"
+    values, report = mapping.map_fields(text, schema(
+        {"name": "id", "type": "text"}, {"name": "total", "type": "currency"}), db, engine="lx")
+    assert values == {"id": "INV-42"}
+    field = report["fields"]["id"]
+    assert field["provider"] == "lx:test-model"
+    assert field["status"] == "source_matched"
+    assert field["quote"] == "INV-42"
+    assert field["text_start"] == 11 and field["text_end"] == 17
+    # No extraction for an absent field is "missing", not a provider failure.
+    assert report["fields"]["total"]["status"] == "missing"
+    assert report["attempts"] == [{"provider": "lx:test-model", "status": "completed"}]
+
+
+def test_lx_engine_marks_ungrounded_candidate_for_review(monkeypatch):
+    """Ungrounded extractions never enter values; they surface as lx_candidate."""
+    db = Mock()
+    db.query.return_value.first.return_value = SimpleNamespace(
+        mapping_engine="lx", mapping_fallback_enabled=False)
+
+    def fake_lx_mapping(text, target, db, timeout, model=None):
+        return {}, "lx:test-model", {
+            "total": {"value": "2,500.00", "confidence": None,
+                      "reason": "Ungrounded extraction; value not located verbatim in source"},
+        }
+
+    monkeypatch.setattr(mapping, "lx_mapping", fake_lx_mapping)
+    values, report = mapping.map_fields("Invoice No: INV-42", schema(
+        {"name": "id", "type": "text"}, {"name": "total", "type": "currency"}), db, engine="lx")
+    assert values == {}
+    total = report["fields"]["total"]
+    assert total["status"] == "needs_review"
+    assert total["lx_candidate"] == {"value": "2,500.00"}
+    assert "total" in report["review_fields"]
+
+
+def test_lx_mapping_grounds_and_filters_via_fake_extract(monkeypatch):
+    """lx_mapping keeps grounded spans, filters ungrounded values to candidates."""
+    pytest.importorskip("langextract")
+    import langextract as lx
+    from langextract.core.data import AnnotatedDocument, Extraction, CharInterval
+
+    captured = {}
+
+    def fake_extract(**kwargs):
+        captured.update(kwargs)
+        return AnnotatedDocument(document_id="doc_0", text=kwargs["text_or_documents"], extractions=[
+            Extraction(extraction_class="id", extraction_text="INV-42",
+                       char_interval=CharInterval(start_pos=11, end_pos=17)),
+            Extraction(extraction_class="total", extraction_text="ninety-nine",
+                       char_interval=None),
+        ])
+
+    monkeypatch.setattr(lx, "extract", fake_extract)
+    text = "Invoice No: INV-42\nTotal: 25"
+    target = {"type": "object", "properties": {
+        "id": {"type": "string"}, "total": {"type": "number"}}}
+    grounded, tag, candidates = mapping.lx_mapping(text, target, None, timeout=10, model=object())
+    assert tag == "lx:langextract"
+    assert grounded == {"id": {"raw": "INV-42", "text_start": 11, "text_end": 17}}
+    assert candidates["total"]["value"] == "ninety-nine"
+    # Prompt lists every field as its own extraction class and demands verbatim text.
+    assert "- id (string):" in captured["prompt_description"]
+    assert "- total (number):" in captured["prompt_description"]
+    assert "verbatim" in captured["prompt_description"]
+    assert captured["output_schema"]["properties"], "extractions envelope schema built"
+
+
+def test_annotate_span_evidence_resolves_page_and_raw_text():
+    """Char spans map to the owning page and gain the surrounding line."""
+    ocr_text = "Page one header\nVendor: ACME Ltd\n\nPage two starts here\nTotal: 42 baht"
+    ocr_pages = [
+        {"page_number": 1, "ocr_text": "Page one header\nVendor: ACME Ltd"},
+        {"page_number": 2, "ocr_text": "Page two starts here\nTotal: 42 baht"},
+    ]
+    start = ocr_text.index("ACME Ltd")
+    end = start + len("ACME Ltd")
+    report = {"fields": {
+        "vendor": {"status": "source_matched", "quote": "ACME Ltd", "text_start": start, "text_end": end},
+    }}
+    mapping.annotate_span_evidence(report, ocr_text, ocr_pages)
+    item = report["fields"]["vendor"]
+    assert item["page"] == 1
+    assert item["raw_text"] == "Vendor: ACME Ltd"
+
+
+def test_annotate_span_evidence_span_wins_over_quote_page_guess():
+    """A span-derived page replaces the unique-quote heuristic page."""
+    ocr_text = "First page\nRef: A-1\n\nSecond page\nRef: A-1 again"
+    ocr_pages = [
+        {"page_number": 1, "ocr_text": "First page\nRef: A-1"},
+        {"page_number": 2, "ocr_text": "Second page\nRef: A-1 again"},
+    ]
+    start = ocr_text.rindex("A-1")
+    report = {"fields": {"ref": {"page": 1, "quote": "A-1", "text_start": start, "text_end": start + 3}}}
+    mapping.annotate_span_evidence(report, ocr_text, ocr_pages)
+    assert report["fields"]["ref"]["page"] == 2
+
+
+def test_annotate_span_evidence_no_pages_is_noop():
+    report = {"fields": {"x": {"text_start": 0, "text_end": 1}}}
+    mapping.annotate_span_evidence(report, "text", None)
+    assert report["fields"]["x"] == {"text_start": 0, "text_end": 1}

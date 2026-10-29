@@ -64,8 +64,9 @@ def test_mapping_providers_task(user_id: str, run_id: str):
                 "softnix": softnix_structure_configured(setting),
                 "jev": typesafe_is_configured(setting),
                 "llm": llm_mapping_configured(db, setting),
+                "lx": llm_mapping_configured(db, setting),
             }
-            for engine in ("softnix", "jev", "llm"):
+            for engine in ("softnix", "jev", "llm", "lx"):
                 if not configured[engine]:
                     # An engine nobody set up is not a failure; say so instead of calling it.
                     checks.append({"engine": engine, "passed": None, "skipped": True, "reason": "not_configured",
@@ -92,7 +93,7 @@ def test_mapping_providers_task(user_id: str, run_id: str):
 @celery_app.task(name="app.tasks.document_tasks.remap_document_task", soft_time_limit=360, time_limit=390)
 def remap_document_task(document_id: str, token: str, engine: str, field_names: list[str] | None = None):
     """Recompute mapping proposals without modifying OCR or human-reviewed data."""
-    from app.services.field_mapping import map_fields, attach_page_evidence
+    from app.services.field_mapping import map_fields, attach_page_evidence, annotate_span_evidence
     with SessionLocal() as db:
         document = db.query(Document).filter(Document.id == document_id).first()
         if not document or document.task_id != token or document.status != "queued":
@@ -114,6 +115,7 @@ def remap_document_task(document_id: str, token: str, engine: str, field_names: 
                 values, report = map_fields(document.ocr_text or "", schema, db, file_path,
                                             engine=engine, field_names=field_names)
             attach_page_evidence(report, document.ocr_pages)
+            annotate_span_evidence(report, document.ocr_text, document.ocr_pages)
             from app.services.ocr_quality import review_uncertain_values
             review_uncertain_values(values, report, document.ocr_pages, schema.fields or [])
             db.refresh(document)
@@ -924,7 +926,7 @@ def apply_schema_mapping(
     extraction_metadata: dict[str, Any],
     file_path: str | None = None,
 ) -> str | None:
-    from app.services.field_mapping import map_fields, attach_page_evidence
+    from app.services.field_mapping import map_fields, attach_page_evidence, annotate_span_evidence
 
     if not schema:
         document.extracted_data = None
@@ -941,6 +943,7 @@ def apply_schema_mapping(
         from app.services.schema_versions import record_document_version
         record_document_version(db, document, schema)
     attach_page_evidence(report, getattr(document, "ocr_pages", None))
+    annotate_span_evidence(report, getattr(document, "ocr_text", None), getattr(document, "ocr_pages", None))
     from app.services.ocr_quality import review_uncertain_values
     review_uncertain_values(values, report, getattr(document, "ocr_pages", None), schema.fields or [])
     extraction_metadata["mapping"] = report

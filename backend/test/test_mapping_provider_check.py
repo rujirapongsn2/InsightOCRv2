@@ -49,5 +49,5 @@ def test_unconfigured_engines_are_skipped(monkeypatch):
     result = json.loads(redis.store["mapping_test:u:r"])
     assert called == ["softnix"]
     assert [(c["engine"], c["passed"], c.get("skipped")) for c in result["checks"]] == [
-        ("softnix", False, None), ("jev", None, True), ("llm", None, True)]
+        ("softnix", False, None), ("jev", None, True), ("llm", None, True), ("lx", None, True)]
     assert result["checks"][0]["problems"] == [{"field": "total", "value": None, "status": "failed", "reason": "No value"}]

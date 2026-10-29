@@ -64,6 +64,67 @@ def attach_page_evidence(report: dict, pages: Any) -> None:
         visit(item)
 
 
+def annotate_span_evidence(report: dict, ocr_text: Any, ocr_pages: Any) -> None:
+    """Resolve grounded char spans (text_start/text_end) to exact pages.
+
+    LangExtract evidence carries document-level character offsets; the review
+    UI locates values per PDF page. Locate each page's OCR text inside the
+    document text to build boundaries, stamp the owning page onto every
+    span-carrying field, and add the surrounding line as ``raw_text`` so the
+    page text-layer search has a rich fallback. A span-derived page is more
+    precise than the unique-quote heuristic in ``attach_page_evidence`` and
+    replaces it when both exist.
+    """
+    if not isinstance(ocr_text, str) or not ocr_text:
+        return
+    pages = [page for page in (ocr_pages or [])
+             if isinstance(page, dict) and isinstance(page.get("ocr_text"), str)]
+    boundaries: list[tuple[Any, int, int]] = []
+    cursor = 0
+    for page in pages:
+        needle = page["ocr_text"].strip()
+        if not needle:
+            continue
+        found = ocr_text.find(needle, cursor)
+        if found < 0:
+            continue
+        boundaries.append((page.get("page_number"), found, found + len(needle)))
+        cursor = found + len(needle)
+    if not boundaries:
+        return
+
+    def page_for(offset: int):
+        for number, start, end in boundaries:
+            if start <= offset < end:
+                return number
+        for number, start, end in boundaries:  # span in a join gap between pages
+            if start <= offset <= end:
+                return number
+        return None
+
+    def visit(item: dict) -> None:
+        start, end = item.get("text_start"), item.get("text_end")
+        if isinstance(start, int) and isinstance(end, int) and 0 <= start < end <= len(ocr_text):
+            page = page_for(start)
+            if isinstance(page, int) and page > 0:
+                item["page"] = page
+            line_start = ocr_text.rfind("\n", 0, start) + 1
+            line_end = ocr_text.find("\n", end)
+            if line_end < 0:
+                line_end = len(ocr_text)
+            line = ocr_text[line_start:line_end].strip()
+            if line:
+                item.setdefault("raw_text", line)
+        children = item.get("children", {})
+        for child in children.values() if isinstance(children, dict) else children:
+            if isinstance(child, dict):
+                visit(child)
+
+    for item in report.get("fields", {}).values():
+        if isinstance(item, dict):
+            visit(item)
+
+
 def jev_mapping(text: str, schema: dict, db: Any, timeout: float) -> tuple[dict, str, dict]:
     """Map fields with TypeSafe (Jev): one Choice judgment per schema field.
 
@@ -225,6 +286,103 @@ def jev_mapping(text: str, schema: dict, db: Any, timeout: float) -> tuple[dict,
     tag = f"jev:{response.get('model', 'jev')}"
     return values, tag, low_confidence
 
+
+
+def lx_mapping(text: str, schema: dict, db: Any, timeout: float,
+               model: Any = None) -> tuple[dict, str, dict]:
+    """Map fields with LangExtract: generate-then-ground with span evidence.
+
+    Each schema field becomes one LangExtract extraction class; the model
+    returns verbatim ``extraction_text`` values and LangExtract grounds them
+    back to exact character spans in the source. Only grounded extractions
+    are returned as values (with ``text_start``/``text_end``); ungrounded
+    ones come back as candidates for review — the LLM produced a value that
+    could not be located in the document.
+
+    ``model`` lets tests inject a fake BaseLanguageModel; production resolves
+    the active OpenAI-compatible provider from AI settings.
+    """
+    import langextract as lx
+    from langextract.core import output_schema as output_schema_lib
+
+    field_defs = schema.get("properties", {})
+    raw_names = [name for name in field_defs if name != "$schema"]
+    if not raw_names:
+        raise ValueError("Schema has no fields for LangExtract mapping")
+
+    if model is None:
+        provider = _resolve_openai_mapping_provider(db)
+        from langextract.providers.openai import OpenAILanguageModel
+        model = OpenAILanguageModel(
+            model_id=provider.model,
+            api_key=provider.api_key or "not-needed",
+            base_url=_normalize_openai_base_url(provider.api_url),
+            temperature=0,
+        )
+
+    descriptions = []
+    item_schemas = []
+    for name in raw_names:
+        field_def = field_defs[name] if isinstance(field_defs[name], dict) else {"type": "string"}
+        item_schemas.append(output_schema_lib.extraction_item_schema(name))
+        description = str(field_def.get("description") or "").strip()
+        field_type = str(field_def.get("type") or "string")
+        descriptions.append(f"- {name} ({field_type}): {description or 'the document value for this field'}")
+    prompt = (
+        "Extract the document value for each field listed below. Each field is its own extraction class. "
+        "extraction_text must be the exact verbatim text copied from the document — do not paraphrase, "
+        "translate, normalise or merge values. If the document has no value for a field, produce no "
+        "extraction for that class.\nFields:\n" + "\n".join(descriptions)
+    )
+    output_schema = output_schema_lib.extractions_schema(*item_schemas)
+
+    annotated = lx.extract(
+        text_or_documents=text,
+        prompt_description=prompt,
+        model=model,
+        output_schema=output_schema,
+        show_progress=False,
+        max_workers=4,
+    )
+    documents = annotated if isinstance(annotated, list) else [annotated]
+
+    grounded: dict[str, dict] = {}
+    candidates: dict[str, dict] = {}
+    for document in documents:
+        for extraction in document.extractions or []:
+            name = extraction.extraction_class
+            if name not in raw_names or name in grounded:
+                continue
+            raw_value = extraction.extraction_text
+            if raw_value is None:
+                continue
+            interval = getattr(extraction, "char_interval", None)
+            start = getattr(interval, "start_pos", None)
+            end = getattr(interval, "end_pos", None)
+            if start is None or end is None:
+                if name not in candidates and name not in grounded:
+                    candidates[name] = {"value": raw_value, "confidence": None,
+                                        "reason": "Ungrounded extraction; value not located verbatim in source"}
+                continue
+            grounded[name] = {"raw": raw_value, "text_start": int(start), "text_end": int(end)}
+
+    tag = f"lx:{getattr(model, 'model_id', 'langextract')}"
+    return grounded, tag, candidates
+
+
+
+def _resolve_openai_mapping_provider(db: Any) -> Any:
+    """The active OpenAI-compatible provider used by llm/lx mapping (shared)."""
+    policy = db.query(Setting).first()
+    provider_id = getattr(policy, "mapping_fallback_provider_id", None)
+    query = db.query(AISettings).filter(
+        AISettings.is_active.is_(True),
+        AISettings.provider_type == "openai_compatible",
+    )
+    provider = query.filter(AISettings.id == provider_id).first() if provider_id else query.filter(AISettings.is_default.is_(True)).first()
+    if provider is None:
+        raise ValueError("No active OpenAI-compatible mapping provider configured")
+    return provider
 
 
 def llm_mapping(text: str, schema: dict, db: Any, timeout: float) -> tuple[Any, str]:
@@ -422,7 +580,7 @@ def map_fields(text: str, schema: Any, db: Any, file_path: str | None = None,
     fields = [f for f in schema.fields or [] if f.get("name")]
     policy = db.query(Setting).first() if hasattr(db, "query") else None
     engine = engine or getattr(policy, "mapping_engine", None) or "auto"
-    if engine not in {"auto", "softnix", "llm", "fixed", "jev"}:
+    if engine not in {"auto", "softnix", "llm", "fixed", "jev", "lx"}:
         raise ValueError("Unsupported mapping engine")
     if field_names is not None:
         fields = [f for f in fields if f["name"] in field_names]
@@ -433,13 +591,17 @@ def map_fields(text: str, schema: Any, db: Any, file_path: str | None = None,
     evidence: dict[str, Any] = {}
     attempts: list[dict] = []
 
-    def accept(name: str, raw: Any, provider: str, proof: dict | None = None) -> None:
+    def accept(name: str, raw: Any, provider: str, proof: dict | None = None,
+               proof_review_reason: str | None = "Position read; template alignment requires review") -> None:
         try:
             # Date fields: coerce common OCR forms ("24 Aug 2026") to ISO the same
             # way bbox does, then match evidence against the verbatim raw quote so
             # source_matched stays honest when the stored value is normalised.
             if proof:
-                value = _normalise_fixed_position_value(raw, properties[name], name)
+                if isinstance(raw, str) and properties[name].get("format") == "date":
+                    value = _normalise_fixed_position_value(raw, properties[name], name)
+                else:
+                    value = _normalize_schema_value(raw, properties[name], name)
                 proof_evidence = proof
             elif isinstance(raw, str) and properties[name].get("format") == "date":
                 value = _normalise_fixed_position_value(raw, properties[name], name)
@@ -460,8 +622,8 @@ def map_fields(text: str, schema: Any, db: Any, file_path: str | None = None,
                 return
             values[name] = value
             evidence[name] = {**(proof_evidence or source_evidence(value, text)), "provider": provider}
-            if proof:
-                evidence[name].update(status="needs_review", reason="Position read; template alignment requires review")
+            if proof and proof_review_reason:
+                evidence[name].update(status="needs_review", reason=proof_review_reason)
         except (ValueError, TypeError) as exc:
             if name not in values:
                 evidence[name] = {"status": "needs_review", "provider": provider, "reason": str(exc)}
@@ -531,6 +693,8 @@ def map_fields(text: str, schema: Any, db: Any, file_path: str | None = None,
                 if route == "softnix"
                 else settings.MAPPING_LLM_REQUEST_TIMEOUT_SECONDS
                 if route == "llm"
+                else settings.MAPPING_LX_REQUEST_TIMEOUT_SECONDS
+                if route == "lx"
                 else settings.MAPPING_JEV_REQUEST_TIMEOUT_SECONDS
             )
             timeout = min(request_limit, remaining)
@@ -538,6 +702,28 @@ def map_fields(text: str, schema: Any, db: Any, file_path: str | None = None,
                 result = extract_structure(text, json.dumps(target), db, timeout=timeout)
             elif route == "jev":
                 result, provider, jev_low_confidence = jev_mapping(text, target, db, timeout)
+            elif route == "lx":
+                lx_grounded, provider, lx_candidates = lx_mapping(text, target, db, timeout)
+                for field in pending:
+                    name = field["name"]
+                    entry = lx_grounded.get(name)
+                    if entry is not None:
+                        accept(name, entry["raw"], provider,
+                               proof={"status": "source_matched", "quote": entry["raw"],
+                                      "text_start": entry["text_start"], "text_end": entry["text_end"],
+                                      "reason": "LangExtract grounded span; value verbatim in source, field association not independently verified"},
+                               proof_review_reason=None)
+                        continue
+                    detail = lx_candidates.get(name)
+                    if detail is not None and name not in values:
+                        evidence[name] = {"status": "needs_review", "provider": provider,
+                                          "reason": detail.get("reason") or "Ungrounded extraction; value requires review",
+                                          "lx_candidate": {"value": detail.get("value")}}
+                    elif name not in values and name not in evidence:
+                        evidence[name] = {"status": "missing", "provider": provider,
+                                          "reason": "No extraction produced; absence is not independently verified"}
+                attempts.append({"provider": provider, "status": "completed"})
+                continue
             else:
                 result, provider = llm_mapping(text, target, db, timeout)
             names = {f["name"] for f in pending}

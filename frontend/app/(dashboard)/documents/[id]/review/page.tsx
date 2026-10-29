@@ -16,7 +16,7 @@ const PDFViewer = dynamic(
     { ssr: false, loading: () => <div className="flex h-full items-center justify-center text-sm text-slate-400">Loading document...</div> }
 )
 
-type FieldEvidence = { page?: number; bbox?: Highlight["bbox"]; quote?: string; raw_text?: string }
+type FieldEvidence = { page?: number; bbox?: Highlight["bbox"]; quote?: string; raw_text?: string; lx_candidate?: { value?: unknown } }
 
 interface Document {
     id: string
@@ -376,6 +376,10 @@ export default function ReviewDocumentPage() {
                                         <label htmlFor={inputId} className="flex flex-wrap items-center gap-2 text-sm font-medium">
                                             {field.name}
                                             {field.required && <span className="rounded bg-red-50 px-1.5 py-0.5 text-xs text-red-700">Required</span>}
+                                            {typeof document?.extraction_metadata?.mapping === "object"
+                                                && document.extraction_metadata.mapping?.fields?.[field.name]?.lx_candidate && (
+                                                <span title="ค่านี้มาจากโมเดลแต่หาตำแหน่งในเอกสารต้นฉบับไม่พบ ควรตรวจสอบเป็นพิเศษ" className="rounded bg-amber-100 px-1.5 py-0.5 text-xs font-medium text-amber-800">ไม่พบตำแหน่งในเอกสาร</span>
+                                            )}
                                             {field.inSchema && missing && <span className="rounded bg-amber-50 px-1.5 py-0.5 text-xs text-amber-800">Not found — type the value if the document has it</span>}
                                             {!field.inSchema && schemaFields.length > 0 && <span className="rounded bg-slate-100 px-1.5 py-0.5 text-xs text-slate-600">Not in schema</span>}
                                             {isPDF && !field.structured && text.trim() && (

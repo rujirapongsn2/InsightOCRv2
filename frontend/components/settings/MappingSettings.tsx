@@ -74,6 +74,7 @@ export function MappingSettings({ providers }: { providers: Array<{ id: string; 
                 <select aria-label="Default mapping engine" disabled={!loaded || busy} value={policy.engine} onChange={e => setPolicy({ ...policy, engine: e.target.value })} className="block h-9 w-full rounded border bg-white px-2">
                     <option value="auto">Auto</option><option value="softnix">Softnix Structured</option>
                     <option value="jev">TypeSafe Jev</option>
+                    <option value="lx">LangExtract (grounded)</option>
                     <option value="llm">LLM Provider</option><option value="fixed">Fixed position only</option>
                 </select>
             </label>
