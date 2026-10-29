@@ -737,11 +737,15 @@ export default function JobDetailPage() {
         for (const field of reviewSchema?.fields || []) {
             counts.all += 1
             const status = fieldStatusOf(field.name)
+            // needs_review/missing are reviewer queues: decided fields leave them,
+            // so a fully reviewed document shows 0 waiting even though the engine's
+            // evidence status is frozen in the mapping report.
+            if (isFieldResolved(field.name)) continue
             if (status in counts) counts[status as keyof typeof counts] += 1
             else counts.needs_review += 1
         }
         return counts
-    }, [reviewSchema, mappingReport])
+    }, [reviewSchema, mappingReport, confirmedFields, confirmedMissing, dirtyFields])
     const resolvedCount = (reviewSchema?.fields || []).filter((field) => isFieldResolved(field.name)).length
     const undecidedRequired = (reviewSchema?.fields || []).filter(
         (field) => field.required && !isFieldResolved(field.name) && !(fieldStatusOf(field.name) === "missing" && confirmedMissing.has(field.name)))
@@ -752,7 +756,8 @@ export default function JobDetailPage() {
             return rank(a.name) - rank(b.name)
         })
         if (fieldFilter === "all") return fields
-        return fields.filter((field) => fieldStatusOf(field.name) === fieldFilter)
+        return fields.filter((field) => fieldStatusOf(field.name) === fieldFilter
+            && ((fieldFilter !== "needs_review" && fieldFilter !== "missing") || !isFieldResolved(field.name)))
     }, [reviewSchema, fieldFilter, mappingReport, confirmedFields, confirmedMissing, dirtyFields])
 
     const confirmField = (name: string) => setConfirmedFields((previous) => new Set(previous).add(name))
