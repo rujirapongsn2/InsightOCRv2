@@ -34,15 +34,15 @@ export default function ThinkingIndicator({ iteration, compact = false }: Thinki
                 </div>
                 <div className="flex items-center gap-1.5">
                     <span
-                        className="w-2 h-2 rounded-full bg-[#5EADD6] animate-bounce"
+                        className="w-2 h-2 rounded-full bg-[#5EADD6] animate-pulse"
                         style={{ animationDelay: "0ms" }}
                     />
                     <span
-                        className="w-2 h-2 rounded-full bg-[#5EADD6] animate-bounce"
+                        className="w-2 h-2 rounded-full bg-[#5EADD6] animate-pulse"
                         style={{ animationDelay: "150ms" }}
                     />
                     <span
-                        className="w-2 h-2 rounded-full bg-[#5EADD6] animate-bounce"
+                        className="w-2 h-2 rounded-full bg-[#5EADD6] animate-pulse"
                         style={{ animationDelay: "300ms" }}
                     />
                     <span className="text-xs text-[#5EADD6] ml-1">analyzing context, planning actions...</span>

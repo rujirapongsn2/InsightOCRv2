@@ -726,9 +726,7 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
                         <div className="relative w-full max-w-3xl">
                             <div className="mb-5 flex flex-col items-center text-center">
                                 <h3 className="text-balance text-[2rem] font-bold leading-tight tracking-tight text-ink-navy">
-                                    วันนี้ให้{" "}
-                                    <span className="bg-gradient-to-r from-softnix-deep to-softnix-blue bg-clip-text text-transparent">Agent</span>
-                                    {" "}ช่วยจัดการอะไรดี?
+                                    วันนี้ให้ <span className="text-softnix-blue">Agent</span> ช่วยจัดการอะไรดี?
                                 </h3>
                                 <p className="mx-auto mt-2 max-w-xl text-[0.9375rem] leading-6 text-slate-gray">
                                     บอกสิ่งที่ต้องการเป็นภาษาปกติ Agent จะอ่านเอกสาร ตรวจข้อมูล และเตรียมส่งต่อให้

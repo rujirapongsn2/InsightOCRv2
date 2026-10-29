@@ -264,7 +264,7 @@ function statusColor(status: string) {
 function StatBoxes({ summary }: { summary: ValidationSummary }) {
   return (
     <div className="mb-5">
-      <h3 className="text-[17px] font-bold text-[#2b6cb0] border-l-4 border-[#2b6cb0] pl-3 mb-4">สรุปภาพรวม</h3>
+      <h3 className="text-[17px] font-bold text-[#2b6cb0] border-l border-[#2b6cb0] pl-3 mb-4">สรุปภาพรวม</h3>
       <div className="flex gap-4">
         <div className="flex-1 rounded-[10px] border border-[#c6f6d5] bg-[#f0fff4] py-5 text-center shadow-[0_2px_10px_rgba(0,0,0,0.05)]">
           <div className="text-4xl font-[800] text-[#276749]">{summary.passed}</div>
@@ -286,7 +286,7 @@ function StatBoxes({ summary }: { summary: ValidationSummary }) {
 function ValidationTable({ rules }: { rules: ValidationRule[] }) {
   return (
     <div className="mb-5">
-      <h3 className="text-[17px] font-bold text-[#2b6cb0] border-l-4 border-[#2b6cb0] pl-3 mb-4">ผลการตรวจสอบรายข้อ</h3>
+      <h3 className="text-[17px] font-bold text-[#2b6cb0] border-l border-[#2b6cb0] pl-3 mb-4">ผลการตรวจสอบรายข้อ</h3>
       <div className="overflow-x-auto rounded-[10px] shadow-[0_2px_10px_rgba(0,0,0,0.05)]">
         <table className="min-w-full text-[13px] border-collapse">
           <thead>
@@ -341,8 +341,8 @@ function BusinessImpact({ report }: { report: ValidationReport }) {
 
   return (
     <div className="mb-5">
-      <h3 className="text-[17px] font-bold text-[#2b6cb0] border-l-4 border-[#2b6cb0] pl-3 mb-4">สรุป Business Impact</h3>
-      <div className="bg-[#ebf8ff] border-l-4 border-[#2b6cb0] rounded-[10px] p-5 shadow-[0_2px_10px_rgba(0,0,0,0.05)]">
+      <h3 className="text-[17px] font-bold text-[#2b6cb0] border-l border-[#2b6cb0] pl-3 mb-4">สรุป Business Impact</h3>
+      <div className="bg-[#ebf8ff] border-l border-[#2b6cb0] rounded-[10px] p-5 shadow-[0_2px_10px_rgba(0,0,0,0.05)]">
         <div className="font-bold text-[#1a365d] mb-3 text-[15px]">ความเสี่ยงทางการเงินที่ตรวจพบ</div>
         {report.executive_summary && (
           <p className="text-[14px] text-[#2d3748] leading-[1.6] mb-3">{report.executive_summary}</p>
@@ -376,7 +376,7 @@ function BusinessImpact({ report }: { report: ValidationReport }) {
 function DocumentsReviewed({ docs }: { docs: DocumentReviewed[] }) {
   return (
     <div className="mt-5">
-      <h3 className="text-[17px] font-bold text-[#2b6cb0] border-l-4 border-[#2b6cb0] pl-3 mb-3">Documents Reviewed</h3>
+      <h3 className="text-[17px] font-bold text-[#2b6cb0] border-l border-[#2b6cb0] pl-3 mb-3">Documents Reviewed</h3>
       <div className="flex flex-wrap gap-2">
         {docs.map((d, i) => (
           <div key={i} className="flex items-center gap-2 px-3 py-1.5 bg-[#f7fafc] rounded-[8px] border border-[#e2e8f0] text-[13px] shadow-[0_2px_10px_rgba(0,0,0,0.05)]">
@@ -561,7 +561,7 @@ function ContractComparisonReportView({ report }: { report: ContractComparisonRe
       {/* Documents Analyzed */}
       {report.documents_analyzed && report.documents_analyzed.length > 0 && (
         <div>
-          <h3 className="text-[15px] font-bold text-[#2b6cb0] border-l-4 border-[#2b6cb0] pl-3 mb-3">เอกสารที่วิเคราะห์</h3>
+          <h3 className="text-[15px] font-bold text-[#2b6cb0] border-l border-[#2b6cb0] pl-3 mb-3">เอกสารที่วิเคราะห์</h3>
           <div className="flex flex-wrap gap-3">
             {report.documents_analyzed.map((doc, i) => (
               <div key={i} className="flex-1 min-w-[200px] bg-[#f7fafc] border border-[#e2e8f0] rounded-lg p-3 text-sm shadow-sm">
@@ -576,7 +576,7 @@ function ContractComparisonReportView({ report }: { report: ContractComparisonRe
 
       {/* Executive Summary */}
       {report.executive_summary && (
-        <div className="bg-[#ebf8ff] border-l-4 border-[#2b6cb0] rounded-lg p-4">
+        <div className="bg-[#ebf8ff] border-l border-[#2b6cb0] rounded-lg p-4">
           <h3 className="text-[14px] font-bold text-[#1a365d] mb-2">สรุปผู้บริหาร</h3>
           <p className="text-[14px] text-[#2d3748] leading-relaxed">{report.executive_summary}</p>
         </div>
@@ -585,7 +585,7 @@ function ContractComparisonReportView({ report }: { report: ContractComparisonRe
       {/* Key Differences */}
       {report.key_differences && report.key_differences.length > 0 && (
         <div>
-          <h3 className="text-[15px] font-bold text-[#2b6cb0] border-l-4 border-[#2b6cb0] pl-3 mb-3">ความแตกต่างหลัก</h3>
+          <h3 className="text-[15px] font-bold text-[#2b6cb0] border-l border-[#2b6cb0] pl-3 mb-3">ความแตกต่างหลัก</h3>
           <div className="overflow-x-auto rounded-lg shadow-sm">
             <table className="min-w-full text-[13px] border-collapse">
               <thead>
@@ -622,7 +622,7 @@ function ContractComparisonReportView({ report }: { report: ContractComparisonRe
       {/* Risks and Recommendations */}
       {report.risks_and_recommendations && report.risks_and_recommendations.length > 0 && (
         <div>
-          <h3 className="text-[15px] font-bold text-[#2b6cb0] border-l-4 border-[#2b6cb0] pl-3 mb-3">ความเสี่ยงและข้อแนะนำ</h3>
+          <h3 className="text-[15px] font-bold text-[#2b6cb0] border-l border-[#2b6cb0] pl-3 mb-3">ความเสี่ยงและข้อแนะนำ</h3>
           <div className="space-y-2">
             {report.risks_and_recommendations.map((item, idx) => (
               <div key={idx} className={`border rounded-lg p-3 ${priorityColor(item.priority || "")}`}>
@@ -658,7 +658,7 @@ function ContractComparisonReportView({ report }: { report: ContractComparisonRe
       {/* Validation Items */}
       {report.validation_items && report.validation_items.length > 0 && (
         <div>
-          <h3 className="text-[15px] font-bold text-[#2b6cb0] border-l-4 border-[#2b6cb0] pl-3 mb-3">รายการตรวจสอบเปรียบเทียบ</h3>
+          <h3 className="text-[15px] font-bold text-[#2b6cb0] border-l border-[#2b6cb0] pl-3 mb-3">รายการตรวจสอบเปรียบเทียบ</h3>
           <div className="space-y-3">
             {report.validation_items.map((item, idx) => {
               const st = (item.status || "").toUpperCase()
@@ -708,7 +708,7 @@ function ContractComparisonReportView({ report }: { report: ContractComparisonRe
       {/* Comparison Summary */}
       {report.comparison_summary && Array.isArray(report.comparison_summary) && report.comparison_summary.length > 0 && (
         <div>
-          <h3 className="text-[15px] font-bold text-[#2b6cb0] border-l-4 border-[#2b6cb0] pl-3 mb-3">สรุปการเปรียบเทียบรายด้าน</h3>
+          <h3 className="text-[15px] font-bold text-[#2b6cb0] border-l border-[#2b6cb0] pl-3 mb-3">สรุปการเปรียบเทียบรายด้าน</h3>
           <div className="overflow-x-auto rounded-lg shadow-sm">
             <table className="min-w-full text-[13px] border-collapse">
               <thead>
@@ -745,7 +745,7 @@ function ContractComparisonReportView({ report }: { report: ContractComparisonRe
       {/* Negotiation Priorities */}
       {report.negotiation_priorities && report.negotiation_priorities.length > 0 && (
         <div>
-          <h3 className="text-[15px] font-bold text-[#2b6cb0] border-l-4 border-[#2b6cb0] pl-3 mb-3">ลำดับความสำคัญในการเจรจา</h3>
+          <h3 className="text-[15px] font-bold text-[#2b6cb0] border-l border-[#2b6cb0] pl-3 mb-3">ลำดับความสำคัญในการเจรจา</h3>
           <div className="space-y-3">
             {report.negotiation_priorities.map((item, idx) => (
               <div key={idx} className="border border-[#e2e8f0] rounded-lg overflow-hidden shadow-sm">
@@ -782,7 +782,7 @@ function ContractComparisonReportView({ report }: { report: ContractComparisonRe
       {/* Financial Summary */}
       {report.financial_summary && (
         <div>
-          <h3 className="text-[15px] font-bold text-[#2b6cb0] border-l-4 border-[#2b6cb0] pl-3 mb-3">สรุปการเงิน</h3>
+          <h3 className="text-[15px] font-bold text-[#2b6cb0] border-l border-[#2b6cb0] pl-3 mb-3">สรุปการเงิน</h3>
           <div className="bg-[#f7fafc] border border-[#e2e8f0] rounded-lg overflow-hidden shadow-sm">
             <div className="grid grid-cols-2 sm:grid-cols-4 divide-x divide-[#e2e8f0] border-b border-[#e2e8f0]">
               {report.financial_summary.contract_a_total_value_thb != null && (
@@ -823,7 +823,7 @@ function ContractComparisonReportView({ report }: { report: ContractComparisonRe
       {/* Risk Matrix */}
       {report.risk_matrix && report.risk_matrix.length > 0 && (
         <div>
-          <h3 className="text-[15px] font-bold text-[#2b6cb0] border-l-4 border-[#2b6cb0] pl-3 mb-3">Risk Matrix</h3>
+          <h3 className="text-[15px] font-bold text-[#2b6cb0] border-l border-[#2b6cb0] pl-3 mb-3">Risk Matrix</h3>
           <div className="overflow-x-auto rounded-lg shadow-sm">
             <table className="min-w-full text-[13px] border-collapse">
               <thead>
@@ -872,7 +872,7 @@ function ContractComparisonReportView({ report }: { report: ContractComparisonRe
         if (extras.length === 0) return null
         return (
           <div>
-            <h3 className="text-[15px] font-bold text-[#2b6cb0] border-l-4 border-[#2b6cb0] pl-3 mb-3">ข้อมูลเพิ่มเติม</h3>
+            <h3 className="text-[15px] font-bold text-[#2b6cb0] border-l border-[#2b6cb0] pl-3 mb-3">ข้อมูลเพิ่มเติม</h3>
             <div className="space-y-2">
               {extras.map(([key, val]) => (
                 <div key={key} className="bg-[#f7fafc] border border-[#e2e8f0] rounded-lg p-3 text-sm">
@@ -923,7 +923,7 @@ function TorVerificationReportView({ report }: { report: TorVerificationReport }
   return (
     <div className="space-y-5">
       {/* Summary header */}
-      <div className="bg-[#ebf8ff] border-l-4 border-[#2b6cb0] rounded-[10px] p-5 shadow-[0_2px_10px_rgba(0,0,0,0.05)]">
+      <div className="bg-[#ebf8ff] border-l border-[#2b6cb0] rounded-[10px] p-5 shadow-[0_2px_10px_rgba(0,0,0,0.05)]">
         <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
           <div>
             {s.spec_document && <div className="text-xs text-[#718096]">Spec: <span className="font-semibold text-[#2d3748]">{s.spec_document}</span></div>}
@@ -978,7 +978,7 @@ function TorVerificationReportView({ report }: { report: TorVerificationReport }
       {/* Requirements table */}
       {report.requirements.length > 0 && (
         <div>
-          <h3 className="text-[15px] font-bold text-[#2b6cb0] border-l-4 border-[#2b6cb0] pl-3 mb-3">รายการ Requirements</h3>
+          <h3 className="text-[15px] font-bold text-[#2b6cb0] border-l border-[#2b6cb0] pl-3 mb-3">รายการ Requirements</h3>
           <div className="overflow-x-auto rounded-[10px] shadow-[0_2px_10px_rgba(0,0,0,0.05)]">
             <table className="min-w-full text-xs border-collapse">
               <thead>

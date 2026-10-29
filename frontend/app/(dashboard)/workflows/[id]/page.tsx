@@ -1084,9 +1084,9 @@ function InsertVariableButton({ upstream, onInsert }: { upstream: UpstreamNode[]
                 <button
                     type="button"
                     onClick={() => setMode(mode === "ai" ? null : "ai")}
-                    className="flex items-center gap-1 text-xs font-medium bg-gradient-to-r from-[#7C3AED] to-[#2786C2] bg-clip-text text-transparent hover:opacity-80"
+                    className="flex items-center gap-1 text-xs font-medium text-softnix-blue hover:opacity-80"
                 >
-                    <Sparkles className="h-3 w-3 text-[#7C3AED]" /> ค้นหาด้วย AI
+                    <Sparkles className="h-3 w-3" /> ค้นหาด้วย AI
                 </button>
             </div>
 

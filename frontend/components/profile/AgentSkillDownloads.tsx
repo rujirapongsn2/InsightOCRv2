@@ -295,7 +295,7 @@ esac
               value={selectedFile.content}
               aria-label={`${selectedFile.label} preview`}
               spellCheck={false}
-              className="mt-4 block min-h-[560px] w-full resize-y overflow-auto rounded-md border border-slate-800 bg-slate-950 p-4 font-mono text-xs leading-6 text-slate-100 caret-slate-100 outline-none selection:bg-sky-400 selection:text-slate-950 focus:border-sky-400 focus:ring-2 focus:ring-sky-400/30"
+              className="mt-4 block min-h-[560px] w-full resize-y overflow-auto rounded-md border border-slate-800 bg-slate-950 p-4 font-mono text-xs leading-6 code-viewer text-slate-100 caret-slate-100 outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-400/30"
             />
           </div>
         </div>

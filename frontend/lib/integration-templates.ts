@@ -18,11 +18,11 @@ export interface LLMIntegrationTemplate {
 
 export const TEMPLATE_CATEGORIES: Record<TemplateCategory, { label: string; labelTh: string; badgeClass: string; iconBgClass: string; iconColorClass: string }> = {
     finance:         { label: "Finance & Accounting", labelTh: "การเงิน / บัญชี",       badgeClass: "bg-blue-100 text-blue-700",    iconBgClass: "bg-gradient-to-br from-blue-500 to-blue-700",     iconColorClass: "text-white" },
-    legal:           { label: "Legal & Compliance",   labelTh: "กฎหมาย / การปฏิบัติ",  badgeClass: "bg-purple-100 text-purple-700", iconBgClass: "bg-gradient-to-br from-violet-500 to-purple-700", iconColorClass: "text-white" },
+    legal:           { label: "Legal & Compliance",   labelTh: "กฎหมาย / การปฏิบัติ",  badgeClass: "bg-blue-100 text-blue-700",      iconBgClass: "bg-blue-200", iconColorClass: "text-slate-900" },
     "supply-chain":  { label: "Supply Chain",         labelTh: "ซัพพลายเชน",           badgeClass: "bg-amber-100 text-amber-700",  iconBgClass: "bg-gradient-to-br from-amber-400 to-orange-500",  iconColorClass: "text-white" },
     "hr-admin":      { label: "HR & Administration",  labelTh: "HR / งานธุรการ",       badgeClass: "bg-green-100 text-green-700",  iconBgClass: "bg-gradient-to-br from-green-500 to-emerald-600", iconColorClass: "text-white" },
     healthcare:      { label: "Healthcare",           labelTh: "สาธารณสุข",            badgeClass: "bg-rose-100 text-rose-700",    iconBgClass: "bg-gradient-to-br from-rose-500 to-pink-600",     iconColorClass: "text-white" },
-    "quality-ops":   { label: "Quality & Operations", labelTh: "คุณภาพ / ปฏิบัติการ",  badgeClass: "bg-slate-100 text-slate-600",  iconBgClass: "bg-gradient-to-br from-indigo-500 to-purple-700", iconColorClass: "text-white" },
+    "quality-ops":   { label: "Quality & Operations", labelTh: "คุณภาพ / ปฏิบัติการ",  badgeClass: "bg-slate-100 text-slate-600",  iconBgClass: "bg-slate-300", iconColorClass: "text-slate-900" },
 }
 
 export const LLM_TEMPLATES: LLMIntegrationTemplate[] = [

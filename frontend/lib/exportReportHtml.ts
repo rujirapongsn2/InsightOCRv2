@@ -71,7 +71,7 @@ function buildReportHtml(report: ValidationReport, title: string): string {
 
   // Summary boxes
   const summaryHtml = `
-    <h2 style="color:#2b6cb0;border-left:4px solid #2b6cb0;padding-left:12px;margin:24px 0 16px;">สรุปภาพรวม</h2>
+    <h2 style="color:#2b6cb0;border-left:1px solid #2b6cb0;padding-left:12px;margin:24px 0 16px;">สรุปภาพรวม</h2>
     <table style="width:100%;border-collapse:collapse;margin-bottom:20px;">
       <tr>
         <td style="text-align:center;padding:20px;border:1px solid #c6f6d5;background:#f0fff4;border-radius:8px;width:33%;">
@@ -107,7 +107,7 @@ function buildReportHtml(report: ValidationReport, title: string): string {
   }).join("")
 
   const tableHtml = `
-    <h2 style="color:#2b6cb0;border-left:4px solid #2b6cb0;padding-left:12px;margin:24px 0 16px;">ผลการตรวจสอบรายข้อ</h2>
+    <h2 style="color:#2b6cb0;border-left:1px solid #2b6cb0;padding-left:12px;margin:24px 0 16px;">ผลการตรวจสอบรายข้อ</h2>
     <table style="width:100%;border-collapse:collapse;font-size:13px;">
       <thead>
         <tr style="background:#1a365d;color:white;">
@@ -142,8 +142,8 @@ function buildReportHtml(report: ValidationReport, title: string): string {
     }).join("")
 
     impactHtml = `
-      <h2 style="color:#2b6cb0;border-left:4px solid #2b6cb0;padding-left:12px;margin:24px 0 16px;">สรุป Business Impact</h2>
-      <div style="background:#ebf8ff;border-left:4px solid #2b6cb0;border-radius:8px;padding:20px;">
+      <h2 style="color:#2b6cb0;border-left:1px solid #2b6cb0;padding-left:12px;margin:24px 0 16px;">สรุป Business Impact</h2>
+      <div style="background:#ebf8ff;border-left:1px solid #2b6cb0;border-radius:8px;padding:20px;">
         <div style="font-weight:bold;color:#1a365d;margin-bottom:12px;font-size:15px;">ความเสี่ยงทางการเงินที่ตรวจพบ</div>
         ${report.executive_summary ? `<p style="color:#2d3748;line-height:1.6;margin-bottom:12px;">${escHtml(report.executive_summary)}</p>` : ""}
         ${items ? `<ul style="padding-left:20px;color:#2d3748;margin-bottom:12px;">${items}</ul>` : ""}
@@ -163,7 +163,7 @@ function buildReportHtml(report: ValidationReport, title: string): string {
     ).join("")
 
     docsHtml = `
-      <h2 style="color:#2b6cb0;border-left:4px solid #2b6cb0;padding-left:12px;margin:24px 0 12px;">Documents Reviewed</h2>
+      <h2 style="color:#2b6cb0;border-left:1px solid #2b6cb0;padding-left:12px;margin:24px 0 12px;">Documents Reviewed</h2>
       <div>${docItems}</div>`
   }
 
