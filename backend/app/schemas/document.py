@@ -19,6 +19,9 @@ class DocumentUpdate(BaseModel):
     extracted_data: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]] = None
     reviewed_data: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]] = None
     review_decision: Optional[str] = None
+    # Reviewers persist per-field review decisions here under the "review" key
+    # (merged client-side with the existing metadata to avoid clobbering).
+    extraction_metadata: Optional[Dict[str, Any]] = None
 
 class DocumentListItem(DocumentBase):
     """List-view document: everything except ocr_pages, the per-page OCR

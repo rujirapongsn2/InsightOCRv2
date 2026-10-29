@@ -102,11 +102,31 @@ export function PDFViewer({ fileUrl, className = "", highlight, pageWords }: PDF
   }, [highlight, numPages, pageWords])
 
   // Bring the box into view once per new result; later re-renders (zoom, status) must not pull the view back.
+  // Auto-zoom: when the evidence box is small relative to the viewport, zoom in so it reads clearly,
+  // then re-center. Runs once per new `located` result; manual zoom afterwards is untouched.
   useEffect(() => {
     if (!located) return
-    const frame = window.requestAnimationFrame(() =>
-      boxRef.current?.scrollIntoView({ block: "center", inline: "center", behavior: "smooth" }))
-    return () => window.cancelAnimationFrame(frame)
+    let recenterTimer = 0
+    const frame = window.requestAnimationFrame(() => {
+      const box = boxRef.current
+      const scroller = box?.closest(".overflow-auto") as HTMLElement | null
+      if (box && scroller) {
+        const boxWidth = box.getBoundingClientRect().width
+        const targetWidth = scroller.clientWidth * 0.55
+        const needed = boxWidth > 0 ? targetWidth / boxWidth : 1
+        const nextScale = Math.min(Math.max(scale * needed, scale), 3.0)
+        if (nextScale > scale + 0.05) {
+          setScale(nextScale)
+          // The canvas re-renders asynchronously at the new scale; re-center once it settles.
+          recenterTimer = window.setTimeout(() =>
+            boxRef.current?.scrollIntoView({ block: "center", inline: "center", behavior: "smooth" }), 300)
+          return
+        }
+      }
+      boxRef.current?.scrollIntoView({ block: "center", inline: "center", behavior: "smooth" })
+    })
+    return () => { window.cancelAnimationFrame(frame); window.clearTimeout(recenterTimer) }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [located])
 
   // Fetch PDF with auth headers
@@ -311,8 +331,14 @@ export function PDFViewer({ fileUrl, className = "", highlight, pageWords }: PDF
               {located?.page === pageNumber && rotation === 0 && <div
                 ref={boxRef}
                 aria-label={highlight?.label ? `Source of ${highlight.label}` : "Source evidence region"}
-                className="pointer-events-none absolute rounded-sm border-2 border-amber-500 bg-amber-300/25"
-                style={{ left: `${located.bbox.x}%`, top: `${located.bbox.y}%`, width: `${located.bbox.width}%`, height: `${located.bbox.height}%` }}
+                className="pointer-events-none absolute rounded-sm border-[3px] border-amber-500 bg-amber-400/30"
+                style={{
+                    left: `${located.bbox.x}%`, top: `${located.bbox.y}%`, width: `${located.bbox.width}%`, height: `${located.bbox.height}%`,
+                    // Halo ring + glow so the box stays obvious on white documents.
+                    boxShadow: "0 0 0 3px rgba(245, 158, 11, 0.35), 0 0 14px 4px rgba(245, 158, 11, 0.45), inset 0 0 0 1px rgba(180, 83, 9, 0.4)",
+                    outline: "1px solid rgba(180, 83, 9, 0.55)",
+                    outlineOffset: "1px",
+                }}
               />}
               </div>
             </Document>

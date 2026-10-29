@@ -11,8 +11,11 @@ export interface InputProps extends Omit<React.InputHTMLAttributes<HTMLInputElem
 const Input = React.forwardRef<HTMLInputElement, InputProps>(
     ({ className, type = "text", error, disabled, required, value, name, autoFocus, placeholder, onChange, "aria-label": ariaLabel, ...props }, ref) => {
         const label = ariaLabel || placeholder || name || "Input"
-        const inputType: "text" | "email" | "password" =
-            type === "email" ? "email" : type === "password" ? "password" : "text"
+        // Pass native input types through so date pickers, numeric keypads, and
+        // other standard affordances keep working. TextInput's prop type only
+        // declares text/email/password, but the value flows to a native <input>
+        // at runtime, so any valid input type works.
+        const inputType = (typeof type === "string" && type.length > 0 ? type : "text") as "text"
 
         return (
             <TextInput

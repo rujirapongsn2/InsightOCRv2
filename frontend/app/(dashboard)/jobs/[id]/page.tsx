@@ -3,7 +3,7 @@
 import { useEffect, useState, useRef, useMemo } from "react"
 import { useParams, useRouter } from "next/navigation"
 import Link from "next/link"
-import { ArrowLeft, Upload, FileText, Loader2, Eye, X, Trash2, AlertTriangle, Bot, ChevronDown, Pencil, Check, Plug, Workflow, Cloud, Send, Braces, RefreshCw, LocateFixed } from "lucide-react"
+import { ArrowLeft, Upload, FileText, Loader2, Eye, X, Trash2, AlertTriangle, Bot, ChevronDown, Pencil, Check, Plug, Workflow, Cloud, Send, Braces, RefreshCw, LocateFixed, FileCheck, Minus, XCircle, CheckCircle2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Modal } from "@/components/ui/modal"
 import { Input } from "@/components/ui/input"
@@ -161,6 +161,10 @@ export default function JobDetailPage() {
     const [mappingBusy, setMappingBusy] = useState(false)
     const [mappingError, setMappingError] = useState("")
     const [mobileView, setMobileView] = useState<"pdf" | "fields">("fields")
+    const [saveNotice, setSaveNotice] = useState("")
+    const reviewOverlayRef = useRef<HTMLDivElement | null>(null)
+    const initialReviewRef = useRef<{ ocr: string; data: string } | null>(null)
+    const keydownHandlerRef = useRef<((event: KeyboardEvent) => void) | null>(null)
     const [structuredJsonDraft, setStructuredJsonDraft] = useState("{}")
     const [structuredJsonError, setStructuredJsonError] = useState<string | null>(null)
     const [retryEngine, setRetryEngine] = useState<OcrEngine>("tesseract_ocr")
@@ -816,6 +820,123 @@ export default function JobDetailPage() {
         }
     }
 
+    /** Human-readable preview for compact field rows: arrays/objects/booleans never render as [object Object]. */
+    const previewOf = (value: unknown, missing?: boolean): string => {
+        if (value === null || value === undefined || value === "") return missing ? "— ไม่พบ —" : "—"
+        if (Array.isArray(value)) {
+            if (value.length === 0) return "— รายการว่าง —"
+            const first = value[0]
+            const firstSummary = first !== null && typeof first === "object" ? JSON.stringify(first) : String(first)
+            const clipped = firstSummary.length > 48 ? `${firstSummary.slice(0, 48)}…` : firstSummary
+            return `${value.length} รายการ · ${clipped}`
+        }
+        if (typeof value === "object") {
+            const json = JSON.stringify(value)
+            return json.length > 64 ? `${json.slice(0, 64)}…` : json
+        }
+        if (typeof value === "boolean") return value ? "ใช่" : "ไม่ใช่"
+        return String(value)
+    }
+
+    /** Status is always shape + color (never hue alone) so color-blind reviewers can tell states apart. */
+    const statusVisual = (status: string, resolved: boolean): { Icon: typeof AlertTriangle; cls: string; label: string } => {
+        if (resolved) return { Icon: CheckCircle2, cls: "text-emerald-600", label: "ตรวจแล้ว" }
+        if (status === "source_matched") return { Icon: FileCheck, cls: "text-blue-600", label: "ตรงเอกสาร" }
+        if (status === "missing") return { Icon: Minus, cls: "text-slate-400", label: "ไม่พบ" }
+        if (status === "failed") return { Icon: XCircle, cls: "text-red-600", label: "ผิดพลาด" }
+        return { Icon: AlertTriangle, cls: "text-amber-500", label: "รอตรวจ" }
+    }
+
+    const hasUnsavedChanges = () => {
+        if (!reviewDoc || !initialReviewRef.current) return false
+        const ocrChanged = editedOcrText !== initialReviewRef.current.ocr
+        const dataChanged = JSON.stringify(editedStructuredData ?? null) !== initialReviewRef.current.data
+        return ocrChanged || dataChanged
+    }
+
+    /** Close the review overlay, guarding against losing unsaved edits (Escape and Cancel both route here). */
+    const closeReview = () => {
+        if (hasUnsavedChanges()) {
+            const proceed = window.confirm("ยังมีการแก้ไขที่ยังไม่ได้บันทึก — ปิดหน้าตรวจเลยหรือไม่? (ยกเลิก = กลับไปทำงานต่อ)")
+            if (!proceed) return
+        }
+        setReviewDoc(null)
+        setSaveNotice("")
+    }
+
+    /** Jump to the next unresolved field in the given direction (wraps around); returns its name or null. */
+    const goNextField = (afterName?: string, direction: 1 | -1 = 1): string | null => {
+        const fields = reviewSchema?.fields || []
+        if (fields.length === 0) return null
+        const startIdx = afterName ? fields.findIndex((field) => field.name === afterName) : direction === 1 ? -1 : 0
+        for (let step = 1; step <= fields.length; step += 1) {
+            const field = fields[((startIdx + direction * step) % fields.length + fields.length) % fields.length]
+            if (!isFieldResolved(field.name)) {
+                setFieldFilter("all")
+                setExpandedField(field.name)
+                locateFieldByName(field.name)
+                requestAnimationFrame(() => document.getElementById(`field-row-${field.name}`)?.scrollIntoView({ behavior: "smooth", block: "center" }))
+                return field.name
+            }
+        }
+        return null
+    }
+
+    /** Resolve the current field the right way for its state, then move to the next unresolved one. */
+    const resolveAndNext = (fieldName: string) => {
+        const status = fieldStatusOf(fieldName)
+        if (status === "source_matched") confirmField(fieldName)
+        else if (status === "missing") confirmFieldMissing(fieldName)
+        else if (!dirtyFields.has(fieldName)) {
+            // Typed values resolve through dirtyFields on change; empty untouched
+            // values still count as a decision once the reviewer moves on.
+            confirmField(fieldName)
+        }
+        const next = goNextField(fieldName)
+        if (!next) setExpandedField(null)
+    }
+
+    // Keep the overlay-scoped keyboard handler fresh without re-binding listeners.
+    keydownHandlerRef.current = (event: KeyboardEvent) => {
+        if (!reviewDoc) return
+        if (event.key === "Escape") {
+            event.preventDefault()
+            closeReview()
+            return
+        }
+        if (event.key === "Tab") {
+            const overlay = reviewOverlayRef.current
+            if (!overlay) return
+            const focusables = Array.from(overlay.querySelectorAll<HTMLElement>('button, input, select, textarea, a[href], [tabindex]:not([tabindex="-1"])'))
+                .filter((el) => !(el as HTMLButtonElement).disabled && el.offsetParent !== null)
+            if (focusables.length === 0) return
+            const first = focusables[0]
+            const last = focusables[focusables.length - 1]
+            const active = document.activeElement
+            if (!overlay.contains(active)) { event.preventDefault(); first.focus() }
+            else if (event.shiftKey && active === first) { event.preventDefault(); last.focus() }
+            else if (!event.shiftKey && active === last) { event.preventDefault(); first.focus() }
+            return
+        }
+        const target = event.target as HTMLElement | null
+        const typing = target?.closest("input, textarea, select, [contenteditable]")
+        if (!typing && (event.key === "n" || event.key === "p") && (reviewTab === "fields" || reviewTab === "json")) {
+            event.preventDefault()
+            goNextField(expandedField ?? undefined, event.key === "n" ? 1 : -1)
+        }
+    }
+
+    useEffect(() => {
+        const listener = (event: KeyboardEvent) => keydownHandlerRef.current?.(event)
+        window.addEventListener("keydown", listener)
+        return () => window.removeEventListener("keydown", listener)
+    }, [])
+
+    // Move focus into the dialog when it opens.
+    useEffect(() => {
+        if (reviewDoc) reviewOverlayRef.current?.focus()
+    }, [reviewDoc?.id])
+
     const handleReviewTab = (tab: "fields" | "json" | "text" | "ocr") => {
         if (tab === "json") handleStructuredDataTabChange("advanced")
         else if (structuredDataTab === "advanced") handleStructuredDataTabChange("fields")
@@ -897,6 +1018,21 @@ export default function JobDetailPage() {
                 // Ignore a slow answer for a document the reviewer has already left.
                 if (!detail || reviewDocId.current !== doc.id) return
                 setReviewPageWords(pageWordsFrom(detail.ocr_pages))
+                // Seed review decisions persisted from a previous session (Save).
+                const savedReview = detail?.extraction_metadata?.review?.fields
+                if (savedReview && typeof savedReview === "object") {
+                    const confirmed = new Set<string>()
+                    const missing = new Set<string>()
+                    const edited = new Set<string>()
+                    for (const [name, info] of Object.entries(savedReview as Record<string, { state?: string }>)) {
+                        if (info?.state === "confirmed") confirmed.add(name)
+                        else if (info?.state === "confirmed_missing") missing.add(name)
+                        else if (info?.state === "edited") edited.add(name)
+                    }
+                    setConfirmedFields(confirmed)
+                    setConfirmedMissing(missing)
+                    setDirtyFields(edited)
+                }
             })
             .catch(() => { /* positions are optional; the text layer is still searched */ })
         setReviewDoc(doc)
@@ -911,6 +1047,8 @@ export default function JobDetailPage() {
         setArrayDrafts({})
         setStructuredDataTab("fields")
         setStructuredJsonDraft(JSON.stringify(structuredData && typeof structuredData === "object" ? structuredData : {}, null, 2))
+        initialReviewRef.current = { ocr: doc.ocr_text || "", data: JSON.stringify(structuredData && typeof structuredData === "object" ? structuredData : null) }
+        setSaveNotice("")
         setStructuredJsonError(null)
         setRetryEngine("tesseract_ocr")
     }
@@ -951,6 +1089,13 @@ export default function JobDetailPage() {
 
         try {
             const token = typeof window !== "undefined" ? localStorage.getItem("token") : null
+            // Persist per-field review decisions so reopening the document keeps them.
+            const reviewedAt = new Date().toISOString()
+            const reviewFields: Record<string, { state: string; at: string }> = {}
+            confirmedFields.forEach((name) => { reviewFields[name] = { state: "confirmed", at: reviewedAt } })
+            confirmedMissing.forEach((name) => { reviewFields[name] = { state: "confirmed_missing", at: reviewedAt } })
+            dirtyFields.forEach((name) => { if (!reviewFields[name]) reviewFields[name] = { state: "edited", at: reviewedAt } })
+            const nextMetadata = { ...(reviewDoc.extraction_metadata || {}), review: { fields: reviewFields } }
             const res = await fetch(`${apiBase}/documents/${reviewDoc.id}`, {
                 method: "PUT",
                 headers: {
@@ -961,12 +1106,21 @@ export default function JobDetailPage() {
                     ocr_text: editedOcrText,
                     status: "reviewed",
                     ...(reviewedData !== undefined ? { reviewed_data: reviewedData } : {}),
+                    extraction_metadata: nextMetadata,
                 })
             })
 
             if (res.ok) {
+                // Review queue: move straight to the next document waiting for review.
+                const nextDoc = documents.find((d) => d.id !== reviewDoc.id && d.status === "extraction_completed")
                 await fetchDocuments()
-                setReviewDoc(null)
+                if (nextDoc) {
+                    handleReview(nextDoc)
+                    setSaveNotice(`บันทึกแล้ว — กำลังตรวจถัดไป: ${nextDoc.filename}`)
+                } else {
+                    setReviewDoc(null)
+                    setSaveNotice("")
+                }
             } else {
                 alert("Save failed")
             }
@@ -1190,6 +1344,12 @@ export default function JobDetailPage() {
             page: evidence?.page, bbox: evidence?.bbox, label: name,
             texts: evidenceSearchTexts(value, evidence, type),
         })
+    }
+
+    /** Expand-and-show: locate a field's evidence by name (row click and keyboard queue both use this). */
+    const locateFieldByName = (name: string) => {
+        const value = editedStructuredData && !Array.isArray(editedStructuredData) ? editedStructuredData[name] : undefined
+        locateField(name, value, reviewSchema?.fields.find((field) => field.name === name)?.type, mappingReport?.fields?.[name])
     }
     const reviewIsPdf = !!reviewDoc && !(previewImageExtensions.has(reviewDoc.filename.toLowerCase().split('.').pop() || '')
         || reviewDoc.mime_type?.startsWith('image/'))
@@ -1663,21 +1823,21 @@ export default function JobDetailPage() {
 
             {/* Review Modal - Full Screen */}
             {reviewDoc && (
-                <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
-                    <div className="bg-white rounded-lg shadow-xl w-full h-[calc(100dvh-2rem)] max-w-[min(96vw,1600px)] flex flex-col">
+                <div ref={reviewOverlayRef} role="dialog" aria-modal="true" aria-label={`ตรวจเอกสาร ${reviewDoc.filename}`} tabIndex={-1}
+                    className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 outline-none">
+                    <div className="flex h-[calc(100dvh-2rem)] w-full max-w-[min(96vw,1600px)] flex-col rounded-lg bg-white shadow-xl">
                         {/* Header */}
                         <div className="flex items-center justify-between gap-4 px-6 py-3 border-b">
-                            <h2 className="min-w-0 truncate text-lg font-semibold">Preview: {reviewDoc.filename}</h2>
+                            <div className="min-w-0">
+                                <h2 className="truncate text-lg font-semibold">Preview: {reviewDoc.filename}</h2>
+                                {saveNotice && <p role="status" className="mt-0.5 truncate text-xs text-emerald-700">{saveNotice}</p>}
+                            </div>
                             {reviewSchema && (reviewTab === "fields" || reviewTab === "json") && (
                                 <div className="flex shrink-0 items-center gap-3 text-xs text-slate-500">
                                     {resolvedCount < statusCounts.all && (
-                                        <button type="button" onClick={() => {
-                                            const next = (reviewSchema?.fields || []).find((field) => !isFieldResolved(field.name))
-                                            if (!next) return
-                                            setFieldFilter("all")
-                                            setExpandedField(next.name)
-                                            requestAnimationFrame(() => document.getElementById(`field-row-${next.name}`)?.scrollIntoView({ behavior: "smooth", block: "center" }))
-                                        }} className="rounded-full border border-slate-300 px-2 py-0.5 text-slate-600 hover:bg-slate-50">ถัดไป →</button>
+                                        <button type="button" onClick={() => goNextField()}
+                                            title="ถัดไป (n) · ก่อนหน้า (p) · Enter ในแถวที่ขยาย = ยืนยันและถัดไป"
+                                            className="rounded-full border border-slate-300 px-2 py-0.5 text-slate-600 hover:bg-slate-50">ถัดไป →</button>
                                     )}
                                     <div className="flex items-center gap-2">
                                         <span className="whitespace-nowrap">ตรวจแล้ว {resolvedCount}/{statusCounts.all}</span>
@@ -1690,7 +1850,8 @@ export default function JobDetailPage() {
                             <Button
                                 variant="ghost"
                                 size="icon"
-                                onClick={() => setReviewDoc(null)}
+                                onClick={closeReview}
+                                aria-label="ปิดหน้าตรวจ"
                             >
                                 <X className="h-5 w-5" />
                             </Button>
@@ -1741,14 +1902,24 @@ export default function JobDetailPage() {
                             <div className={`min-h-0 flex-col gap-3 ${mobileView === "fields" ? "flex" : "hidden"} lg:flex lg:overflow-hidden`}>
                                 {/* Workspace tabs + mobile view toggle */}
                                 <div className="flex shrink-0 items-center gap-2">
-                                    <div className="inline-flex rounded-md border border-slate-200 bg-slate-50 p-0.5 text-xs" role="tablist" aria-label="Review workspace">
+                                    <div className="inline-flex rounded-md border border-slate-200 bg-slate-50 p-0.5 text-xs" role="tablist" aria-label="Review workspace"
+                                        onKeyDown={(event) => {
+                                            if (event.key !== "ArrowRight" && event.key !== "ArrowLeft") return
+                                            event.preventDefault()
+                                            const order = ["fields", "json", "text", "ocr"] as const
+                                            const idx = order.indexOf(reviewTab)
+                                            const next = order[(idx + (event.key === "ArrowRight" ? 1 : order.length - 1)) % order.length]
+                                            handleReviewTab(next)
+                                            requestAnimationFrame(() => document.getElementById(`review-tab-${next}`)?.focus())
+                                        }}>
                                         {([
                                             ["fields", "ฟิลด์"],
                                             ["json", "{} JSON"],
                                             ["text", "ข้อความ"],
                                             ["ocr", "OCR"],
                                         ] as const).map(([key, text]) => (
-                                            <button key={key} type="button" role="tab" aria-selected={reviewTab === key}
+                                            <button key={key} type="button" role="tab" id={`review-tab-${key}`} aria-selected={reviewTab === key}
+                                                tabIndex={reviewTab === key ? 0 : -1}
                                                 onClick={() => handleReviewTab(key)}
                                                 className={`rounded px-2.5 py-1 font-medium transition-colors ${reviewTab === key ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}>
                                                 {text}
@@ -1887,7 +2058,7 @@ export default function JobDetailPage() {
                                                         </span>
                                                     </div>
                                                 )}
-                                                <div className="flex shrink-0 items-center gap-1.5 overflow-x-auto pb-1 text-xs [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+                                                <div className="flex shrink-0 items-center gap-1.5 overflow-x-auto px-0.5 pb-1 text-xs [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
                                                     {([
                                                         ["needs_review", `รอตรวจ ${statusCounts.needs_review}`, "border-amber-300 bg-amber-50 text-amber-800"],
                                                         ["source_matched", `ตรงเอกสาร ${statusCounts.source_matched}`, "border-blue-300 bg-blue-50 text-blue-800"],
@@ -1895,8 +2066,10 @@ export default function JobDetailPage() {
                                                         ["failed", `ผิดพลาด ${statusCounts.failed}`, "border-red-300 bg-red-50 text-red-700"],
                                                         ["all", `ทั้งหมด ${statusCounts.all}`, "border-slate-300 text-slate-600"],
                                                     ] as const).map(([key, text, className]) => (
-                                                        <button key={key} type="button" onClick={() => setFieldFilter(key)}
-                                                            className={`shrink-0 whitespace-nowrap rounded-full border px-2 py-0.5 ${className} ${fieldFilter === key ? "ring-2 ring-offset-1 ring-blue-400 font-medium" : "opacity-80"}`}>
+                                                        <button key={key} type="button"
+                                                            aria-pressed={fieldFilter === key}
+                                                            onClick={() => setFieldFilter(key)}
+                                                            className={`shrink-0 whitespace-nowrap rounded-full border px-2 py-0.5 transition-opacity ${className} ${fieldFilter === key ? "ring-1 ring-inset ring-blue-500 shadow-sm font-medium" : "opacity-80 hover:opacity-100"}`}>
                                                             {text}
                                                         </button>
                                                     ))}
@@ -1922,31 +2095,40 @@ export default function JobDetailPage() {
                                                     const candidateValue = fieldEvidence?.lx_candidate?.value ?? fieldEvidence?.alternative?.value
                                                     const candidateLabel = fieldEvidence?.alternative ? "engine อื่นเสนอ" : "ค่าที่ AI เสนอ"
                                                     const statusText = fieldStatus === "source_matched" ? "ตรงเอกสาร" : fieldStatus === "missing" ? "ไม่พบ" : fieldStatus === "failed" ? "ผิดพลาด" : "รอตรวจ"
-                                                    const dotColor = fieldResolved ? "bg-emerald-500"
-                                                        : fieldStatus === "needs_review" ? "bg-amber-500"
-                                                        : fieldStatus === "failed" ? "bg-red-500"
-                                                        : fieldStatus === "missing" ? "bg-slate-300"
-                                                        : "bg-blue-500"
+                                                    const statusGlyph = statusVisual(fieldStatus, fieldResolved)
                                                     const rowBorder = fieldResolved ? "border-emerald-200 bg-emerald-50/30"
                                                         : expanded ? "border-blue-300 bg-blue-50/30"
                                                         : fieldStatus === "needs_review" ? "border-amber-200"
                                                         : "border-slate-200"
                                                     return (
                                                         <div key={field.name} id={`field-row-${field.name}`} className={`shrink-0 overflow-hidden rounded border ${rowBorder}`}>
-                                                            <button type="button" aria-expanded={expanded} onClick={() => setExpandedField(expanded ? null : field.name)}
+                                                            <button type="button" aria-expanded={expanded}
+                                                                aria-label={`${field.name}, ${fieldResolved ? "ตรวจแล้ว" : statusText}, ${previewOf(value, fieldStatus === "missing")}`}
+                                                                onClick={() => {
+                                                                    setExpandedField(expanded ? null : field.name)
+                                                                    // Expanding a row immediately shows where its value lives in the document.
+                                                                    if (!expanded) locateFieldByName(field.name)
+                                                                }}
                                                                 className="flex w-full items-center gap-2 px-2 py-1.5 text-left">
-                                                                <span className={`h-2 w-2 shrink-0 rounded-full ${dotColor}`} title={statusText} />
+                                                                <statusGlyph.Icon aria-hidden="true" className={`h-4 w-4 shrink-0 ${statusGlyph.cls}`} />
                                                                 <span className="w-2/5 shrink-0 truncate text-sm font-medium text-slate-700" title={field.name}>
                                                                     {field.name}{field.required && <span className="text-red-500"> *</span>}
                                                                 </span>
-                                                                <span className="min-w-0 flex-1 truncate text-sm font-normal text-slate-500" title={stringValue}>
-                                                                    {stringValue || (fieldStatus === "missing" ? "— ไม่พบ —" : "—")}
+                                                                <span className="min-w-0 flex-1 truncate text-sm font-normal text-slate-500" title={previewOf(value, fieldStatus === "missing")}>
+                                                                    {previewOf(value, fieldStatus === "missing")}
                                                                 </span>
                                                                 {fieldResolved && <Check className="h-3.5 w-3.5 shrink-0 text-emerald-600" />}
                                                                 <ChevronDown className={`h-4 w-4 shrink-0 text-slate-400 transition-transform ${expanded ? "rotate-180" : ""}`} />
                                                             </button>
                                                             {expanded && (
-                                                                <div className="space-y-2 border-t border-slate-100 bg-white px-2 py-2">
+                                                                <div className="space-y-2 border-t border-slate-100 bg-white px-2 py-2"
+                                                                    onKeyDown={(event) => {
+                                                                        const target = event.target as HTMLElement
+                                                                        if (event.key === "Enter" && !target.closest("textarea") && !target.closest("button")) {
+                                                                            event.preventDefault()
+                                                                            resolveAndNext(field.name)
+                                                                        }
+                                                                    }}>
                                                                     {field.type === "boolean" ? (
                                                                         <select
                                                                             value={value === true ? "true" : value === false ? "false" : ""}
@@ -1981,18 +2163,30 @@ export default function JobDetailPage() {
                                                                             }}
                                                                         />
                                                                     )}
-                                                                    {fieldStatus === "needs_review" && candidateValue !== undefined && candidateValue !== null && String(candidateValue) !== stringValue && (
+                                                                    {((fieldStatus === "needs_review" || fieldEvidence?.upgraded_from_conflict)) && candidateValue !== undefined && candidateValue !== null && previewOf(candidateValue) !== previewOf(value) && (
                                                                         <span className="flex flex-wrap items-center gap-2 text-xs text-amber-800">
-                                                                            {candidateLabel}: <code className="rounded bg-amber-50 px-1">{String(candidateValue)}</code>
+                                                                            {fieldEvidence?.upgraded_from_conflict
+                                                                                ? "ค่าเดิมที่ถูกแทนที่ (ค่าปัจจุบันมีตำแหน่งยืนยันในเอกสาร):"
+                                                                                : fieldEvidence?.alternative?.grounded
+                                                                                    ? "engine อื่นเสนอ (มีตำแหน่งในเอกสาร):"
+                                                                                    : `${candidateLabel}:`}
+                                                                            <code className="max-w-full truncate rounded bg-amber-50 px-1" title={previewOf(candidateValue)}>{previewOf(candidateValue)}</code>
                                                                             <button type="button" onClick={() => { updateStructuredField(field.name, candidateValue); confirmField(field.name) }}
                                                                                 className="rounded border border-amber-300 bg-amber-50 px-1.5 py-0.5">ใช้ค่านี้</button>
                                                                         </span>
                                                                     )}
                                                                     <div className="flex flex-wrap items-center gap-1.5 text-xs">
-                                                                        {fieldStatus === "source_matched" && !confirmedFields.has(field.name) && (
+                                                                        <span className="inline-flex items-center gap-1 rounded bg-slate-100 px-1.5 py-0.5 font-medium text-slate-700">
+                                                                            <statusGlyph.Icon aria-hidden="true" className={`h-3 w-3 ${statusGlyph.cls}`} />
+                                                                            {fieldResolved ? "ตรวจแล้ว" : statusText}
+                                                                        </span>
+                                                                        {!fieldResolved && fieldStatus !== "missing" && fieldStatus !== "failed" && (
                                                                             <button type="button" onClick={() => confirmField(field.name)}
                                                                                 className="rounded border border-emerald-300 bg-emerald-50 px-1.5 py-0.5 text-emerald-800"
-                                                                                title="ยืนยันว่าค่านี้ตรงกับเอกสารแล้ว">ยืนยัน</button>
+                                                                                title={fieldStatus === "source_matched" ? "ยืนยันว่าค่านี้ตรงกับเอกสารแล้ว" : "ตรวจแล้วค่านี้ถูกต้อง — ทำเครื่องหมายว่ายืนยัน"}
+                                                                                onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); resolveAndNext(field.name) } }}>
+                                                                                {fieldStatus === "source_matched" ? "ยืนยัน" : "ยืนยันถูกต้อง"}
+                                                                            </button>
                                                                         )}
                                                                         {fieldStatus === "missing" && !confirmedMissing.has(field.name) && (
                                                                             <button type="button" onClick={() => confirmFieldMissing(field.name)}
@@ -2006,8 +2200,8 @@ export default function JobDetailPage() {
                                                                                 <RefreshCw className={`h-3 w-3 ${fieldRetryBusy === field.name ? "animate-spin" : ""}`} /> Retry ฟิลด์นี้
                                                                             </button>
                                                                         )}
-                                                                        {reviewIsPdf && stringValue && (
-                                                                            <button type="button" onClick={() => locateField(field.name, value, field.type)}
+                                                                        {reviewIsPdf && ((typeof value === "string" || typeof value === "number") || fieldEvidence?.quote || fieldEvidence?.raw_text) && (
+                                                                            <button type="button" onClick={() => locateField(field.name, value, field.type, fieldEvidence)}
                                                                                 className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-blue-700 hover:bg-blue-50"
                                                                                 title={`Show where ${field.name} is in the document`}>
                                                                                 <LocateFixed className="h-3.5 w-3.5" /> Show in document
@@ -2089,7 +2283,7 @@ export default function JobDetailPage() {
                             {/* Right: Cancel + Save */}
                             <div className="flex items-center gap-3">
                                 {mappingError && <span className="max-w-xs truncate text-xs text-red-600" title={mappingError}>{mappingError}</span>}
-                                <Button variant="outline" onClick={() => setReviewDoc(null)}>
+                                <Button variant="outline" onClick={closeReview}>
                                     Cancel
                                 </Button>
                                 <Button onClick={handleSaveReview} className="min-w-[120px]">

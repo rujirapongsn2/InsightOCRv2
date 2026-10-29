@@ -5,9 +5,9 @@ import { AlertTriangle, Check, RefreshCw, Search } from "lucide-react"
 import { getApiBaseUrl } from "@/lib/api"
 
 type Evidence = { status?: string; reason?: string; quote?: string; raw_text?: string; page?: number; retained_previous_value?: boolean;
-    alternative?: { value: unknown; provider: string };
+    alternative?: { value: unknown; provider: string; grounded?: boolean };
     bbox?: { x: number; y: number; width: number; height: number };
-    lx_candidate?: { value?: unknown } }
+    lx_candidate?: { value?: unknown }; upgraded_from_conflict?: boolean }
 export type MappingReport = { status?: string; fields?: Record<string, Evidence>; attempts?: unknown[] }
 
 export type MappingResult = { mapping?: MappingReport; values?: Record<string, unknown> }
