@@ -10,20 +10,93 @@
 
 @import "tailwindcss/utilities.css" layer(utilities);
 
+/* ─── Softnix PMS DESIGN.md alignment ───────────────────────────────────
+   Remap the default Tailwind palette scales the app actually uses so every
+   existing utility resolves to the PMS tokens (Atlassian-like calm): borders
+   #dddee1, canvas #f8f8f8, ink #292a2e, muted #6b6e76, primary #1868db,
+   and the PMS status pill palette. Pages keep their utility classes; only
+   the values change. */
+@theme inline {
+  /* Neutrals */
+  --color-slate-50:  #f8f8f8;  /* surface-base canvas */
+  --color-slate-100: #f0f1f2;  /* secondary / muted */
+  --color-slate-200: #dddee1;  /* border */
+  --color-slate-300: #c8c9cd;  /* border hover */
+  --color-slate-400: #8f9199;
+  --color-slate-500: #6b6e76;  /* muted text */
+  --color-slate-600: #505258;
+  --color-slate-700: #3d3f44;
+  --color-slate-800: #35373b;
+  --color-slate-900: #292a2e;  /* foreground */
+  --color-slate-950: #1f2023;
+
+  /* Primary / link / selection */
+  --color-blue-50:  #e9f2fe;   /* selected */
+  --color-blue-100: #d5e7fd;
+  --color-blue-200: #cfe1fd;   /* info pill bg */
+  --color-blue-300: #8fb8f6;   /* timeline fill */
+  --color-blue-400: #6ba3f0;
+  --color-blue-500: #4688ec;   /* ring */
+  --color-blue-600: #1868db;   /* primary */
+  --color-blue-700: #1558bc;   /* selected-foreground */
+  --color-blue-800: #12479e;
+
+  /* Done / success */
+  --color-emerald-50:  #baf3db;
+  --color-emerald-100: #a4eecd;
+  --color-emerald-200: #7ee2b8;
+  --color-emerald-300: #57d6a3;
+  --color-emerald-400: #3fbd8b;
+  --color-emerald-500: #2da06e;
+  --color-emerald-600: #216e4e;
+  --color-emerald-700: #1d5c40;
+  --color-emerald-800: #184a34;
+
+  /* Warning / blocked */
+  --color-amber-50:  #fce4a6;  /* warning pill bg */
+  --color-amber-100: #fedec8;  /* blocked pill bg */
+  --color-amber-200: #fec195;
+  --color-amber-300: #fdb26a;
+  --color-amber-400: #ef9a3d;
+  --color-amber-500: #cf7a15;
+  --color-amber-600: #a86407;
+  --color-amber-700: #7f5f01;  /* warning text */
+  --color-amber-800: #9e4c00;  /* blocked text */
+
+  /* Danger / overdue */
+  --color-red-50:  #ffd5d2;
+  --color-red-100: #ffc4c0;
+  --color-red-200: #ffada7;
+  --color-red-300: #f98f87;
+  --color-red-400: #ec6a60;
+  --color-red-500: #d0453a;
+  --color-red-600: #c03d33;
+  --color-red-700: #ae2e24;
+  --color-red-800: #93251d;
+
+  /* green-* utilities follow the done palette */
+  --color-green-50:  #baf3db;
+  --color-green-100: #a4eecd;
+  --color-green-200: #7ee2b8;
+  --color-green-500: #2da06e;
+  --color-green-600: #216e4e;
+  --color-green-700: #1d5c40;
+}
+
 /* ─── Softnix Design System Tokens ──────────────────────────────────────── */
 
 :root {
-  /* Brand */
-  --softnix-blue:        #2786C2;
-  --softnix-blue-deep:   #1A5A8A;
+  /* Brand — aligned with PMS DESIGN.md primary */
+  --softnix-blue:        #1868DB;
+  --softnix-blue-deep:   #1558BC;
   --layer2-orange:       #F3903F;
   --layer3-lime:         #A9CB2E;
   --info-blue-light:     #5EADD6;
 
   /* Surface */
   --canvas-white:        #ffffff;
-  --off-white:           #F8F9FA;
-  --hairline-gray:       #E2E8F0;
+  --off-white:           #F8F8F8;
+  --hairline-gray:       #DDDEE1;
 
   /* Text */
   --ink-navy:            #0D1B2A;
@@ -237,4 +310,29 @@ p, span, li, td, th, label, a {
   50% {
     box-shadow: 0 0 0 5px rgba(163, 230, 53, 0.60), 0 0 26px 7px rgba(132, 204, 22, 0.95);
   }
+}
+
+/* ─── PMS DESIGN.md typography ──────────────────────────────────────────
+   Unlayered so it wins over the astryx-theme layer: one system stack with
+   Noto Sans Thai, no webfont, Thai-first line-height. */
+html, body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica,
+               Arial, "Noto Sans Thai", sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+/* ─── PMS DESIGN.md radius ──────────────────────────────────────────────
+   Controls/fields 8px, content surfaces 10px, xl 12px. Overrides the
+   theme-neutral 10/12px defaults. Unlayered so it wins. */
+:root {
+  --radius-element: 0.5rem;    /* 8px — inputs, fields, controls */
+  --radius-container: 0.625rem;/* 10px — cards, dialogs, menus (surface) */
+  --radius-page: 0.75rem;      /* 12px — xl */
+}
+
+/* Compact button variant derives element-4px (=4px, too tight for the PMS
+   6px button spec). Pinned to this @astryxdesign/core version's class. */
+.xh8ntw8 {
+  --_button-radius: 0.375rem; /* 6px — PMS secondary/outline buttons */
 }

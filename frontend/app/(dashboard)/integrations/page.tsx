@@ -162,7 +162,7 @@ const CATALOG: {
         FallbackIcon: Zap,
         iconBg: "bg-red-50",
         iconColor: "text-red-500",
-        accentColor: "border-red-100 hover:border-red-200",
+        accentColor: "border-slate-200 hover:border-slate-300",
     },
     {
         type: "llm",
@@ -173,7 +173,7 @@ const CATALOG: {
         FallbackIcon: Bot,
         iconBg: "bg-sky-50",
         iconColor: "text-sky-600",
-        accentColor: "border-sky-100 hover:border-sky-200",
+        accentColor: "border-slate-200 hover:border-slate-300",
     },
     {
         type: "softnix_genai",
@@ -183,7 +183,7 @@ const CATALOG: {
         FallbackIcon: Bot,
         iconBg: "bg-cyan-50",
         iconColor: "text-cyan-600",
-        accentColor: "border-cyan-100 hover:border-cyan-200",
+        accentColor: "border-slate-200 hover:border-slate-300",
     },
     {
         type: "gdrive",
@@ -193,7 +193,7 @@ const CATALOG: {
         FallbackIcon: HardDrive,
         iconBg: "bg-blue-50",
         iconColor: "text-blue-500",
-        accentColor: "border-blue-100 hover:border-blue-200",
+        accentColor: "border-slate-200 hover:border-slate-300",
     },
     {
         type: "onedrive",
@@ -203,7 +203,7 @@ const CATALOG: {
         FallbackIcon: Cloud,
         iconBg: "bg-sky-50",
         iconColor: "text-sky-500",
-        accentColor: "border-sky-100 hover:border-sky-200",
+        accentColor: "border-slate-200 hover:border-slate-300",
     },
 ]
 
@@ -1150,8 +1150,8 @@ export default function IntegrationsPage() {
             {/* ─── Page header ─── */}
             <div className="flex items-start justify-between gap-4">
                 <div>
-                    <h2 className="text-[1.625rem] font-bold leading-tight text-slate-950">Integrations</h2>
-                    <p className="mt-1.5 text-[0.9375rem] leading-6 text-slate-600">Connect outbound channels for the OCR pipeline</p>
+                    <h2 className="text-2xl font-semibold leading-tight text-slate-900">Integrations</h2>
+                    <p className="mt-1 text-sm leading-6 text-slate-500">Connect outbound channels for the OCR pipeline</p>
                 </div>
                 {(isAdmin || isManager) && (
                     <Button variant="outline" size="sm" onClick={() => setShowTemplateModal(true)} className="shrink-0">
@@ -1168,20 +1168,20 @@ export default function IntegrationsPage() {
                     const activeCount = integrations.filter(i => i.type === cat.type && i.status === "active").length
                     return (
                         <div key={cat.type}
-                            className={`bg-white rounded-xl border-2 ${cat.accentColor} p-5 flex flex-col items-center text-center gap-3 transition-all shadow-sm hover:shadow-md`}>
+                            className={`bg-white rounded-lg border ${cat.accentColor} p-5 flex flex-col items-center text-center gap-3 transition-colors shadow-sm`}>
                             {/* Logo */}
-                            <div className={`w-16 h-16 rounded-2xl ${cat.iconBg} flex items-center justify-center shadow-sm`}>
+                            <div className={`w-16 h-16 rounded-xl ${cat.iconBg} flex items-center justify-center`}>
                                 <LogoImage src={cat.logoUrl} alt={cat.label} FallbackIcon={cat.FallbackIcon} iconColor={cat.iconColor} size="lg" />
                             </div>
                             {/* Name */}
                             <div>
-                                <div className="text-[0.9375rem] font-semibold leading-snug text-slate-950">{cat.label}</div>
+                                <div className="text-[0.9375rem] font-semibold leading-snug text-slate-900">{cat.label}</div>
                                 <div className="mt-1 text-[0.8125rem] font-medium leading-5 text-slate-500">{cat.sublabel}</div>
                             </div>
                             {/* Status */}
                             {count > 0 ? (
-                                <span className="inline-flex items-center gap-1 rounded-full border border-green-200 bg-green-50 px-2.5 py-1 text-[0.8125rem] font-semibold leading-none text-green-700">
-                                    <span className="w-1.5 h-1.5 rounded-full bg-green-500 inline-block" />
+                                <span className="inline-flex items-center gap-1 rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-[0.8125rem] font-semibold leading-none text-emerald-700">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 inline-block" />
                                     {activeCount > 0 ? `${activeCount} active` : `${count} paused`}
                                 </span>
                             ) : (
@@ -1204,13 +1204,15 @@ export default function IntegrationsPage() {
             {/* ─── Connected integrations list ─── */}
             {integrations.length > 0 && (
                 <div className="space-y-3">
-                    <h3 className="text-[0.8125rem] font-bold uppercase tracking-[0.08em] text-slate-600">Connected ({integrations.length})</h3>
+                    <h3 className="text-sm font-semibold text-slate-900">
+                        Connected <span className="font-normal text-slate-500">({integrations.length})</span>
+                    </h3>
                     {integrations.map((integration) => {
                         const cat = CATALOG.find(c => c.type === integration.type)
                         const agentTools = integration.config.agentToolsVerification
                         const isLlmIntegration = integration.type === "llm" || integration.type === "softnix_genai"
                         return (
-                            <div key={integration.id} className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+                            <div key={integration.id} className="bg-white rounded-lg border border-slate-200 shadow-sm overflow-hidden">
                                 <div className="flex items-center gap-4 p-4 md:p-5">
                                     {/* Small logo */}
                                     <div className={`w-10 h-10 rounded-xl ${cat?.iconBg || "bg-slate-100"} flex items-center justify-center shrink-0`}>
@@ -1220,8 +1222,8 @@ export default function IntegrationsPage() {
                                     {/* Info */}
                                     <button type="button" className="flex-1 text-left min-w-0" onClick={() => toggleIntegrationDetails(integration.id)}>
                                         <div className="flex items-center gap-2 flex-wrap">
-                                            <span className="text-[0.9375rem] font-semibold leading-5 text-slate-950">{integration.name}</span>
-                                            <span className={`rounded-full px-2.5 py-1 text-xs font-semibold leading-none ${integration.status === "active" ? "bg-green-100 text-green-700" : "bg-amber-100 text-amber-700"}`}>
+                                            <span className="text-[0.9375rem] font-semibold leading-5 text-slate-900">{integration.name}</span>
+                                            <span className={`rounded-lg px-2.5 py-1 text-xs font-semibold leading-none ${integration.status === "active" ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
                                                 {integration.status === "active" ? "Active" : "Paused"}
                                             </span>
                                             {integration.is_shared && (

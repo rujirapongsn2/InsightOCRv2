@@ -2181,7 +2181,7 @@ export default function JobDetailPage() {
                                                                         </span>
                                                                     )}
                                                                     <div className="flex flex-wrap items-center gap-1.5 text-xs">
-                                                                        <span className="inline-flex items-center gap-1 rounded bg-slate-100 px-1.5 py-0.5 font-medium text-slate-700">
+                                                                        <span className="inline-flex items-center gap-1 rounded-lg bg-slate-100 px-1.5 py-0.5 font-medium text-slate-700">
                                                                             <statusGlyph.Icon aria-hidden="true" className={`h-3 w-3 ${statusGlyph.cls}`} />
                                                                             {fieldResolved ? "ตรวจแล้ว" : statusText}
                                                                         </span>
