@@ -25,6 +25,7 @@ __pycache__/
 *.pyc
 .DS_Store
 .claude/
+.impeccable/
 .pytest_cache/
 *.log
 connection_test_result.txt
