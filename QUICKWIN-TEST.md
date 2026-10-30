@@ -1342,6 +1342,31 @@ Date: 2026-06-30
   These production checks require the production run; local success alone is
   not proof of production health.
 
+# Shared schema create/edit workspace (2026-10-30)
+
+- Edit from `/schemas` and `/schemas/{id}/edit` uses the creation wizard with
+  the existing metadata and complete field collection, saved with PUT.
+- For fixed-position fields, attach a sample PDF, drag a saved box, resize its
+  lower-right handle, edit coordinates or table dividers, then use Read sample.
+  Selecting the same PDF again and replacing it must retain all fields.
+- Go to Save and back to Fields. The PDF, existing boxes and array settings
+  must remain. Verify mixed non-positioned fields through All fields.
+- Cancel or Escape after changing a field asks before discarding changes.
+  A rejected save keeps the draft open. Permission checks use the same backend
+  management predicate as PUT/DELETE, including group-based access.
+- Browser regression uses a real PDF with mocked API/auth responses, not
+  production records. It covers unchanged round trips, bbox move/resize,
+  PDF retention, sample read, save error recovery, direct editing, access denial,
+  creation, and desktop/mobile layouts with nonblank canvas checks.
+- Run `node --test frontend/test/schema-payload.test.mjs` for serialization
+  regressions. Run `node frontend/test/schema-edit.mjs` with Playwright available
+  and the frontend at `SCHEMA_TEST_URL` (default `http://127.0.0.1:3012`).
+  Set `SCHEMA_BROWSER_CHANNEL=chrome` to use installed Chrome. Screenshots are
+  written to `/tmp/insightdoc-schema-edit`, or `SCHEMA_SCREENSHOTS`.
+- Verified frontend production build, targeted ESLint/TypeScript, four payload
+  tests, and 19 backend schema extraction-profile/portability tests. Production
+  deployment and live OCR/provider accuracy are not part of this verification.
+
 ## Review warnings: fewer, accurate alerts
 
 - Document list badge now names the real problem: `mapping.status` of

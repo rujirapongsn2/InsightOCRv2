@@ -7,10 +7,13 @@ export function toSchemaPayloadField(field: SchemaField): Record<string, unknown
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const { id, studio, table_columns, items, ...rest } = field
   const payload: Record<string, unknown> = { ...rest }
+  if (field.type !== "array") delete payload.array_config
   if (field.type === "array" && items) payload.items = items
   if (field.type === "array" && !field.locator && table_columns?.length) {
-    payload.array_config = { item_type: "object", row_detection: "line", header_rows: 1, columns: table_columns }
+    const unchanged = field.array_config?.columns.length === table_columns.length && field.array_config.columns.every((column, index) => column.name === table_columns[index].name && column.type === table_columns[index].type)
+    if (!unchanged) payload.array_config = { item_type: "object", row_detection: "line", header_rows: 1, ...field.array_config, columns: table_columns }
   }
+  if (field.type === "array" && !field.locator && table_columns?.length === 0) delete payload.array_config
   if (field.validation_rules) {
     const rules = { ...field.validation_rules }
     if (!rules.source_labels?.length) delete rules.source_labels

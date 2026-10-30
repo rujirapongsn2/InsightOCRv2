@@ -10,6 +10,7 @@ import {
   SchemaData,
   SchemaField,
   StudioSession,
+  CreateSchemaResponse,
 } from "@/types/schema"
 import { validateSchema, hasErrors } from "@/lib/schema-validation"
 import { toSchemaPayloadField } from "@/lib/schema-studio"
@@ -48,9 +49,30 @@ const SchemaWizardContext = createContext<
   (SchemaWizardState & SchemaWizardActions) | undefined
 >(undefined)
 
-export function SchemaWizardProvider({ children, onSaved }: { children: ReactNode; onSaved?: () => void }) {
+export function SchemaWizardProvider({ children, onSaved, initialSchema }: { children: ReactNode; onSaved?: () => void; initialSchema?: CreateSchemaResponse }) {
   const router = useRouter()
-  const [state, setState] = useState<SchemaWizardState>(initialState)
+  const createInitialState = (): SchemaWizardState => initialSchema ? {
+    ...initialState,
+    schemaId: initialSchema.id,
+    startingPoint: initialSchema.fields.some((field) => field.locator) ? "fixed" : "ai",
+    schemaData: {
+      name: initialSchema.name,
+      description: initialSchema.description || "",
+      document_type: initialSchema.document_type,
+      ocr_engine: initialSchema.ocr_engine,
+      extraction_profile: initialSchema.extraction_profile,
+      template_id: initialSchema.template_id,
+    },
+    fields: initialSchema.fields.map((field, order) => ({
+      ...field,
+      id: field.id || generateId(),
+      order,
+      table_columns: field.type === "array" && !field.locator
+        ? field.array_config?.columns.map(({ name, type }) => ({ name, type }))
+        : field.table_columns,
+    })),
+  } : initialState
+  const [state, setState] = useState<SchemaWizardState>(createInitialState)
 
   const setCurrentStep = (step: WizardStep) => {
     setState(prev => ({ ...prev, currentStep: step }))
@@ -162,15 +184,15 @@ export function SchemaWizardProvider({ children, onSaved }: { children: ReactNod
         description: state.schemaData.description,
         document_type: state.schemaData.document_type,
         ocr_engine: state.schemaData.ocr_engine || "tesseract",
-        extraction_profile: "anydoc_hybrid",
+        extraction_profile: state.schemaData.extraction_profile || "anydoc_hybrid",
         fields: state.fields.map(toSchemaPayloadField),
         template_id: state.schemaData.template_id
       }
 
       const res = await fetch(
-        `${getApiBaseUrl()}/schemas/`,
+        `${getApiBaseUrl()}/schemas/${state.schemaId || ""}`,
         {
-          method: "POST",
+          method: state.schemaId ? "PUT" : "POST",
           headers: {
             "Content-Type": "application/json",
             ...(token ? { Authorization: `Bearer ${token}` } : {})
@@ -181,7 +203,7 @@ export function SchemaWizardProvider({ children, onSaved }: { children: ReactNod
 
       if (!res.ok) {
         const error = await res.json()
-        throw new Error(typeof error.detail === "string" ? error.detail : "Failed to create schema")
+        throw new Error(typeof error.detail === "string" ? error.detail : "Failed to save schema")
       }
       const created = await res.json()
       const studio = state.studio
@@ -211,7 +233,7 @@ export function SchemaWizardProvider({ children, onSaved }: { children: ReactNod
   }
 
   const resetWizard = () => {
-    setState(initialState)
+    setState(createInitialState())
   }
 
   const setStudio = (studio: StudioSession | null) => {

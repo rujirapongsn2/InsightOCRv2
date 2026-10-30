@@ -18,7 +18,7 @@ const FixedPositionFieldsStep = dynamic(
 )
 
 export function SchemaWizard({ embedded = false }: { embedded?: boolean }) {
-  const { currentStep, startingPoint, manualEntry } = useSchemaWizard()
+  const { schemaId, currentStep, startingPoint, manualEntry, setStartingPoint } = useSchemaWizard()
 
   // We only show the stepper and content after a starting point is chosen
   const showStepper = startingPoint !== null
@@ -62,7 +62,11 @@ export function SchemaWizard({ embedded = false }: { embedded?: boolean }) {
       )}
 
       {/* Wizard Content */}
-      <div className="bg-white border rounded-lg p-8 min-h-[400px]">
+      <div className={embedded ? "min-h-[400px] bg-white pt-5" : "bg-white border rounded-lg p-8 min-h-[400px]"}>
+        {schemaId && currentStep === 1 && <div className="mb-5 flex gap-1 border-b" aria-label="Field editor mode">
+          <Button variant={startingPoint === "fixed" ? "secondary" : "ghost"} onClick={() => setStartingPoint("fixed")} aria-pressed={startingPoint === "fixed"}>Fixed positions</Button>
+          <Button variant={startingPoint === "ai" ? "secondary" : "ghost"} onClick={() => setStartingPoint("ai")} aria-pressed={startingPoint === "ai"}>All fields</Button>
+        </div>}
         {/* Mode Selection (before any startingPoint is chosen) */}
         {startingPoint === null && <WizardStep1 />}
 
@@ -70,7 +74,7 @@ export function SchemaWizard({ embedded = false }: { embedded?: boolean }) {
         {startingPoint === "ai" && currentStep === 1 && (manualEntry ? <WizardStep3 /> : <AIFieldsStep />)}
 
         {/* Step 1: Fixed-position PDF fields */}
-        {startingPoint === "fixed" && currentStep === 1 && <FixedPositionFieldsStep />}
+        {(startingPoint === "fixed" || schemaId) && <div hidden={currentStep !== 1 || startingPoint !== "fixed"}><FixedPositionFieldsStep /></div>}
 
         {/* Step 1: Import Schema (upload file / paste JSON) */}
         {startingPoint === "import" && currentStep === 1 && <ImportSchemaStep />}

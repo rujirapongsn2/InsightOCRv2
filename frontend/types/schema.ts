@@ -134,6 +134,7 @@ export interface SchemaData {
 }
 
 export interface SchemaWizardState {
+  schemaId?: string
   currentStep: WizardStep
   startingPoint: StartingPoint | null
   manualEntry: boolean
@@ -220,6 +221,7 @@ export interface CreateSchemaResponse {
   fields: SchemaField[]
   template_id?: string
   created_by?: string
+  can_manage?: boolean
   created_at: string
   updated_at?: string
 }

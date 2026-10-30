@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useMemo, useRef, useState, type ChangeEvent, type PointerEvent } from "react"
+import { useEffect, useMemo, useRef, useState, type ChangeEvent, type PointerEvent, type KeyboardEvent } from "react"
 import { Document, Page, pdfjs } from "react-pdf"
 import { AlertCircle, ChevronLeft, ChevronRight, FileText, Loader2, LocateFixed, Plus, ScanLine, Sparkles, Trash2, ZoomIn, ZoomOut } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -47,8 +47,8 @@ const defaultArrayConfig = (): ArrayConfig => ({
   ],
 })
 
-function clamp(value: number) {
-  return Math.min(100, Math.max(0, value))
+function clamp(value: number, min = 0, max = 100) {
+  return Math.min(max, Math.max(min, value))
 }
 
 function validLocator(locator?: BboxLocator) {
@@ -72,7 +72,7 @@ function validArrayConfig(config?: ArrayConfig) {
 }
 
 export function FixedPositionFieldsStep() {
-  const { fields, setFields, addField, updateField, removeField, nextStep } = useSchemaWizard()
+  const { schemaId, fields, addField, updateField, removeField, nextStep } = useSchemaWizard()
   const [file, setFile] = useState<File | null>(null)
   const [pageNumber, setPageNumber] = useState(1)
   const [numPages, setNumPages] = useState(0)
@@ -85,6 +85,12 @@ export function FixedPositionFieldsStep() {
   const [zoom, setZoom] = useState(1)
   const [draggingColumnBoundary, setDraggingColumnBoundary] = useState<{ fieldId: string; boundaryIndex: number } | null>(null)
   const surfaceRef = useRef<HTMLDivElement>(null)
+  const pageContainerRef = useRef<HTMLDivElement>(null)
+  const [fitWidth, setFitWidth] = useState(BASE_PAGE_WIDTH)
+  const [renderedPage, setRenderedPage] = useState<string | null>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  const [selectedFieldId, setSelectedFieldId] = useState<string | null>(null)
+  const boxDrag = useRef<{ id: string; mode: "move" | "resize"; point: { x: number; y: number }; locator: BboxLocator } | null>(null)
   const pdfRef = useRef<PdfProxy | null>(null)
   // Find a value in the sample and propose its box.
   const [findValue, setFindValue] = useState("")
@@ -96,7 +102,18 @@ export function FixedPositionFieldsStep() {
   const ocrWords = useRef<Record<number, PageWord[]> | null>(null)
 
   const fileUrl = useMemo(() => file ? URL.createObjectURL(file) : null, [file])
+  const pageWidth = Math.round(fitWidth * zoom)
+  const renderKey = `${fileUrl}:${pageNumber}:${pageWidth}`
   useEffect(() => () => { if (fileUrl) URL.revokeObjectURL(fileUrl) }, [fileUrl])
+  useEffect(() => {
+    const container = pageContainerRef.current
+    if (!container) return
+    const observer = new ResizeObserver(([entry]) => {
+      if (entry.contentRect.width > 0) setFitWidth(Math.min(BASE_PAGE_WIDTH, entry.contentRect.width))
+    })
+    observer.observe(container)
+    return () => observer.disconnect()
+  }, [])
 
   const handleFileSelect = (event: ChangeEvent<HTMLInputElement>) => {
     const selected = event.target.files?.[0]
@@ -109,7 +126,7 @@ export function FixedPositionFieldsStep() {
     ocrWords.current = null
     setPendingField(null)
     setFindMessage(null)
-    setFields([])
+    pdfRef.current = null
     setPreviewValues({})
     setRawPreviewValues({})
     setSelection(null)
@@ -129,7 +146,7 @@ export function FixedPositionFieldsStep() {
   }
 
   const handlePointerDown = (event: PointerEvent<HTMLDivElement>) => {
-    if (!file || event.button !== 0) return
+    if (!file || renderedPage !== renderKey || event.button !== 0) return
     const point = toPercent(event)
     if (!point) return
     event.currentTarget.setPointerCapture(event.pointerId)
@@ -155,6 +172,52 @@ export function FixedPositionFieldsStep() {
     event.currentTarget.releasePointerCapture(event.pointerId)
     setDragStart(null)
     setSelection((current) => current && current.width >= 0.5 && current.height >= 0.5 ? current : null)
+  }
+
+  const startBoxDrag = (event: PointerEvent<HTMLButtonElement>, field: SchemaField, mode: "move" | "resize") => {
+    if (event.button !== 0 || !field.id || !field.locator) return
+    event.stopPropagation()
+    const point = toPercent(event)
+    if (!point) return
+    event.currentTarget.setPointerCapture(event.pointerId)
+    setSelectedFieldId(field.id)
+    setSelection(null)
+    boxDrag.current = { id: field.id, mode, point, locator: { ...field.locator } }
+  }
+
+  const moveBox = (event: PointerEvent<HTMLButtonElement>) => {
+    const drag = boxDrag.current
+    if (!drag) return
+    event.stopPropagation()
+    const point = toPercent(event)
+    if (!point) return
+    const dx = point.x - drag.point.x
+    const dy = point.y - drag.point.y
+    const locator = drag.mode === "move"
+      ? { ...drag.locator, x: clamp(drag.locator.x + dx, 0, 100 - drag.locator.width), y: clamp(drag.locator.y + dy, 0, 100 - drag.locator.height) }
+      : { ...drag.locator, width: clamp(drag.locator.width + dx, 0.5, 100 - drag.locator.x), height: clamp(drag.locator.height + dy, 0.5, 100 - drag.locator.y) }
+    updateField(drag.id, { locator })
+    setPreviewValues({})
+    setRawPreviewValues({})
+  }
+
+  const endBoxDrag = (event: PointerEvent<HTMLButtonElement>) => {
+    event.stopPropagation()
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
+    boxDrag.current = null
+  }
+
+  const nudgeBox = (event: KeyboardEvent<HTMLButtonElement>, field: SchemaField, resize = false) => {
+    if (!field.locator || !field.id || !["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) return
+    event.preventDefault()
+    const step = event.shiftKey ? 1 : 0.1
+    const dx = event.key === "ArrowLeft" ? -step : event.key === "ArrowRight" ? step : 0
+    const dy = event.key === "ArrowUp" ? -step : event.key === "ArrowDown" ? step : 0
+    const box = field.locator
+    updateField(field.id, { locator: resize
+      ? { ...box, width: clamp(box.width + dx, 0.5, 100 - box.x), height: clamp(box.height + dy, 0.5, 100 - box.y) }
+      : { ...box, x: clamp(box.x + dx, 0, 100 - box.width), y: clamp(box.y + dy, 0, 100 - box.height) } })
+    setSelectedFieldId(field.id)
   }
 
   const addSelection = () => {
@@ -339,7 +402,7 @@ export function FixedPositionFieldsStep() {
       const token = localStorage.getItem("token")
       const formData = new FormData()
       formData.append("file", file)
-      formData.append("fields_json", JSON.stringify(fields.map((field) => {
+      formData.append("fields_json", JSON.stringify(fields.filter((field) => field.locator).map((field) => {
         const payload = { ...field }
         delete payload.id
         delete payload.order
@@ -379,9 +442,9 @@ export function FixedPositionFieldsStep() {
       ? `Each field name must be unique. Duplicate: ${duplicateNameList.join(", ")}`
       : null
   const arrayValidationMessage = fields
-    .filter((field) => field.type === "array" && !validArrayConfig(field.array_config))
+    .filter((field) => field.type === "array" && field.locator && !validArrayConfig(field.array_config))
     .map((field) => field.name || "(unnamed)")
-  const canProceed = fields.length > 0 && !fieldValidationMessage && arrayValidationMessage.length === 0 && fields.every((field) => validLocator(field.locator))
+  const canProceed = fields.length > 0 && !fieldValidationMessage && arrayValidationMessage.length === 0 && fields.every((field) => (!field.locator && schemaId) || validLocator(field.locator))
 
   return (
     <div className="space-y-5">
@@ -390,32 +453,32 @@ export function FixedPositionFieldsStep() {
           <h2 className="text-xl font-semibold text-slate-900">Fixed-position fields</h2>
           <p className="mt-1 text-sm text-slate-600">Draw a box for each value in a stable PDF form.</p>
         </div>
-        {file && <div className="flex gap-2">
+        <div className="flex gap-2">
           <Button type="button" variant="outline" size="sm" onClick={addCoordinateField}>
             <Plus className="mr-1.5 h-4 w-4" />Add by coordinates
           </Button>
-          <Button variant="outline" size="sm" onClick={previewFields} disabled={!canProceed || reading}>
+          <Button variant="outline" size="sm" onClick={previewFields} disabled={!file || !canProceed || reading}>
             {reading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Sparkles className="mr-2 h-4 w-4" />}
             Read sample
           </Button>
-        </div>}
+        </div>
       </div>
 
-      {!file ? (
-        <label className="flex min-h-48 cursor-pointer flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-blue-300 bg-blue-50/50 p-6 text-center hover:border-blue-500">
+      <input ref={fileInputRef} id="fixed-schema-sample" aria-label="Sample PDF" type="file" accept="application/pdf" className="hidden" onChange={handleFileSelect} disabled={reading || finding} />
+      {!file && (
+        <button type="button" onClick={() => fileInputRef.current?.click()} className="flex min-h-32 w-full cursor-pointer flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-blue-300 bg-blue-50/50 p-6 text-center hover:border-blue-500">
           <FileText className="h-9 w-9 text-blue-500" />
           <span className="font-medium text-blue-700">Choose PDF form</span>
-          <input type="file" accept="application/pdf" className="hidden" onChange={handleFileSelect} />
-        </label>
-      ) : (
+        </button>
+      )}
         <>
-          <div className="flex items-center justify-between rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm">
+          {file && <div className="flex items-center justify-between rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm">
             <span className="flex min-w-0 items-center gap-2 truncate text-slate-700"><FileText className="h-4 w-4 shrink-0" />{file.name}</span>
-            <button className="text-slate-500 hover:text-red-600" onClick={() => { setFile(null); setFields([]); setPreviewValues({}); setRawPreviewValues({}); setSelection(null); setError(null) }}>Change</button>
-          </div>
+            <button disabled={reading || finding} className="text-slate-500 hover:text-red-600" onClick={() => fileInputRef.current?.click()}>Change</button>
+          </div>}
 
-          <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_24rem] lg:items-start">
-            <section className="min-w-0 rounded-lg border border-slate-200 bg-slate-50">
+          <div className={`grid gap-5 ${file ? "lg:grid-cols-[minmax(0,1fr)_24rem]" : ""} lg:items-start`}>
+            <section className={`${file ? "" : "hidden"} min-w-0 rounded-lg border border-slate-200 bg-slate-50`}>
               <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 px-3 py-2 text-sm text-slate-600">
                 <span className="font-medium">Page {pageNumber}{numPages ? ` of ${numPages}` : ""}</span>
                 <div className="flex flex-wrap items-center justify-end gap-1">
@@ -432,7 +495,7 @@ export function FixedPositionFieldsStep() {
                   </Button>
                 </div>
               </div>
-              <div className="max-h-[68vh] min-h-[32rem] overflow-auto p-5">
+              <div ref={pageContainerRef} className="max-h-[68vh] min-h-[32rem] overflow-auto p-5">
                 <div className="flex min-w-full justify-center">
                 <div
                   ref={surfaceRef}
@@ -441,13 +504,24 @@ export function FixedPositionFieldsStep() {
                   onPointerMove={handlePointerMove}
                   onPointerUp={handlePointerUp}
                 >
-                  {fileUrl && <Document file={fileUrl} loading={<div className="grid h-72 w-[760px] place-items-center"><Loader2 className="h-5 w-5 animate-spin" /></div>} onLoadSuccess={(pdf) => { pdfRef.current = pdf as unknown as PdfProxy; setNumPages(pdf.numPages) }}>
-                    <Page pageNumber={pageNumber} width={Math.round(BASE_PAGE_WIDTH * zoom)} renderTextLayer={false} renderAnnotationLayer={false} />
+                  {fileUrl && <Document file={fileUrl} loading={<div style={{ width: pageWidth }} className="grid h-72 place-items-center"><Loader2 className="h-5 w-5 animate-spin" /></div>} onLoadSuccess={(pdf) => { pdfRef.current = pdf as unknown as PdfProxy; setNumPages(pdf.numPages) }}>
+                    <Page pageNumber={pageNumber} width={pageWidth} renderTextLayer={false} renderAnnotationLayer={false} onRenderSuccess={() => setRenderedPage(renderKey)} />
                   </Document>}
-                  {fields.filter((field) => field.locator?.page === pageNumber).map((field) => field.locator && (
-                    <div key={field.id} className="pointer-events-none absolute border-2 border-dashed border-blue-600 bg-blue-500/20 shadow-[0_0_0_1px_rgba(255,255,255,0.9)]" style={{ left: `${field.locator.x}%`, top: `${field.locator.y}%`, width: `${field.locator.width}%`, height: `${field.locator.height}%` }} />
+                  {renderedPage === renderKey && fields.filter((field) => field.locator?.page === pageNumber).map((field) => field.locator && (
+                    <div key={field.id} className={`absolute border-2 ${selectedFieldId === field.id ? "z-10 border-emerald-600 bg-emerald-500/15" : "border-blue-600 bg-blue-500/15"}`} style={{ left: `${field.locator.x}%`, top: `${field.locator.y}%`, width: `${field.locator.width}%`, height: `${field.locator.height}%` }}>
+                      <button type="button" aria-label={`Move ${field.name} box`} title={`Move ${field.name}`} aria-pressed={selectedFieldId === field.id}
+                        className="absolute inset-0 cursor-move focus-visible:outline-2 focus-visible:outline-emerald-600"
+                        onPointerDown={(event) => startBoxDrag(event, field, "move")} onPointerMove={moveBox} onPointerUp={endBoxDrag} onPointerCancel={endBoxDrag}
+                        onKeyDown={(event) => nudgeBox(event, field)} />
+                      {selectedFieldId === field.id && <>
+                        <span className="pointer-events-none absolute bottom-full left-0 max-w-48 truncate bg-emerald-700 px-1 text-xs text-white">{field.name}</span>
+                        <button type="button" aria-label={`Resize ${field.name} box`} title={`Resize ${field.name}`} className="absolute -bottom-2 -right-2 h-4 w-4 cursor-nwse-resize border border-white bg-emerald-600"
+                          onPointerDown={(event) => startBoxDrag(event, field, "resize")} onPointerMove={moveBox} onPointerUp={endBoxDrag} onPointerCancel={endBoxDrag}
+                          onKeyDown={(event) => nudgeBox(event, field, true)} />
+                      </>}
+                    </div>
                   ))}
-                  {fields.filter((field) => field.type === "array" && field.locator?.page === pageNumber && field.array_config).map((field) => {
+                  {renderedPage === renderKey && fields.filter((field) => field.type === "array" && field.locator?.page === pageNumber && field.array_config).map((field) => {
                     const locator = field.locator!
                     const columns = field.array_config!.columns
                     return (
@@ -511,20 +585,22 @@ export function FixedPositionFieldsStep() {
                 </Button>
                 {findMessage && <p role="status" className="text-xs text-slate-700">{findMessage}</p>}
               </form>
-              <div className="sticky top-0 z-10 flex items-center justify-between gap-2 bg-white pb-2 text-sm font-medium text-slate-700"><span className="flex items-center gap-2"><ScanLine className="h-4 w-4 text-emerald-600" />Fields</span><span className="text-xs font-normal text-slate-500">{fields.length} selected</span></div>
+              <div className="sticky top-0 z-10 flex items-center justify-between gap-2 bg-white pb-2 text-sm font-medium text-slate-700"><span className="flex items-center gap-2"><ScanLine className="h-4 w-4 text-emerald-600" />Fixed fields</span><span className="text-xs font-normal text-slate-500">{fields.filter((field) => field.locator).length} fields</span></div>
               {fields.length === 0 ? <div className="rounded-lg border border-dashed border-slate-300 p-4 text-sm text-slate-500">Draw a box, or add a field by coordinates.</div> : fields.map((field) => {
                 const locator = field.locator
                 const previewValue = previewValues[field.name]
                 const rawPreviewValue = rawPreviewValues[field.name]
                 if (!locator) return null
-                return <div key={field.id} className="space-y-2 rounded-lg border border-slate-200 bg-white p-3">
+                return <div key={field.id} onFocus={() => { setSelectedFieldId(field.id || null); setPageNumber(locator.page) }} className={`space-y-2 rounded-lg border bg-white p-3 ${selectedFieldId === field.id ? "border-emerald-500" : "border-slate-200"}`}>
                   <div className="flex gap-2">
                     <input aria-label="Field name" className="min-w-0 flex-1 rounded border border-slate-300 px-2 py-1.5 text-sm" value={field.name} onChange={(event) => updateField(field.id!, { name: event.target.value })} />
                     <select aria-label="Field type" className="rounded border border-slate-300 px-2 py-1.5 text-sm" value={field.type} onChange={(event) => updateFieldType(field.id!, event.target.value as SchemaField["type"])}>
-                      <option value="text">Text</option><option value="number">Number</option><option value="date">Date</option><option value="currency">Currency</option><option value="array">Table array</option>
+                      <option value="text">Text</option><option value="number">Number</option><option value="date">Date</option><option value="currency">Currency</option><option value="boolean">Yes/No</option><option value="array">Table array</option>
                     </select>
                     <button type="button" aria-label={`Remove ${field.name}`} title="Remove field" onClick={() => removeField(field.id!)} className="text-slate-400 hover:text-red-600"><Trash2 className="h-4 w-4" /></button>
                   </div>
+                  <label className="block text-xs text-slate-600">Description / Prompt<input aria-label={`${field.name} description`} className="mt-1 w-full rounded border border-slate-300 px-2 py-1.5 text-sm" value={field.description} onChange={(event) => updateField(field.id!, { description: event.target.value })} /></label>
+                  <label className="flex items-center gap-2 text-xs text-slate-600"><input type="checkbox" checked={field.required} onChange={(event) => updateField(field.id!, { required: event.target.checked })} />Required</label>
                   <details className="rounded border border-slate-200 bg-slate-50 px-2 py-1.5">
                     <summary className="cursor-pointer text-xs font-medium text-slate-600">Fine-tune position</summary>
                     <div className="mt-2 grid grid-cols-5 gap-1">
@@ -598,7 +674,6 @@ export function FixedPositionFieldsStep() {
             </section>
           </div>
         </>
-      )}
 
       {error && <div className="flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700"><AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />{error}</div>}
       {fieldValidationMessage && <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800" role="alert"><AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />{fieldValidationMessage}</div>}

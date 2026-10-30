@@ -8,7 +8,7 @@ import { SchemaField } from "@/types/schema"
 import { isValidFieldName, validateFields } from "@/lib/schema-validation"
 
 export function DetailsAndSaveStep() {
-    const { schemaData, fields, updateSchemaData, isSaving, saveSchema, previousStep, studio, updateStudio } = useSchemaWizard()
+    const { schemaId, schemaData, fields, updateSchemaData, isSaving, saveSchema, previousStep, studio, updateStudio } = useSchemaWizard()
     const confirmedValues = studio
         ? Object.values(studio.expected).reduce(
             (sum, values) => sum + fields.filter((field) => field.id && values[field.id] !== undefined).length, 0)
@@ -40,8 +40,9 @@ export function DetailsAndSaveStep() {
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div className="space-y-1">
-                        <label className="text-sm font-medium text-slate-700">Schema Name <span className="text-red-500">*</span></label>
+                        <label htmlFor="schema-name" className="text-sm font-medium text-slate-700">Schema Name <span className="text-red-500">*</span></label>
                         <input
+                            id="schema-name"
                             type="text"
                             value={schemaData.name}
                             onChange={e => { updateSchemaData({ name: e.target.value }); setNameError("") }}
@@ -52,8 +53,9 @@ export function DetailsAndSaveStep() {
                     </div>
 
                     <div className="space-y-1">
-                        <label className="text-sm font-medium text-slate-700">Description <span className="text-slate-400 text-xs">(optional)</span></label>
+                        <label htmlFor="schema-description" className="text-sm font-medium text-slate-700">Description <span className="text-slate-400 text-xs">(optional)</span></label>
                         <textarea
+                            id="schema-description"
                             value={schemaData.description}
                             onChange={e => updateSchemaData({ description: e.target.value })}
                             rows={1}
@@ -61,6 +63,17 @@ export function DetailsAndSaveStep() {
                             placeholder="Describe what this schema is used for..."
                         />
                     </div>
+                    <label className="space-y-1 text-sm font-medium text-slate-700">
+                        <span>Document Type</span>
+                        <select aria-label="Document Type" className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                            value={schemaData.document_type}
+                            onChange={(event) => {
+                                const value = event.target.value
+                                if (value === "invoice" || value === "receipt" || value === "contract" || value === "po" || value === "other") updateSchemaData({ document_type: value })
+                            }}>
+                            <option value="invoice">Invoice</option><option value="receipt">Receipt</option><option value="contract">Contract</option><option value="po">Purchase Order</option><option value="other">Other</option>
+                        </select>
+                    </label>
                 </div>
             </div>
 
@@ -120,7 +133,7 @@ export function DetailsAndSaveStep() {
                     {isSaving ? (
                         <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> Saving...</>
                     ) : (
-                        <><CheckCircle className="h-4 w-4 mr-2" /> Save Schema</>
+                        <><CheckCircle className="h-4 w-4 mr-2" /> {schemaId ? "Save Changes" : "Save Schema"}</>
                     )}
                 </Button>
             </div>

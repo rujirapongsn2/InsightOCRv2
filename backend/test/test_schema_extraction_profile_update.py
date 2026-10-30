@@ -8,6 +8,20 @@ from app.services.extraction_profiles import supports_anydoc_source, validate_ex
 from app.schemas.schema import DocumentSchemaCreate, DocumentSchemaUpdate, SchemaField
 
 
+@pytest.mark.parametrize("can_manage", [True, False])
+def test_schema_detail_exposes_management_permission(monkeypatch, can_manage):
+    from unittest.mock import MagicMock
+    from app.api.v1.endpoints import schemas
+
+    schema = SimpleNamespace(creator=None)
+    db = MagicMock()
+    db.query.return_value.filter.return_value.first.return_value = schema
+    monkeypatch.setattr(schemas, "_can_manage_schema", lambda record, user: can_manage)
+    result = schemas.read_schema(db=db, schema_id="schema-id", current_user=SimpleNamespace())
+    assert result is schema
+    assert result.can_manage is can_manage
+
+
 def test_schema_update_keeps_anydoc_profile_and_normalizes_fields():
     existing = SimpleNamespace(document_type="invoice", extraction_profile="legacy")
     update = DocumentSchemaUpdate(

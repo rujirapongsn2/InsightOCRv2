@@ -1,13 +1,14 @@
 "use client"
 
 import { useEffect, useMemo, useRef, useState } from "react"
-import { Plus, FileText, Receipt, FileSignature, File, Search, ScrollText, X, Trash2, Loader2, ListFilter, ArrowDownAZ, Download, Upload, CheckSquare, Square } from "lucide-react"
+import { Plus, FileText, Receipt, FileSignature, File, Search, ScrollText, X, Loader2, ListFilter, ArrowDownAZ, Download, Upload, CheckSquare, Square } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
 import { useAuth } from "@/components/auth-provider"
 import { getApiBaseUrl } from "@/lib/api"
 import { SchemaWizardProvider } from "@/contexts/SchemaWizardContext"
 import { SchemaWizard } from "@/components/schema/SchemaWizard"
+import { SchemaEditor } from "@/components/schema/SchemaEditor"
+import type { ExtractionProfile } from "@/types/schema"
 import { Modal } from "@/components/ui/modal"
 
 interface Schema {
@@ -39,8 +40,6 @@ interface SchemaField {
     }
 }
 
-type ExtractionProfile = "legacy" | "anydoc_hybrid"
-
 type SchemaSort = "updated_desc" | "updated_asc" | "name_asc" | "name_desc" | "fields_desc" | "fields_asc"
 
 const schemaActivityTimestamp = (schema: Schema) =>
@@ -66,210 +65,8 @@ const getDocumentTypeIcon = (type: string) => {
 
 // ─── Edit Schema Modal ──────────────────────────────────────────────────────
 
-function EditSchemaModal({ schemaId, onClose, onSaved }: { schemaId: string; onClose: () => void; onSaved: () => void }) {
-    const [loading, setLoading] = useState(true)
-    const [saving, setSaving] = useState(false)
-    const [deleting, setDeleting] = useState(false)
-    const [schema, setSchema] = useState<{ id: string; name: string; description: string; document_type: string; ocr_engine: string; extraction_profile: ExtractionProfile } | null>(null)
-    const [fields, setFields] = useState<SchemaField[]>([])
-
-    useEffect(() => {
-        const token = typeof window !== "undefined" ? localStorage.getItem("token") : null
-        fetch(`${getApiBaseUrl()}/schemas/${schemaId}`, {
-            headers: token ? { Authorization: `Bearer ${token}` } : undefined,
-        })
-            .then(r => r.ok ? r.json() : null)
-            .then(data => {
-                if (data) {
-                    setSchema({ ...data, extraction_profile: "anydoc_hybrid" })
-                    setFields(data.fields || [])
-                }
-            })
-            .finally(() => setLoading(false))
-    }, [schemaId])
-
-    const addField = () => setFields((f: SchemaField[]) => [...f, { name: "", type: "text", description: "", required: false }])
-    const removeField = (i: number) => setFields((f: SchemaField[]) => f.filter((_: SchemaField, idx: number) => idx !== i))
-    const updateField = (i: number, key: keyof SchemaField, value: unknown) =>
-        setFields((f: SchemaField[]) => f.map((field: SchemaField, idx: number) => idx === i ? { ...field, [key]: value } : field))
-    const updateLocator = (i: number, key: "page" | "x" | "y" | "width" | "height", value: string) =>
-        setFields((current) => current.map((field, index) => {
-            if (index !== i || !field.locator) return field
-            return { ...field, locator: { ...field.locator, [key]: Number(value) } }
-        }))
-    const updateLocatorCleanup = (i: number, cleanPlaceholders: boolean) =>
-        setFields((current) => current.map((field, index) => {
-            if (index !== i || !field.locator) return field
-            return { ...field, locator: { ...field.locator, clean_placeholders: cleanPlaceholders } }
-        }))
-
-    const handleSave = async () => {
-        if (!schema) return
-        setSaving(true)
-        try {
-            const token = typeof window !== "undefined" ? localStorage.getItem("token") : null
-            const selectedProfile: ExtractionProfile = "anydoc_hybrid"
-            const res = await fetch(`${getApiBaseUrl()}/schemas/${schemaId}`, {
-                method: "PUT",
-                headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-                body: JSON.stringify({ name: schema.name, description: schema.description, document_type: schema.document_type, ocr_engine: schema.ocr_engine, extraction_profile: selectedProfile, fields }),
-            })
-            const payload = await res.json().catch(() => null)
-            if (!res.ok) {
-                throw new Error(payload?.detail || "Failed to save schema")
-            }
-            if (payload?.extraction_profile !== selectedProfile) {
-                throw new Error("The extraction pipeline was not saved. Please refresh and try again.")
-            }
-            onSaved()
-            onClose()
-        } catch (error) {
-            alert(error instanceof Error ? error.message : "Error saving schema")
-        } finally { setSaving(false) }
-    }
-
-    const handleDelete = async () => {
-        if (!confirm("Delete this schema? This cannot be undone.")) return
-        setDeleting(true)
-        try {
-            const token = typeof window !== "undefined" ? localStorage.getItem("token") : null
-            const res = await fetch(`${getApiBaseUrl()}/schemas/${schemaId}`, {
-                method: "DELETE",
-                headers: token ? { Authorization: `Bearer ${token}` } : undefined,
-            })
-            if (res.ok) {
-                onSaved()
-                onClose()
-            } else {
-                let message = "Failed to delete schema"
-                try {
-                    const payload = await res.json()
-                    if (payload?.detail) message = payload.detail
-                } catch { }
-                alert(message)
-            }
-        } catch { alert("Error deleting schema") } finally { setDeleting(false) }
-    }
-
-    return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-            <div className="bg-white rounded-xl shadow-2xl w-full max-w-3xl max-h-[90vh] flex flex-col">
-                <div className="flex items-center justify-between px-6 py-4 border-b">
-                    <h2 className="text-lg font-semibold">Edit Schema</h2>
-                    <button onClick={onClose} className="p-1 rounded hover:bg-slate-100"><X className="h-5 w-5 text-slate-500" /></button>
-                </div>
-                {loading ? (
-                    <div className="flex-1 flex items-center justify-center py-16"><Loader2 className="h-6 w-6 animate-spin text-slate-400" /></div>
-                ) : !schema ? (
-                    <div className="flex-1 flex items-center justify-center py-16 text-slate-500">Schema not found</div>
-                ) : (
-                    <div className="flex-1 overflow-y-auto p-6 space-y-6">
-                        <div className="grid gap-4 md:grid-cols-2">
-                            <div className="space-y-1.5">
-                                <label className="text-sm font-medium text-slate-700">Schema Name <span className="text-red-500">*</span></label>
-                                <Input value={schema.name} onChange={e => setSchema({ ...schema, name: e.target.value })} placeholder="e.g. Standard Invoice" />
-                            </div>
-                            <div className="space-y-1.5">
-                                <label className="text-sm font-medium text-slate-700">Document Type</label>
-                                <select className="flex h-10 w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                    value={schema.document_type} onChange={e => {
-                                        const documentType = e.target.value
-                                        setSchema({ ...schema, document_type: documentType, extraction_profile: "anydoc_hybrid" })
-                                    }}>
-                                    <option value="invoice">Invoice</option>
-                                    <option value="receipt">Receipt</option>
-                                    <option value="contract">Contract</option>
-                                    <option value="po">Purchase Order</option>
-                                    <option value="other">Other</option>
-                                </select>
-                            </div>
-                            <div className="space-y-1.5 md:col-span-2">
-                                <label className="text-sm font-medium text-slate-700">Description</label>
-                                <Input value={schema.description || ""} onChange={e => setSchema({ ...schema, description: e.target.value })} placeholder="Describe this schema..." />
-                            </div>
-                        </div>
-                        <div className="space-y-3">
-                            <div className="flex items-center justify-between">
-                                <h3 className="text-sm font-semibold text-slate-900">Extraction Fields</h3>
-                                <Button type="button" variant="outline" size="sm" onClick={addField}><Plus className="h-3.5 w-3.5 mr-1" />Add Field</Button>
-                            </div>
-                            {fields.length === 0 && (
-                                <p className="text-sm text-slate-400 py-4 text-center border border-dashed rounded-lg">No fields yet.</p>
-                            )}
-                            {fields.map((field, index) => (
-                                <div key={index} className="flex flex-wrap items-start gap-3 p-3 rounded-lg bg-slate-50 border">
-                                    <div className="grid gap-3 flex-1 sm:grid-cols-4">
-                                        <div className="space-y-1">
-                                            <label className="text-xs font-medium text-slate-600">Field Name</label>
-                                            <Input placeholder="field_name" value={field.name} onChange={e => updateField(index, "name", e.target.value)} className="h-8 text-sm" />
-                                        </div>
-                                        <div className="space-y-1">
-                                            <label className="text-xs font-medium text-slate-600">Type</label>
-                                            <select className="flex h-8 w-full rounded-md border border-slate-200 bg-white px-2 text-sm"
-                                                value={field.type} onChange={e => updateField(index, "type", e.target.value)}>
-                                                <option value="text">Text</option>
-                                                <option value="number">Number</option>
-                                                <option value="date">Date</option>
-                                                <option value="currency">Currency</option>
-                                                <option value="boolean">Boolean</option>
-                                                <option value="array">Array</option>
-                                            </select>
-                                        </div>
-                                        <div className="space-y-1 sm:col-span-2">
-                                            <label className="text-xs font-medium text-slate-600">Description / Prompt</label>
-                                            <Input placeholder="Instructions for LLM..." value={field.description} onChange={e => updateField(index, "description", e.target.value)} className="h-8 text-sm" />
-                                        </div>
-                                    </div>
-                                    <button aria-label={`Remove ${field.name || "field"}`} onClick={() => removeField(index)} className="mt-5 p-1 rounded text-red-400 hover:text-red-600 hover:bg-red-50">
-                                        <Trash2 className="h-4 w-4" />
-                                    </button>
-                                    {field.locator && (
-                                        <div className="basis-full grid grid-cols-5 gap-2 rounded-md border border-blue-100 bg-blue-50/50 p-2">
-                                            {(["page", "x", "y", "width", "height"] as const).map((key) => (
-                                                <label key={key} className="text-xs font-medium text-slate-600">
-                                                    {key === "width" ? "W (%)" : key === "height" ? "H (%)" : key === "page" ? "Page" : `${key.toUpperCase()} (%)`}
-                                                    <Input
-                                                        aria-label={`${field.name} ${key}`}
-                                                        type="number"
-                                                        min={key === "page" ? 1 : 0}
-                                                        step={key === "page" ? 1 : 0.01}
-                                                        className="mt-1 h-8 text-xs"
-                                                        value={field.locator?.[key] ?? ""}
-                                                        onChange={(event) => updateLocator(index, key, event.target.value)}
-                                                    />
-                                                </label>
-                                            ))}
-                                            <label className="col-span-5 flex items-center gap-2 text-xs text-slate-700">
-                                                <input
-                                                    type="checkbox"
-                                                    checked={field.locator.clean_placeholders !== false}
-                                                    onChange={(event) => updateLocatorCleanup(index, event.target.checked)}
-                                                />
-                                                Remove form placeholders
-                                            </label>
-                                        </div>
-                                    )}
-                                </div>
-                            ))}
-                        </div>
-                    </div>
-                )}
-                {!loading && schema && (
-                    <div className="flex items-center justify-between px-6 py-4 border-t bg-slate-50 rounded-b-xl">
-                        <Button variant="destructive" size="sm" onClick={handleDelete} disabled={deleting || saving}>
-                            {deleting ? <><Loader2 className="h-4 w-4 mr-1.5 animate-spin" />Deleting...</> : <><Trash2 className="h-4 w-4 mr-1.5" />Delete</>}
-                        </Button>
-                        <div className="flex gap-2">
-                            <Button variant="outline" onClick={onClose} disabled={saving || deleting}>Cancel</Button>
-                            <Button onClick={handleSave} disabled={saving || deleting || !schema.name.trim()}>
-                                {saving ? <><Loader2 className="h-4 w-4 mr-1.5 animate-spin" />Saving...</> : "Save Changes"}
-                            </Button>
-                        </div>
-                    </div>
-                )}
-            </div>
-        </div>
-    )
+function EditSchemaModal(props: { schemaId: string; onClose: () => void; onSaved: () => void }) {
+    return <SchemaEditor {...props} />
 }
 
 // ─── Create Schema Modal ────────────────────────────────────────────────────

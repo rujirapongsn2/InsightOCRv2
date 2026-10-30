@@ -218,7 +218,7 @@ function DocumentTextPanel({ samples, focus, onFocus }: { samples: StudioSample[
 
 export function AIFieldsStep() {
     const {
-        startingPoint, schemaData, fields, setFields, addField, updateField, removeField, nextStep, setManualEntry,
+        startingPoint, schemaData, fields, setFields, addField, updateField, removeField, nextStep, setManualEntry, setStartingPoint,
         studio, setStudio, updateStudio,
     } = useSchemaWizard()
     const isAIMode = startingPoint === "ai"
@@ -639,6 +639,7 @@ export function AIFieldsStep() {
                                         <div className="col-span-2">
                                             <select
                                                 title="Field type"
+                                                disabled={Boolean(field.locator)}
                                                 className="w-full px-2 py-1.5 text-sm border border-slate-300 rounded"
                                                 value={field.type}
                                                 onChange={(e) => {
@@ -723,7 +724,9 @@ export function AIFieldsStep() {
 
                                                 <div className="space-y-2">
                                                     {field.type === "array" ? (
-                                                        <TableColumnsEditor columns={field.table_columns || []} onChange={(columns) => updateField(field.id!, { table_columns: columns })} />
+                                                        field.locator
+                                                            ? <Button variant="outline" size="sm" onClick={() => setStartingPoint("fixed")}>Edit table position</Button>
+                                                            : <TableColumnsEditor columns={field.table_columns || []} onChange={(columns) => updateField(field.id!, { table_columns: columns })} />
                                                     ) : (
                                                         <>
                                                             <label className="block text-xs font-medium text-slate-600">

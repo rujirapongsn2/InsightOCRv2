@@ -1187,6 +1187,8 @@ def read_schema(
     if not schema:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schema not found")
 
+    schema.can_manage = _can_manage_schema(schema, current_user)
+
     if schema.creator:
         schema.created_by_email = schema.creator.email
         schema.created_by_name = schema.creator.full_name
