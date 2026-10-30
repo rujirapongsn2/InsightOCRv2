@@ -8,7 +8,7 @@ type Evidence = { status?: string; reason?: string; quote?: string; raw_text?: s
     alternative?: { value: unknown; provider: string; grounded?: boolean };
     bbox?: { x: number; y: number; width: number; height: number };
     lx_candidate?: { value?: unknown }; upgraded_from_conflict?: boolean }
-export type MappingReport = { status?: string; fields?: Record<string, Evidence>; attempts?: unknown[] }
+export type MappingReport = { status?: string; fields?: Record<string, Evidence>; attempts?: unknown[]; unresolved_fields?: string[] }
 
 export type MappingResult = { mapping?: MappingReport; values?: Record<string, unknown> }
 

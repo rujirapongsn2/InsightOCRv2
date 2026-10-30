@@ -1341,3 +1341,20 @@ Date: 2026-06-30
   current` inside backend, and download an existing Agent DOC XLSX in the UI.
   These production checks require the production run; local success alone is
   not proof of production health.
+
+## Review warnings: fewer, accurate alerts
+
+- Document list badge now names the real problem: `mapping.status` of
+  `failed`/`partial` shows "สกัดข้อมูลไม่สำเร็จ"/"ข้อมูลไม่ครบ"; "OCR คุณภาพต่ำ"
+  only appears for other `processing_error` cases. "Text Layer repaired" and
+  "TesseractOCR" are neutral grey (information, not warnings).
+- Preview banner shows for `partial`/`failed` mapping even without
+  `processing_error`, lists `unresolved_fields`, and the raw error moves into
+  "ดูรายละเอียด". Expanded needs-review rows drop the duplicate status chip and
+  show Thai reasons (`REASON_TH`); unknown reasons fall back to the original text.
+- Backend `needs_review` rules are unchanged (decision pending).
+- Verified: `npx tsc --noEmit` clean; ESLint unchanged at 29 problems (all
+  pre-existing). Not yet checked in a browser.
+- Manual check: open job2 -> starbuck.pdf. Expect badge "ข้อมูลไม่ครบ" (not
+  "OCR degraded"), banner "ไม่พบ buyer — …", and no duplicate "รอตรวจ" chip
+  beside "ยืนยันถูกต้อง" on `line_items`.

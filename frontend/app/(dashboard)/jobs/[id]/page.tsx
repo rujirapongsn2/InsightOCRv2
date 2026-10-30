@@ -16,6 +16,26 @@ import { type MappingReport } from "@/components/document/MappingPanel"
 import { evidenceSearchTexts, pageWordsFrom, type Highlight, type PageWord } from "@/lib/evidence-search"
 import { generateExportHtml, generateExportText } from "@/lib/exportReportHtml"
 
+/** Mapping problems get a mapping label; "OCR คุณภาพต่ำ" is only for genuine OCR trouble. */
+function mappingIssueLabel(doc: { extraction_metadata?: { mapping?: unknown } }): string | null {
+    const mapping = doc.extraction_metadata?.mapping
+    const status = mapping && typeof mapping === "object" ? (mapping as { status?: string }).status : undefined
+    if (status === "failed") return "สกัดข้อมูลไม่สำเร็จ"
+    if (status === "partial") return "ข้อมูลไม่ครบ"
+    return null
+}
+
+const REASON_TH: Record<string, string> = {
+    "Table row alignment and coverage require review": "เทียบจำนวนแถวและค่าในตารางกับเอกสาร",
+    "Object association requires review": "ตรวจว่าค่าแต่ละช่องอยู่ถูกหมวด",
+    "Source association requires review": "ตรวจว่าค่านี้ตรงกับฟิลด์",
+    "Ambiguous or non-verbatim source value": "ค่านี้ไม่ตรงตัวอักษรกับเอกสาร หรือพบหลายตำแหน่ง",
+    "Position read; template alignment requires review": "อ่านจากตำแหน่งในแม่แบบ ควรเทียบกับเอกสาร",
+    "Providers returned conflicting values": "engine แต่ละตัวให้ค่าไม่ตรงกัน",
+    "Value conflicts with schema arithmetic rule": "ค่าไม่สอดคล้องกับสูตรคำนวณใน schema",
+    "Value found in source; field association not independently verified": "พบค่านี้ในเอกสาร แต่ยังไม่ได้ยืนยันว่าตรงกับฟิลด์นี้",
+}
+
 const PDFViewer = dynamic(
     () => import("@/components/document/PDFViewer").then(mod => mod.PDFViewer),
     {
@@ -66,7 +86,7 @@ interface Document {
         fallback_pages?: number[]
         legacy_fallback?: { reason?: string }
         mapping?: "not_requested" | "pending" | "deferred" | {
-            status?: "completed" | "failed"
+            status?: "completed" | "partial" | "failed"
             schema?: string
             reason?: string
         }
@@ -717,11 +737,11 @@ export default function JobDetailPage() {
     const reviewSchema = reviewDoc?.schema_id
         ? schemas.find((schema) => schema.id === reviewDoc.schema_id)
         : undefined
-    const reviewMappingFailed = Boolean(
-        reviewDoc?.extraction_metadata?.mapping
-        && typeof reviewDoc.extraction_metadata.mapping !== "string"
-        && reviewDoc.extraction_metadata.mapping.status === "failed"
-    )
+    const reviewMappingStatus = reviewDoc?.extraction_metadata?.mapping && typeof reviewDoc.extraction_metadata.mapping !== "string"
+        ? reviewDoc.extraction_metadata.mapping.status
+        : undefined
+    const reviewMappingFailed = reviewMappingStatus === "failed"
+    const reviewMappingPartial = reviewMappingStatus === "partial"
 
     // Live evidence: the report from the doc, or the newest one after a retry.
     const mappingReport: MappingReport | undefined = liveMapping
@@ -1678,12 +1698,10 @@ export default function JobDetailPage() {
                                                 <FileText className="h-5 w-5 shrink-0 text-slate-500" />
                                                 <span className="min-w-0 flex-1 truncate text-sm font-medium">{doc.filename}</span>
                                                 <div className="flex shrink-0 items-center gap-2">
-                                                    {doc.processing_error && doc.status !== "failed" && (
-                                                        <span className="inline-flex items-center gap-1 rounded-full border border-amber-200 bg-amber-50 px-2 py-1 text-xs text-amber-700" title={doc.processing_error}>
+                                                    {(doc.processing_error || mappingIssueLabel(doc)) && doc.status !== "failed" && (
+                                                        <span className="inline-flex items-center gap-1 rounded-full border border-amber-200 bg-amber-50 px-2 py-1 text-xs text-amber-700" title={doc.processing_error ?? undefined}>
                                                             <AlertTriangle className="h-3 w-3" />
-                                                            {doc.extraction_metadata?.mapping && typeof doc.extraction_metadata.mapping !== "string" && doc.extraction_metadata.mapping.status === "failed"
-                                                                ? "Mapping failed"
-                                                                : "OCR degraded"}
+                                                            {mappingIssueLabel(doc) ?? "OCR คุณภาพต่ำ"}
                                                         </span>
                                                     )}
                                                     <span className={`rounded-full border px-2.5 py-1 text-xs font-medium capitalize ${getStatusColor(doc.status)}`}>
@@ -1707,8 +1725,8 @@ export default function JobDetailPage() {
                                                 <div className="mb-3 flex flex-wrap items-center gap-2 text-xs">
                                                     {pipeline === "anydoc_hybrid" && doc.extraction_metadata?.source === "image" && <span className="rounded-full bg-slate-100 px-2 py-1 font-medium text-slate-700">Image</span>}
                                                     {pipeline === "anydoc_hybrid" && (doc.extraction_metadata?.text_layer_pages?.length ?? 0) > 0 && <span className="rounded-full bg-sky-50 px-2 py-1 font-medium text-sky-700">AnyDoc Text Layer</span>}
-                                                    {(doc.extraction_metadata?.text_layer_invalid_pages?.length ?? 0) > 0 && <span className="rounded-full bg-amber-50 px-2 py-1 font-medium text-amber-700">Text Layer repaired</span>}
-                                                    {(doc.extraction_metadata?.tesseract_pages?.length ?? 0) > 0 && <span className="rounded-full bg-violet-50 px-2 py-1 font-medium text-violet-700">TesseractOCR</span>}
+                                                    {(doc.extraction_metadata?.text_layer_invalid_pages?.length ?? 0) > 0 && <span className="rounded-full bg-slate-100 px-2 py-1 font-medium text-slate-600" title="ระบบแก้ข้อความจาก PDF ให้อัตโนมัติแล้ว">Text Layer repaired</span>}
+                                                    {(doc.extraction_metadata?.tesseract_pages?.length ?? 0) > 0 && <span className="rounded-full bg-slate-100 px-2 py-1 font-medium text-slate-600">TesseractOCR</span>}
                                                     {(doc.extraction_metadata?.softnix_ocr_pages?.length ?? 0) > 0 && <span className="rounded-full bg-blue-50 px-2 py-1 font-medium text-blue-700">Softnix OCR</span>}
                                                     {(pipeline === "ocr_fallback" || doc.extraction_metadata?.fallback_pages?.length) ? <span className="rounded-full bg-amber-50 px-2 py-1 font-medium text-amber-700">OCR fallback</span> : null}
                                                     {pipeline === "legacy_fallback" && <span className="rounded-full bg-amber-50 px-2 py-1 font-medium text-amber-700" title={doc.extraction_metadata?.legacy_fallback?.reason}>Legacy fallback</span>}
@@ -1940,22 +1958,26 @@ export default function JobDetailPage() {
                                 </div>
 
                                 {/* AI Processing Warning Banner */}
-                                {reviewDoc.processing_error && (
+                                {(reviewDoc.processing_error || reviewMappingFailed || reviewMappingPartial) && (
                                     <div className="flex shrink-0 items-start gap-3 rounded-lg border border-amber-300 bg-amber-50 p-4">
                                         <AlertTriangle className="h-5 w-5 text-amber-600 flex-shrink-0 mt-0.5" />
                                         <div>
                                             <p className="text-sm font-semibold text-amber-800">
-                                                {reviewMappingFailed ? "Schema Mapping Warning" : "OCR Quality Warning"}
+                                                {reviewMappingFailed ? "สร้าง Structured Data ไม่สำเร็จ" : reviewMappingPartial ? "บางฟิลด์ยังไม่ครบ" : "คุณภาพ OCR อาจไม่ดี"}
                                             </p>
                                             <p className="mt-1 text-xs text-amber-700">
                                                 {reviewMappingFailed
-                                                    ? "AI Extract is available, but Structured Data was not created."
-                                                    : "The extracted text may need review."}
+                                                    ? "ยังใช้ AI Extract ได้ แต่ไม่ได้สร้าง Structured Data"
+                                                    : reviewMappingPartial
+                                                        ? `ไม่พบ ${(mappingReport?.unresolved_fields ?? []).join(", ") || "บางฟิลด์"} — กรอกเอง, ยืนยันว่าเอกสารไม่มี หรือกด Retry Mapping`
+                                                        : "ข้อความที่อ่านได้อาจต้องตรวจทาน"}
                                             </p>
-                                            <details className="mt-2">
-                                                <summary className="text-xs text-amber-600 cursor-pointer hover:underline">Show details</summary>
-                                                <code className="text-xs text-amber-700 block mt-1 break-all whitespace-pre-wrap">{reviewDoc.processing_error}</code>
-                                            </details>
+                                            {reviewDoc.processing_error && (
+                                                <details className="mt-2">
+                                                    <summary className="text-xs text-amber-600 cursor-pointer hover:underline">ดูรายละเอียด</summary>
+                                                    <code className="text-xs text-amber-700 block mt-1 break-all whitespace-pre-wrap">{reviewDoc.processing_error}</code>
+                                                </details>
+                                            )}
                                         </div>
                                     </div>
                                 )}
@@ -2181,10 +2203,12 @@ export default function JobDetailPage() {
                                                                         </span>
                                                                     )}
                                                                     <div className="flex flex-wrap items-center gap-1.5 text-xs">
-                                                                        <span className="inline-flex items-center gap-1 rounded-lg bg-slate-100 px-1.5 py-0.5 font-medium text-slate-700">
-                                                                            <statusGlyph.Icon aria-hidden="true" className={`h-3 w-3 ${statusGlyph.cls}`} />
-                                                                            {fieldResolved ? "ตรวจแล้ว" : statusText}
-                                                                        </span>
+                                                                        {(fieldResolved || fieldStatus !== "needs_review") && (
+                                                                            <span className="inline-flex items-center gap-1 rounded-lg bg-slate-100 px-1.5 py-0.5 font-medium text-slate-700">
+                                                                                <statusGlyph.Icon aria-hidden="true" className={`h-3 w-3 ${statusGlyph.cls}`} />
+                                                                                {fieldResolved ? "ตรวจแล้ว" : statusText}
+                                                                            </span>
+                                                                        )}
                                                                         {!fieldResolved && fieldStatus !== "missing" && fieldStatus !== "failed" && (
                                                                             <button type="button" onClick={() => confirmField(field.name)}
                                                                                 className="rounded border border-emerald-300 bg-emerald-50 px-1.5 py-0.5 text-emerald-800"
@@ -2224,8 +2248,8 @@ export default function JobDetailPage() {
                                                                             {(fieldEvidence?.quote || fieldEvidence?.raw_text) && (
                                                                                 <p className="whitespace-pre-wrap break-words border-l-2 border-slate-300 pl-2">{fieldEvidence?.quote || fieldEvidence?.raw_text}</p>
                                                                             )}
-                                                                            {fieldEvidence?.reason && <p className="mt-1">{fieldEvidence.reason}</p>}
-                                                                            {fieldEvidence?.page ? <p className="mt-1">หน้า {fieldEvidence.page}{fieldStatus === "source_matched" ? " · value verbatim in source, field association not independently verified" : ""}</p> : null}
+                                                                            {fieldEvidence?.reason && <p className="mt-1">{REASON_TH[fieldEvidence.reason] ?? fieldEvidence.reason}</p>}
+                                                                            {fieldEvidence?.page ? <p className="mt-1">หน้า {fieldEvidence.page}</p> : null}
                                                                         </div>
                                                                     )}
                                                                 </div>
