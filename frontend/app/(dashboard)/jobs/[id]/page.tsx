@@ -1841,7 +1841,14 @@ export default function JobDetailPage() {
             )}
 
             {activeTab === "agent" && (
-                <AgentPanel jobId={jobId} mode="inline" />
+                <AgentPanel
+                    jobId={jobId}
+                    mode="inline"
+                    onOpenDocument={(documentId) => {
+                        const doc = documents.find((item) => item.id === documentId)
+                        if (doc) handleReview(doc)
+                    }}
+                />
             )}
 
             {/* Review Modal - Full Screen */}

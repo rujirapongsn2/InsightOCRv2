@@ -4,6 +4,7 @@ import { useMemo, useState } from "react"
 import { Bot, User, Download } from "lucide-react"
 import { Renderer, marked } from "marked"
 import { downloadAgentFile, normalizeAgentFilePath } from "@/lib/agent-download"
+import { visibleUserText } from "@/lib/a2ui"
 
 // Configure marked for GitHub Flavored Markdown
 marked.setOptions({
@@ -149,7 +150,7 @@ export default function AgentMessage({ role, content, isStreaming, conversationI
     if (role === "user") {
         return (
             <div className="flex justify-end gap-2 px-3">
-                <div className="max-w-[85%] rounded-2xl rounded-br-md bg-softnix-blue text-white px-4 py-2.5 text-sm whitespace-pre-wrap">{content}</div>
+                <div className="max-w-[85%] rounded-2xl rounded-br-md bg-softnix-blue text-white px-4 py-2.5 text-sm whitespace-pre-wrap">{visibleUserText(content || "")}</div>
                 <div className="flex-shrink-0 w-7 h-7 rounded-full bg-[#D6EAF8] flex items-center justify-center mt-1"><User className="h-3.5 w-3.5 text-softnix-blue" /></div>
             </div>
         )

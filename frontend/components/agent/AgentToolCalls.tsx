@@ -8,6 +8,8 @@ import {
     type ChatToolCallStatus,
 } from "@astryxdesign/core/Chat"
 import { downloadAgentFile, normalizeAgentFilePath } from "@/lib/agent-download"
+import { surfaceFromToolResult } from "@/lib/a2ui"
+import A2uiSurface from "./a2ui/A2uiSurface"
 
 type JsonRecord = Record<string, unknown>
 
@@ -24,6 +26,10 @@ interface AgentToolCallsProps {
     results?: Record<string, unknown>
     conversationId?: string
     autoConfirmedIds?: Set<string>
+    /** Sends a surface button click to the agent as a user message. */
+    onSurfaceAction?: (message: string) => void
+    surfaceActionsDisabled?: boolean
+    onOpenDocument?: (documentId: string) => void
 }
 
 const FILE_WRITE_TOOLS = new Set(["write_file", "create_html", "create_docx", "create_pdf", "convert_to_xlsx", "run_report_code"])
@@ -160,7 +166,15 @@ function DetailBlock({
     )
 }
 
-export default function AgentToolCalls({ calls, results = {}, conversationId, autoConfirmedIds }: AgentToolCallsProps) {
+export default function AgentToolCalls({
+    calls,
+    results = {},
+    conversationId,
+    autoConfirmedIds,
+    onSurfaceAction,
+    surfaceActionsDisabled,
+    onOpenDocument,
+}: AgentToolCallsProps) {
     const [downloadError, setDownloadError] = useState<string | null>(null)
     const [downloadingPath, setDownloadingPath] = useState<string | null>(null)
 
@@ -212,9 +226,32 @@ export default function AgentToolCalls({ calls, results = {}, conversationId, au
         }
     }), [autoConfirmedIds, calls, conversationId, downloadError, downloadingPath, handleDownload, results])
 
-    return (
+    // A successful render_ui result is shown as its surface; anything that does
+    // not parse stays an ordinary tool call.
+    const entries = useMemo(() => items.map(item => ({
+        item,
+        surface: item.name === "render_ui" ? surfaceFromToolResult((item.data as { result?: unknown }).result) : null,
+    })), [items])
+    const listed = entries.filter(entry => !entry.surface).map(entry => entry.item)
+    const toolList = (shown: ChatToolCallItem[]) => (
         <div className="mx-3">
-            <ChatToolCalls calls={items} defaultIsExpanded={false} label={`${items.length} tool call${items.length === 1 ? "" : "s"}`} />
+            <ChatToolCalls calls={shown} defaultIsExpanded={false} label={`${shown.length} tool call${shown.length === 1 ? "" : "s"}`} />
         </div>
+    )
+
+    return (
+        <>
+            {listed.length > 0 && toolList(listed)}
+            {entries.map(({ item, surface }, index) => surface && (
+                <A2uiSurface
+                    key={item.key ?? index}
+                    surface={surface}
+                    fallback={toolList([item])}
+                    actionsDisabled={surfaceActionsDisabled}
+                    onAction={onSurfaceAction}
+                    onOpenDocument={onOpenDocument}
+                />
+            ))}
+        </>
     )
 }

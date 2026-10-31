@@ -94,9 +94,11 @@ interface AgentPanelProps {
     jobId: string
     onClose?: () => void
     mode?: "overlay" | "inline"
+    /** Opens a document's review preview, for the "เปิดดู" link on agent surfaces. */
+    onOpenDocument?: (documentId: string) => void
 }
 
-export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPanelProps) {
+export default function AgentPanel({ jobId, onClose, mode = "overlay", onOpenDocument }: AgentPanelProps) {
     const isInline = mode === "inline"
     const [conversations, setConversations] = useState<Conversation[]>([])
     const [activeConversation, setActiveConversation] = useState<string | null>(null)
@@ -350,7 +352,7 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
             conversationId = conv.id
         }
         const userMsg = resolveOutgoingMessage(rawInput)
-        setInputValue("")
+        if (override === undefined) setInputValue("")
         setStreaming(true)
         setStreamText("")
         setEvents([])
@@ -421,6 +423,12 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
         }
     }
 
+    const surfaceProps = {
+        onSurfaceAction: (message: string) => { void sendMessage(message) },
+        surfaceActionsDisabled: streaming,
+        onOpenDocument,
+    }
+
     const parseToolArguments = (value: any) => {
         if (typeof value !== "string") return value || {}
         try {
@@ -481,6 +489,7 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
                     calls={calls}
                     results={persistedToolResultsMap}
                     conversationId={activeConversation || undefined}
+                    {...surfaceProps}
                 />
             )
         }
@@ -510,6 +519,7 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
                     calls={pendingCalls}
                     results={persistedToolResultsMap}
                     conversationId={activeConversation || undefined}
+                    {...surfaceProps}
                 />,
             )
             pendingCalls = []
@@ -894,6 +904,7 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
                         results={toolResultsMap}
                         conversationId={activeConversation || undefined}
                         autoConfirmedIds={autoConfirmedIds}
+                        {...surfaceProps}
                     />
                 )}
                 {streaming && !streamText && events.filter(e => e.type === "tool_call").length === 0 && (
