@@ -210,3 +210,36 @@ def test_render_ui_is_offered_to_the_jobs_agent_without_confirmation():
     assert requires_confirmation("render_ui", {}) is False
 
 
+def test_the_model_sees_a_summary_while_the_chat_keeps_the_surface(db):
+    import json
+
+    from app.agent.context import tool_content_for_llm
+
+    doc_id = _doc(db, JOB, "invoice-01.pdf")
+    dropped = str(uuid.uuid4())
+    result = _render(db, _surface(), {"documents": [{"document_id": doc_id}, {"document_id": dropped}]})
+
+    assert len(result["a2ui"]) == 3  # persisted as the tool result, which the frontend renders
+    seen = json.loads(tool_content_for_llm(result))
+    assert seen == {"ok": True, "surface_id": result["surface_id"], "document_count": 1,
+                    "dropped_document_ids": [dropped], "note": result["note"]}
+    batch = json.loads(tool_content_for_llm([{"tool": "render_ui", "arguments": {}, "result": result}]))
+    assert "a2ui" not in batch[0]["result"]
+
+
+def test_a_render_ui_failure_the_model_fixes_is_not_a_run_failure():
+    import inspect
+
+    from app.agent import loop as loop_mod
+
+    critical = [{"tool": "render_ui", "error": "render_ui: not shown"}, {"tool": "bulk_approve", "error": "x"}]
+    unresolved = [{"tool": "render_ui", "result": {"ok": False}}]
+    loop_mod._settle_corrected_failures("render_ui", critical, unresolved)
+    assert critical == [{"tool": "bulk_approve", "error": "x"}] and unresolved == []
+
+    kept = [{"tool": "bulk_approve", "error": "x"}]
+    loop_mod._settle_corrected_failures("bulk_approve", kept)
+    assert kept == [{"tool": "bulk_approve", "error": "x"}]
+    # Both tool-result paths (sequential and parallel) settle after a success.
+    assert inspect.getsource(loop_mod).count(
+        "_settle_corrected_failures(tool_name, critical_tool_failures, unresolved_tool_errors)") == 2

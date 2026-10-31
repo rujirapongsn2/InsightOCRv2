@@ -56,8 +56,19 @@ def _looks_like_prior_file_claim(content: str | None) -> bool:
     return has_file_ref and has_claim
 
 
+def _without_surface(result):
+    """A render_ui result without its A2UI messages: the user sees the surface, the model only the summary."""
+    if isinstance(result, dict) and "a2ui" in result:
+        return {key: value for key, value in result.items() if key != "a2ui"}
+    if isinstance(result, list):
+        return [{**item, "result": _without_surface(item["result"])} if isinstance(item, dict) and "result" in item
+                else item for item in result]
+    return result
+
+
 def tool_content_for_llm(result) -> str:
     """Serialize a tool result for the LLM, truncating oversized payloads."""
+    result = _without_surface(result)
     content = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False, default=str)
     if len(content) > TOOL_RESULT_MAX_CHARS:
         omitted = len(content) - TOOL_RESULT_MAX_CHARS

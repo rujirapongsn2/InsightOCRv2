@@ -422,6 +422,18 @@ def _aggregate_success(
     return (len(failed_steps) == 0), failed_steps
 
 
+# Tools whose failure is a corrective message to the model, not a failed action:
+# a later success of the same tool means the model fixed its call.
+SELF_CORRECTING_TOOLS = frozenset({"render_ui"})
+
+
+def _settle_corrected_failures(tool_name: str, *failure_lists: list[dict[str, Any]]) -> None:
+    """After tool_name succeeds, forget its earlier failures if it is self-correcting."""
+    if tool_name in SELF_CORRECTING_TOOLS:
+        for failures in failure_lists:
+            failures[:] = [f for f in failures if f.get("tool") != tool_name]
+
+
 def _tool_error_summary(tool_name: str, result: Any) -> str:
     if not isinstance(result, dict):
         return f"{tool_name} failed"
@@ -1339,6 +1351,8 @@ class AgentLoop:
                         elif _is_file_write_success(tool_name, result):
                             latest_file_success_index = tool_events_seen
                             unresolved_tool_errors.clear()
+                        else:
+                            _settle_corrected_failures(tool_name, critical_tool_failures, unresolved_tool_errors)
                 else:
                     # Parallel — all read-only tools, execute concurrently
                     tasks = []
@@ -1421,6 +1435,8 @@ class AgentLoop:
                         elif _is_file_write_success(tool_name, result):
                             latest_file_success_index = tool_events_seen
                             unresolved_tool_errors.clear()
+                        else:
+                            _settle_corrected_failures(tool_name, critical_tool_failures, unresolved_tool_errors)
 
                 # Flush deferred failure nudges — now that all tool messages for
                 # this assistant turn are contiguous, system messages are safe.
