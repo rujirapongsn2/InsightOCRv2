@@ -9,7 +9,12 @@ from __future__ import annotations
 
 import copy
 import json
+import math
+import re
+import unicodedata
+from collections import Counter
 from dataclasses import dataclass
+from datetime import date
 from typing import Any, Callable
 
 A2UI_VERSION = "v0.9"
@@ -19,10 +24,35 @@ MAX_DOCUMENTS = 200
 MAX_TEXT_CHARS = 2000
 MAX_LABEL_CHARS = 60
 MAX_NOTE_CHARS = 300
+# Also bounds the analytics data (500 table rows fit only when they are short):
+# the whole surface is persisted with the tool result and replayed into the chat.
 MAX_DATA_CHARS = 100_000
 ACTION_EVENTS = ("approve_documents", "reject_documents", "ask_agent")
 TEXT_VARIANTS = ("body", "caption", "heading")
 BUTTON_VARIANTS = ("primary", "secondary")
+
+MAX_TABLE_ROWS = 500
+MAX_TABLE_COLUMNS = 12
+MAX_CHART_SERIES = 8
+MAX_CHART_POINTS = 200
+MAX_RISK_ITEMS = 50
+MAX_KEY_CHARS = 40
+MAX_UNIT_CHARS = 20
+MAX_TITLE_CHARS = 120
+MAX_CELL_CHARS = 300
+MAX_QUOTE_CHARS = 500
+MAX_DESCRIPTION_CHARS = 1000
+MAX_PAGE = 10_000
+NUMBER_FORMATS = ("number", "currency", "percent")
+COLUMN_TYPES = ("text", "number", "currency", "percent", "date", "delta", "risk")
+NUMERIC_COLUMN_TYPES = ("number", "currency", "percent")
+COLUMN_ALIGNS = ("left", "center", "right")
+CHART_TYPES = ("bar", "line")
+DIRECTIONS = ("up", "down", "flat")
+SENTIMENTS = ("good", "bad", "neutral")
+RISK_LEVELS = ("critical", "high", "medium", "low")
+RISK_ITEM_KEYS = ("title", "level", "category", "description", "quote", "document_id", "page", "recommendation")
+ANALYTIC_COMPONENTS = ("Metric", "DataTable", "Chart", "RiskList", "RiskBadge")
 
 
 class SurfaceError(ValueError):
@@ -69,7 +99,7 @@ def _unknown_props(comp: dict, allowed: set[str]) -> list[str]:
     return [f"unknown prop(s) {extra}; allowed: {sorted(allowed)}"] if extra else []
 
 
-def _check_column(comp: dict) -> list[str]:
+def _check_children(comp: dict) -> list[str]:
     errors = _unknown_props(comp, {"children"})
     children = comp.get("children")
     if not isinstance(children, list) or not children or not all(isinstance(c, str) for c in children):
@@ -127,12 +157,295 @@ def _check_button(comp: dict) -> list[str]:
     return errors
 
 
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _string_problem(value: Any, where: str, limit: int, *, required: bool = True) -> str | None:
+    if value is None and not required:
+        return None
+    if not isinstance(value, str) or not value.strip() or len(value) > limit:
+        return f"{where} must be a non-empty string of at most {limit} characters"
+    return None
+
+
+def _enum_problem(value: Any, where: str, allowed: tuple[str, ...], *, required: bool = True) -> str | None:
+    if value is None and not required:
+        return None
+    return None if value in allowed else f"{where} must be one of {list(allowed)}"
+
+
+def _key_problem(key: Any, where: str) -> str | None:
+    if not isinstance(key, str) or not key or len(key) > MAX_KEY_CHARS or "/" in key or "~" in key:
+        return f'{where} must be a string of at most {MAX_KEY_CHARS} characters without "/" or "~"'
+    return None
+
+
+def _problems(*problems: str | None) -> list[str]:
+    return [p for p in problems if p]
+
+
+def _delta_problems(delta: Any, where: str) -> list[str]:
+    if not isinstance(delta, dict) or set(delta) - {"value", "direction", "sentiment", "label"}:
+        return [f'{where} must be {{"value": number, "direction": {"|".join(DIRECTIONS)}, '
+                f'"sentiment": {"|".join(SENTIMENTS)}, "label"?: string}}']
+    value, direction = delta.get("value"), delta.get("direction")
+    errors = _problems(
+        None if _is_number(value) else f"{where}.value must be a finite number",
+        _enum_problem(direction, f"{where}.direction", DIRECTIONS),
+        _enum_problem(delta.get("sentiment"), f"{where}.sentiment", SENTIMENTS),
+        _string_problem(delta.get("label"), f"{where}.label", MAX_LABEL_CHARS, required=False),
+    )
+    if _is_number(value) and ((direction == "up" and value < 0) or (direction == "down" and value > 0)):
+        errors.append(f'{where}: direction "{direction}" contradicts value {value}; '
+                      'use a value >= 0 for "up" and <= 0 for "down"')
+    return errors
+
+
+def _check_metric(comp: dict) -> list[str]:
+    errors = _unknown_props(comp, {"label", "value", "unit", "format", "delta"})
+    value = comp.get("value")
+    errors.extend(_problems(
+        None if _is_number(value) or is_binding(value) else '"value" must be a finite number or {"path": "/pointer"}',
+        _string_problem(comp.get("label"), '"label"', MAX_LABEL_CHARS),
+        _string_problem(comp.get("unit"), '"unit"', MAX_UNIT_CHARS, required=False),
+        _enum_problem(comp.get("format"), '"format"', NUMBER_FORMATS, required=False),
+    ))
+    if "delta" in comp:
+        errors.extend(_delta_problems(comp["delta"], '"delta"'))
+    return errors
+
+
+def _check_data_table(comp: dict) -> list[str]:
+    errors = _unknown_props(comp, {"columns", "rows", "caption"})
+    columns = comp.get("columns")
+    if not isinstance(columns, list) or not 1 <= len(columns) <= MAX_TABLE_COLUMNS:
+        errors.append(f'"columns" must be an array of 1 to {MAX_TABLE_COLUMNS} columns')
+        columns = []
+    keys: list[str] = []
+    for index, column in enumerate(columns):
+        where = f'"columns"[{index}]'
+        if not isinstance(column, dict) or set(column) - {"key", "label", "type", "align"}:
+            errors.append(f'{where} must be {{"key", "label", "type", "align"?}}')
+            continue
+        keys.append(str(column.get("key")))
+        errors.extend(_problems(
+            _key_problem(column.get("key"), f"{where}.key"),
+            _string_problem(column.get("label"), f"{where}.label", MAX_LABEL_CHARS),
+            _enum_problem(column.get("type"), f"{where}.type", COLUMN_TYPES),
+            _enum_problem(column.get("align"), f"{where}.align", COLUMN_ALIGNS, required=False),
+        ))
+        if column.get("key") == "document_id":
+            errors.append(f'{where}: "document_id" is not a column; put it on each row and the table '
+                          "shows an open link for that document")
+    if len(keys) != len(set(keys)):
+        errors.append('"columns" keys must be unique')
+    errors.extend(_problems(
+        None if is_binding(comp.get("rows")) else '"rows" must be a binding like {"path": "/rows"}',
+        _string_problem(comp.get("caption"), '"caption"', MAX_TITLE_CHARS, required=False),
+    ))
+    return errors
+
+
+def _check_chart(comp: dict) -> list[str]:
+    errors = _unknown_props(comp, {"type", "title", "x", "series", "data", "unit", "format"})
+    errors.extend(_problems(
+        _enum_problem(comp.get("type"), '"type"', CHART_TYPES),
+        _string_problem(comp.get("title"), '"title"', MAX_TITLE_CHARS, required=False),
+        _key_problem(comp.get("x"), '"x"'),
+        _string_problem(comp.get("unit"), '"unit"', MAX_UNIT_CHARS, required=False),
+        _enum_problem(comp.get("format"), '"format"', NUMBER_FORMATS, required=False),
+        None if is_binding(comp.get("data")) else '"data" must be a binding like {"path": "/points"}',
+    ))
+    series = comp.get("series")
+    if not isinstance(series, list) or not 1 <= len(series) <= MAX_CHART_SERIES:
+        errors.append(f'"series" must be an array of 1 to {MAX_CHART_SERIES} series; fold the rest into one "อื่นๆ" series')
+        series = []
+    keys = [str(comp.get("x"))]
+    for index, item in enumerate(series):
+        where = f'"series"[{index}]'
+        if not isinstance(item, dict) or set(item) != {"key", "label"}:
+            errors.append(f'{where} must be {{"key", "label"}}')
+            continue
+        keys.append(str(item["key"]))
+        errors.extend(_problems(_key_problem(item["key"], f"{where}.key"),
+                                _string_problem(item["label"], f"{where}.label", MAX_LABEL_CHARS)))
+    if len(keys) != len(set(keys)):
+        errors.append('"x" and the "series" keys must all be different')
+    return errors
+
+
+def _check_risk_list(comp: dict) -> list[str]:
+    return _unknown_props(comp, {"items", "title"}) + _problems(
+        None if is_binding(comp.get("items")) else '"items" must be a binding like {"path": "/risks"}',
+        _string_problem(comp.get("title"), '"title"', MAX_TITLE_CHARS, required=False),
+    )
+
+
+def _check_risk_badge(comp: dict) -> list[str]:
+    return _unknown_props(comp, {"level"}) + _problems(_enum_problem(comp.get("level"), '"level"', RISK_LEVELS))
+
+
 CATALOG: dict[str, Callable[[dict], list[str]]] = {
-    "Column": _check_column,
+    "Column": _check_children,
+    "Row": _check_children,
     "Text": _check_text,
     "DocumentList": _check_document_list,
     "Button": _check_button,
+    "Metric": _check_metric,
+    "DataTable": _check_data_table,
+    "Chart": _check_chart,
+    "RiskList": _check_risk_list,
+    "RiskBadge": _check_risk_badge,
 }
+
+
+# ── Bound values: what each component reads from data, and the shape it needs ──
+# A check gets the pointer and the value there and returns its problems.
+
+ValueCheck = Callable[[str, Any], list[str]]
+
+
+def _text_value(path: str, value: Any) -> list[str]:
+    if isinstance(value, str) and len(value) <= MAX_TEXT_CHARS:
+        return []
+    return [f'data "{path}" is shown by a Text and must be a string of at most {MAX_TEXT_CHARS} characters']
+
+
+def _number_value(path: str, value: Any) -> list[str]:
+    return [] if _is_number(value) else [f'data "{path}" is shown by a Metric and must be a finite number']
+
+
+def _date_problem(value: Any, where: str) -> str | None:
+    if isinstance(value, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        try:
+            date.fromisoformat(value)
+            return None
+        except ValueError:
+            pass
+    return f'{where} must be a date "YYYY-MM-DD"'
+
+
+def _cell_problems(column_type: str, value: Any, where: str) -> list[str]:
+    if value is None:
+        return []
+    if column_type in NUMERIC_COLUMN_TYPES:
+        return [] if _is_number(value) else [f"{where} must be a finite number (or null)"]
+    if column_type == "date":
+        return _problems(_date_problem(value, where))
+    if column_type == "delta":
+        return _delta_problems(value, where)
+    if column_type == "risk":
+        return _problems(_enum_problem(value, where, RISK_LEVELS))
+    return _problems(_string_problem(value, where, MAX_CELL_CHARS))
+
+
+def _array_problem(path: str, value: Any, limit: int, what: str) -> str | None:
+    if not isinstance(value, list):
+        return f'data "{path}" must be an array of {what}'
+    if len(value) > limit:
+        return f'data "{path}" has {len(value)} {what}; the limit is {limit}. Aggregate or filter first'
+    return None
+
+
+def _at(path: str, index: int) -> Callable[..., str]:
+    """Names a row, or a key in it, in an error: at() -> data "/rows/3", at("x") -> data "/rows/3/x"."""
+    return lambda *keys: 'data "' + "/".join((path, str(index), *keys)) + '"'
+
+
+def _document_id_problem(row: dict, at: Callable[..., str]) -> str | None:
+    if "document_id" in row and not isinstance(row["document_id"], str):
+        return f'{at("document_id")} must be a document "id" string from list_documents'
+    return None
+
+
+def _table_rows(columns: list[dict]) -> ValueCheck:
+    types = {c["key"]: c["type"] for c in columns}
+
+    def check(path: str, rows: Any) -> list[str]:
+        if problem := _array_problem(path, rows, MAX_TABLE_ROWS, "rows"):
+            return [problem]
+        errors: list[str] = []
+        for index, row in enumerate(rows):
+            at = _at(path, index)
+            if not isinstance(row, dict):
+                errors.append(f"{at()} must be an object keyed by column key")
+                continue
+            if extra := sorted(set(row) - set(types) - {"document_id"}):
+                errors.append(f'{at()} has keys {extra} that are not columns; allowed: {sorted(types)} and "document_id"')
+            errors.extend(_problems(_document_id_problem(row, at)))
+            for key, column_type in types.items():
+                errors.extend(_cell_problems(column_type, row.get(key), at(key)))
+        return errors
+    return check
+
+
+def _chart_points(comp: dict) -> ValueCheck:
+    x, keys = comp["x"], [s["key"] for s in comp["series"]]
+
+    def check(path: str, points: Any) -> list[str]:
+        if problem := _array_problem(path, points, MAX_CHART_POINTS, "points"):
+            return [problem]
+        if not points:
+            return [f'data "{path}" has no points']
+        errors: list[str] = []
+        for index, point in enumerate(points):
+            at = _at(path, index)
+            if not isinstance(point, dict):
+                errors.append(f'{at()} must be an object like {{"{x}": ..., "{keys[0]}": number}}')
+                continue
+            if extra := sorted(set(point) - {x, *keys}):
+                errors.append(f'{at()} has keys {extra}; a point holds only "{x}" and the series keys {keys}')
+            label = point.get(x)
+            if not (_is_number(label) or (isinstance(label, str) and label.strip() and len(label) <= MAX_LABEL_CHARS)):
+                errors.append(f"{at(x)} must be a number or a string of at most {MAX_LABEL_CHARS} characters")
+            errors.extend(f"{at(key)} must be a finite number (or null)"
+                          for key in keys if point.get(key) is not None and not _is_number(point.get(key)))
+        return errors
+    return check
+
+
+def _risk_items(path: str, items: Any) -> list[str]:
+    if problem := _array_problem(path, items, MAX_RISK_ITEMS, "risk items"):
+        return [problem]
+    errors: list[str] = []
+    for index, item in enumerate(items):
+        at = _at(path, index)
+        if not isinstance(item, dict):
+            errors.append(f"{at()} must be an object with {list(RISK_ITEM_KEYS)}")
+            continue
+        if "quote_verified" in item:
+            errors.append(f"{at('quote_verified')} is set by the system after checking the quote against the "
+                          "document; remove it")
+        if extra := sorted(set(item) - set(RISK_ITEM_KEYS) - {"quote_verified"}):
+            errors.append(f"{at()} has unknown keys {extra}; allowed: {list(RISK_ITEM_KEYS)}")
+        page = item.get("page")
+        errors.extend(_problems(
+            _string_problem(item.get("title"), at("title"), MAX_TITLE_CHARS),
+            _enum_problem(item.get("level"), at("level"), RISK_LEVELS),
+            _string_problem(item.get("category"), at("category"), MAX_LABEL_CHARS, required=False),
+            _string_problem(item.get("description"), at("description"), MAX_DESCRIPTION_CHARS),
+            _string_problem(item.get("quote"), at("quote"), MAX_QUOTE_CHARS, required=False),
+            _string_problem(item.get("recommendation"), at("recommendation"), MAX_DESCRIPTION_CHARS, required=False),
+            _document_id_problem(item, at),
+            None if page is None or (isinstance(page, int) and not isinstance(page, bool) and 1 <= page <= MAX_PAGE)
+            else f"{at('page')} must be a page number from 1",
+            f"{at()} has a quote but no document_id; cite the document the quote comes from"
+            if "quote" in item and "document_id" not in item else None,
+        ))
+    return errors
+
+
+BOUND_VALUES: dict[str, Callable[[dict], list[tuple[str, ValueCheck]]]] = {
+    "Text": lambda c: [(c["text"]["path"], _text_value)] if is_binding(c["text"]) else [],
+    "Metric": lambda c: [(c["value"]["path"], _number_value)] if is_binding(c["value"]) else [],
+    "DataTable": lambda c: [(c["rows"]["path"], _table_rows(c["columns"]))],
+    "Chart": lambda c: [(c["data"]["path"], _chart_points(c))],
+    "RiskList": lambda c: [(c["items"]["path"], _risk_items)],
+}
+
+# Components whose rows may cite documents; the handler checks those ids and quotes.
+CITING_BINDINGS: dict[str, str] = {"DataTable": "rows", "RiskList": "items"}
 
 
 @dataclass(frozen=True)
@@ -141,9 +454,14 @@ class Surface:
     data: dict
     # (documents pointer, the agent's rows at that pointer) for each DocumentList
     document_lists: list[tuple[str, list[dict]]]
+    # (pointer, rows) for each DataTable / RiskList; rows may cite a document_id
+    cited_rows: list[tuple[str, list[dict]]]
 
     def document_ids(self) -> list[str]:
         return [row["document_id"] for _, rows in self.document_lists for row in rows]
+
+    def cited_document_ids(self) -> list[str]:
+        return [row["document_id"] for _, rows in self.cited_rows for row in rows if "document_id" in row]
 
 
 def _check_tree(by_id: dict[str, dict]) -> list[str]:
@@ -235,8 +553,9 @@ def _check_data(by_id: dict[str, dict], data: dict) -> list[str]:
     lists = [c for c in by_id.values() if c["component"] == "DocumentList"]
     documents = [c["documents"]["path"] for c in lists]
     selections = [c["selection"] for c in lists if c.get("selection")]
-    texts = [c["text"]["path"] for c in by_id.values() if c["component"] == "Text" and is_binding(c["text"])]
-    errors = [p for p in (_object_path_problem(data, path) for path in documents + selections) if p]
+    reads = [read for c in by_id.values() for read in BOUND_VALUES.get(c["component"], lambda _: [])(c)]
+    read_paths = [path for path, _ in reads]
+    errors = [p for p in (_object_path_problem(data, path) for path in documents + selections + read_paths) if p]
     for selection in selections:
         errors.extend(f'"selection" "{selection}" overlaps the documents at "{doc}"; use a separate key such as "/selected"'
                       for doc in documents if _overlaps(selection, doc))
@@ -244,10 +563,8 @@ def _check_data(by_id: dict[str, dict], data: dict) -> list[str]:
         if value is not None and not (isinstance(value, list) and len(value) <= MAX_DOCUMENTS
                                       and all(isinstance(v, str) for v in value)):
             errors.append(f'data "{selection}" is a selection and must be an array of document ids (or left out)')
-    for path in texts:
-        value = resolve_pointer(data, path)
-        if not isinstance(value, str) or len(value) > MAX_TEXT_CHARS:
-            errors.append(f'data "{path}" is shown by a Text and must be a string of at most {MAX_TEXT_CHARS} characters')
+    for path, check in reads:
+        errors.extend(check(path, resolve_pointer(data, path)))
     for comp in by_id.values():
         if comp["component"] != "Button":
             continue
@@ -255,7 +572,7 @@ def _check_data(by_id: dict[str, dict], data: dict) -> list[str]:
             if is_binding(value) and value["path"] not in selections:
                 errors.append(f'component "{comp["id"]}" (Button): action context "{key}" may only bind to a '
                               'DocumentList "selection" pointer; use a literal otherwise')
-    errors.extend(_unused_data(data, "", set(documents + selections + texts)))
+    errors.extend(_unused_data(data, "", set(documents + selections + read_paths)))
     size = len(json.dumps(data, ensure_ascii=False, default=str))
     if size > MAX_DATA_CHARS:
         errors.append(f'"data" is {size} characters; the limit is {MAX_DATA_CHARS}')
@@ -313,7 +630,74 @@ def parse_surface(components: Any, data: Any) -> Surface:
         more = f" (and {len(errors) - len(shown)} more)" if len(errors) > len(shown) else ""
         raise SurfaceError("render_ui was not shown. Fix these problems and call render_ui again: "
                            + "; ".join(shown) + more)
-    return Surface(components=components, data=data, document_lists=document_lists)
+    cited_paths = dict.fromkeys(comp[CITING_BINDINGS[comp["component"]]]["path"]
+                                for comp in by_id.values() if comp["component"] in CITING_BINDINGS)
+    cited_rows = [(path, resolve_pointer(data, path)) for path in cited_paths]
+    return Surface(components=components, data=data, document_lists=document_lists, cited_rows=cited_rows)
+
+
+def _compact(text: str) -> str:
+    return re.sub(r"\s+", "", unicodedata.normalize("NFKC", text))
+
+
+def quote_found(quote: str, document_text: str | None) -> bool:
+    """Whether quote occurs verbatim in the document text, ignoring whitespace.
+
+    Whitespace is dropped rather than collapsed because OCR of Thai text puts
+    spaces inside words and line breaks inside clauses; every other character
+    must match exactly.
+    """
+    needle = _compact(quote)
+    return bool(needle) and needle in _compact(document_text or "")
+
+
+@dataclass(frozen=True)
+class CitedDocument:
+    document_id: str
+    text: str | None
+
+
+def resolve_citations(surface: Surface, data: dict, documents: dict[str, CitedDocument]) -> dict:
+    """Canonicalise cited document ids and set quote_verified from the documents' text.
+
+    documents maps each id as the model wrote it to this job's document. An id
+    missing from it is a corrective error: an analysis row must not silently
+    lose its source.
+    """
+    unknown = sorted({raw for raw in surface.cited_document_ids() if raw not in documents})
+    if unknown:
+        raise SurfaceError(f"render_ui was not shown: these document_id values in table rows or risk items are not "
+                           f"documents of this job: {unknown[:5]}. Use the \"id\" values from list_documents and "
+                           "call render_ui again.")
+    data = copy.deepcopy(data)
+    for path, rows in surface.cited_rows:
+        resolved = []
+        for row in rows:
+            row = dict(row)
+            cited = documents.get(row.get("document_id", ""))
+            if cited:
+                row["document_id"] = cited.document_id
+            if "quote" in row:
+                row["quote_verified"] = bool(cited) and quote_found(row["quote"], cited.text)
+            resolved.append(row)
+        _set_pointer(data, path, resolved)
+    return data
+
+
+def analytics_summary(components: list[dict], data: dict) -> dict:
+    """What the model is told about the analytics it rendered: counts, not values."""
+    counts = Counter(c["component"] for c in components if c["component"] in ANALYTIC_COMPONENTS)
+    if not counts:
+        return {}
+    summary: dict[str, Any] = {"components": dict(counts)}
+    risk_paths = dict.fromkeys(c["items"]["path"] for c in components if c["component"] == "RiskList")
+    items = [item for path in risk_paths for item in resolve_pointer(data, path)]
+    if risk_paths:
+        levels = Counter(item["level"] for item in items)
+        summary["risks"] = {level: levels[level] for level in RISK_LEVELS}
+        summary["quotes"] = sum("quote" in item for item in items)
+        summary["unverified_quotes"] = sum(item.get("quote_verified") is False for item in items)
+    return summary
 
 
 def resolve_documents(surface: Surface, rows_by_id: dict[str, dict]) -> tuple[dict, list[str]]:
