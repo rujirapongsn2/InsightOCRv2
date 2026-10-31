@@ -34,7 +34,7 @@ from app.agent.context import (
 from app.agent.events import sse_event, SSEEventType
 from app.agent.confirmations import requires_confirmation, describe_action
 from app.agent.tools.registry import tool_registry
-from app.agent.tools import document_tools, integration_tools, memory_tools, code_tools, skill_tools, filesystem_tools, web_search_tools, workflow_tools  # noqa: F401 — side-effect: registers tools
+from app.agent.tools import document_tools, integration_tools, memory_tools, code_tools, skill_tools, filesystem_tools, web_search_tools, workflow_tools, ui_tools  # noqa: F401 — side-effect: registers tools
 from app.crud.crud_agent_message import agent_message as crud_msg
 from app.crud.crud_agent_pending import agent_pending as crud_pending
 from app.crud.crud_agent_conversation import agent_conversation as crud_conv
