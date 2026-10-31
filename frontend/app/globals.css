@@ -126,9 +126,13 @@
 
 /* ─── Agent analytics (A2UI charts, deltas, risk badges) ──────────────────
    Series slots are a fixed order validated with the dataviz palette checker
-   (adjacent CVD and normal-vision separation pass on #ffffff and #1f2023).
-   Slots 3–5 are below 3:1 on white, so charts always carry a legend or
-   labels plus a table view. Status text pairs are at least 4.7:1. */
+   (adjacent CVD and normal-vision separation pass on #ffffff). Slots 3–5 are
+   below 3:1 on white, so charts always carry a legend or labels plus a table
+   view. Status text pairs are at least 4.7:1.
+   The app is light-only (layout sets data-theme="light"). Dark steps that
+   pass the same checks on #1f2023, for when the app gets a dark theme:
+   series #3987e5 #d95926 #199e70 #c98500 #d55181 #008300 #9085e9 #e66767,
+   good #57d6a3, bad #f98f87, neutral/muted #8f9199, grid #2c2c2a. */
 :root {
   --viz-1: #1868db; --viz-2: #eb6834; --viz-3: #1baf7a; --viz-4: #eda100;
   --viz-5: #e87ba4; --viz-6: #008300; --viz-7: #6250d6; --viz-8: #e34948;
@@ -142,28 +146,6 @@
   --viz-high-bg: #fedec8;     --viz-high-fg: #9e4c00;
   --viz-medium-bg: #fce4a6;   --viz-medium-fg: #7f5f01;
   --viz-low-bg: #f0f1f2;      --viz-low-fg: #505258;
-}
-@media (prefers-color-scheme: dark) {
-  :root:where(:not([data-theme="light"])) {
-    --viz-1: #3987e5; --viz-2: #d95926; --viz-3: #199e70; --viz-4: #c98500;
-    --viz-5: #d55181; --viz-6: #008300; --viz-7: #9085e9; --viz-8: #e66767;
-    --viz-surface: #1f2023; --viz-grid: #2c2c2a; --viz-muted: #8f9199;
-    --viz-good: #57d6a3; --viz-bad: #f98f87; --viz-neutral: #8f9199;
-    --viz-critical-bg: #3a2422; --viz-critical-fg: #ffada7;
-    --viz-high-bg: #3a2a1c;     --viz-high-fg: #fdb26a;
-    --viz-medium-bg: #33301f;   --viz-medium-fg: #fce4a6;
-    --viz-low-bg: #2c2d31;      --viz-low-fg: #c8c9cd;
-  }
-}
-:root[data-theme="dark"] {
-  --viz-1: #3987e5; --viz-2: #d95926; --viz-3: #199e70; --viz-4: #c98500;
-  --viz-5: #d55181; --viz-6: #008300; --viz-7: #9085e9; --viz-8: #e66767;
-  --viz-surface: #1f2023; --viz-grid: #2c2c2a; --viz-muted: #8f9199;
-  --viz-good: #57d6a3; --viz-bad: #f98f87; --viz-neutral: #8f9199;
-  --viz-critical-bg: #3a2422; --viz-critical-fg: #ffada7;
-  --viz-high-bg: #3a2a1c;     --viz-high-fg: #fdb26a;
-  --viz-medium-bg: #33301f;   --viz-medium-fg: #fce4a6;
-  --viz-low-bg: #2c2d31;      --viz-low-fg: #c8c9cd;
 }
 
 @theme inline {

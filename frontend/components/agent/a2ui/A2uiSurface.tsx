@@ -104,7 +104,7 @@ function DocumentList({ component, ctx }: { component: ComponentOf<"DocumentList
 const CATALOG: { [K in ComponentType]: (component: ComponentOf<K>, ctx: RenderContext) => ReactNode } = {
     Column: (component, ctx) => (
         <div className="flex flex-col gap-2">
-            {component.children.map(id => <div key={id}>{ctx.render(id)}</div>)}
+            {component.children.map(id => <div key={id} className="min-w-0">{ctx.render(id)}</div>)}
         </div>
     ),
     Row: (component, ctx) => (

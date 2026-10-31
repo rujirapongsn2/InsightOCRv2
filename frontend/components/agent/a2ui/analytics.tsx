@@ -215,9 +215,11 @@ const BAR_HEIGHT = 12
 const BAR_GAP = 2
 
 function BarChart({ points, series, format }: { points: ChartPoint[]; series: ChartSeries[]; format: (value: number) => string }) {
+    // No value axis here (each bar is labelled), so the longest bar may fill the track.
     const values = points.flatMap(point => point.values.filter(isFiniteNumber))
-    const { min, max } = niceScale(values, true)
-    const percent = (value: number) => round(((value - min) / (max - min)) * 100)
+    const min = Math.min(0, ...values)
+    const max = Math.max(0, ...values)
+    const percent = (value: number) => (max === min ? 0 : round(((value - min) / (max - min)) * 100))
     const zero = percent(0)
     const height = series.length * BAR_HEIGHT + (series.length - 1) * BAR_GAP
     return (
