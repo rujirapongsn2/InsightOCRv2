@@ -1383,3 +1383,28 @@ Date: 2026-06-30
 - Manual check: open job2 -> starbuck.pdf. Expect badge "ข้อมูลไม่ครบ" (not
   "OCR degraded"), banner "ไม่พบ buyer — …", and no duplicate "รอตรวจ" chip
   beside "ยืนยันถูกต้อง" on `line_items`.
+
+## Agent generative UI (A2UI prototype)
+
+- The Jobs agent has a `render_ui` tool. It returns A2UI v0.9 messages
+  (`createSurface`, `updateComponents`, `updateDataModel`) for the catalog
+  `https://insightdoc.app/a2ui/catalogs/jobs/v1` (Column, Text, DocumentList,
+  Button). The chat renders a successful result inline instead of a tool card.
+  A result that does not parse stays a normal tool call.
+- Filenames and statuses in a surface come from the job's documents. Ids from
+  another job are dropped. `bulk_approve` accepts `doc_ids`; an empty list
+  approves nothing.
+- Manual check: open a job with at least 3 documents in `extraction_completed`,
+  open the AI Agent tab and ask "หาเอกสารที่ยังไม่อนุมัติ". Expect a short text
+  answer and a selectable list with filename, status "รอตรวจ" and an optional
+  note. "เปิดดู" opens that document's preview.
+- With nothing selected, the approve button is disabled. Select 2 and click it.
+  The chat shows "อนุมัติเอกสาร 2 รายการที่เลือก" without the JSON block. While
+  the agent runs, the surface buttons are disabled.
+- Expect a confirmation that lists the 2 filenames and their status, with the
+  raw arguments under "Show arguments". Confirm, then check that only those 2
+  documents became reviewed. Reject instead and check that nothing changed.
+- Automated: `cd backend && SECRET_KEY=test python -m pytest test/test_agent_render_ui.py
+  test/test_agent_document_confirm.py` (Python 3.11) and
+  `node --test frontend/test/a2ui.test.mjs`.
+- Not yet checked against a live model or in a browser.
