@@ -75,6 +75,27 @@ export function getPointer(data: unknown, path: string): unknown {
     return node
 }
 
+/** Whether every parent on path is an object (or missing), so setPointer never replaces an array or a value. */
+function isObjectPath(data: DataModel, path: string): boolean {
+    let node: unknown = data
+    for (const token of pointerTokens(path).slice(0, -1)) {
+        if (!isRecord(node)) return false
+        if (!Object.hasOwn(node, token)) return true
+        node = node[token]
+    }
+    return isRecord(node)
+}
+
+const overlaps = (a: string, b: string) => a === b || a.startsWith(b + "/") || b.startsWith(a + "/")
+
+/** The pointers the renderer reads rows from and writes selections to are plain object paths. */
+function hasSafePointers(surface: Surface): boolean {
+    return Object.values(surface.components).every(c => c.component !== "DocumentList" || (
+        isObjectPath(surface.dataModel, c.documents.path)
+        && (!c.selection || (isObjectPath(surface.dataModel, c.selection) && !overlaps(c.selection, c.documents.path)))
+    ))
+}
+
 export function setPointer(data: DataModel, path: string, value: unknown): DataModel {
     const tokens = pointerTokens(path)
     if (tokens.length === 0) return isRecord(value) ? value : data
@@ -159,12 +180,13 @@ export function parseSurface(messages: unknown): Surface | null {
         } else if (isRecord(message.updateDataModel)) {
             const update = message.updateDataModel
             if (!surface || update.surfaceId !== surface.surfaceId || typeof update.path !== "string") return null
+            if (!isObjectPath(surface.dataModel, update.path)) return null
             surface.dataModel = setPointer(surface.dataModel, update.path, update.value)
         } else {
             return null
         }
     }
-    return surface && isTree(surface.components) ? surface : null
+    return surface && isTree(surface.components) && hasSafePointers(surface) ? surface : null
 }
 
 export function surfaceFromToolResult(result: unknown): Surface | null {
@@ -218,7 +240,7 @@ export function actionMessage(action: A2uiAction, label: string): string {
     return `${describeAction(action, label)}\n\n\`\`\`${ACTION_FENCE}\n${JSON.stringify(action)}\n\`\`\``
 }
 
-const ACTION_BLOCK_RE = new RegExp("\\n*```" + ACTION_FENCE + "\\n[\\s\\S]*?\\n```\\s*$")
+const ACTION_BLOCK_RE = new RegExp("\\n*```" + ACTION_FENCE + "\\n([\\s\\S]*?)\\n```\\s*$")
 
 /** The readable part of a user message, without its a2ui-action block. */
 export function visibleUserText(content: string): string {
@@ -238,4 +260,51 @@ export const DOCUMENT_STATUS_LABEL: Record<string, string> = {
 
 export function documentStatusLabel(status: string): string {
     return DOCUMENT_STATUS_LABEL[status] ?? status.replace(/_/g, " ")
+}
+
+/** The surfaces whose buttons the user already clicked, read from the a2ui-action blocks of their messages. */
+export function answeredSurfaceIds(userMessages: readonly string[]): Set<string> {
+    const ids = new Set<string>()
+    for (const content of userMessages) {
+        const block = ACTION_BLOCK_RE.exec(content)?.[1]
+        if (!block) continue
+        try {
+            const action: unknown = JSON.parse(block)
+            if (isRecord(action) && typeof action.surfaceId === "string") ids.add(action.surfaceId)
+        } catch {
+            // Not an action this panel sent; it answers nothing.
+        }
+    }
+    return ids
+}
+
+/** The newest render_ui surface among tool results given in conversation order. */
+export function latestSurfaceId(results: readonly unknown[]): string | null {
+    for (let index = results.length - 1; index >= 0; index--) {
+        const surface = surfaceFromToolResult(results[index])
+        if (surface) return surface.surfaceId
+    }
+    return null
+}
+
+export interface SurfaceConversation {
+    latestSurfaceId: string | null
+    answered: ReadonlySet<string>
+    /** A run is queued or running; a click now would start a second one. */
+    runActive: boolean
+}
+
+export const SURFACE_NOTES = {
+    answered: "ส่งคำสั่งแล้ว",
+    outdated: "แผงนี้ไม่ใช่แผงล่าสุด สถานะเอกสารอาจไม่เป็นปัจจุบัน",
+} as const
+
+/** Only the newest surface stays actionable, until it is answered, and never while a run is active. */
+export function surfaceAvailability(surfaceId: string, conversation: SurfaceConversation): { actionable: boolean; notes: string[] } {
+    const answered = conversation.answered.has(surfaceId)
+    const outdated = surfaceId !== conversation.latestSurfaceId
+    const notes: string[] = []
+    if (answered) notes.push(SURFACE_NOTES.answered)
+    if (outdated) notes.push(SURFACE_NOTES.outdated)
+    return { actionable: !answered && !outdated && !conversation.runActive, notes }
 }

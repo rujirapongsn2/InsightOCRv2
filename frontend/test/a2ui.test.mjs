@@ -111,6 +111,70 @@ test("button actions resolve bindings into an A2UI action message", () => {
   assert.equal(a2ui.visibleUserText("hello ```a2ui-action``` text"), "hello ```a2ui-action``` text")
 })
 
+test("pointers through arrays are not rendered as surfaces", () => {
+  const grouped = [components[0], components[1],
+    { ...components[2], documents: { path: "/groups/0/docs" } }, components[3]]
+  assert.equal(a2ui.parseSurface(messages(grouped, { ...data, groups: [{ docs: data.documents }] })), null)
+  const inside = [components[0], components[1], { ...components[2], selection: "/documents/sel" }, components[3]]
+  assert.equal(a2ui.parseSurface(messages(inside, data)), null)
+  assert.notEqual(a2ui.parseSurface(messages(components, data)), null)
+})
+
+const toolResult = (id, value = data) => ({
+  ok: true,
+  surface_id: id,
+  a2ui: [
+    { version: "v0.9", createSurface: { surfaceId: id, catalogId: a2ui.JOBS_CATALOG_ID } },
+    { version: "v0.9", updateComponents: { surfaceId: id, components } },
+    { version: "v0.9", updateDataModel: { surfaceId: id, path: "/", value } },
+  ],
+})
+
+test("only the newest unanswered surface keeps working buttons", () => {
+  const latest = a2ui.latestSurfaceId([toolResult("jobs-old"), { ok: true, rows: [] }, toolResult("jobs-new"), { ok: false }])
+  assert.equal(latest, "jobs-new")
+  assert.equal(a2ui.latestSurfaceId([{ ok: false, error: "render_ui was not shown" }]), null)
+
+  const clicked = a2ui.actionMessage({ name: "approve_documents", surfaceId: "jobs-old", sourceComponentId: "approve",
+    timestamp: "t", context: { document_ids: ["d1"] } }, "อนุมัติ")
+  const answered = a2ui.answeredSurfaceIds(["สวัสดี", clicked, "x\n\n```a2ui-action\nnot json\n```"])
+  assert.deepEqual([...answered], ["jobs-old"])
+
+  const idle = { latestSurfaceId: latest, answered, runActive: false }
+  const availability = (id, conversation) => JSON.parse(JSON.stringify(a2ui.surfaceAvailability(id, conversation)))
+  assert.deepEqual(availability("jobs-new", idle), { actionable: true, notes: [] })
+  assert.deepEqual(availability("jobs-old", idle),
+    { actionable: false, notes: [a2ui.SURFACE_NOTES.answered, a2ui.SURFACE_NOTES.outdated] })
+  assert.equal(availability("jobs-new", { ...idle, runActive: true }).actionable, false)
+  assert.deepEqual(availability("jobs-new", { ...idle, answered: new Set(["jobs-new"]) }),
+    { actionable: false, notes: ["ส่งคำสั่งแล้ว"] })
+})
+
+test("a surface shows why its buttons are off", () => {
+  const html = render(a2ui.parseSurface(messages(components, { ...data, selected: ["d1"] })),
+    { actionsDisabled: true, notes: ["ส่งคำสั่งแล้ว"] })
+  assert.match(html, /<button[^>]*disabled=""[^>]*>อนุมัติ<\/button>/)
+  assert.match(html, /ส่งคำสั่งแล้ว/)
+})
+
+test("tool calls render only the newest surface with enabled buttons", () => {
+  const AgentToolCalls = load(path.join(root, "components/agent/AgentToolCalls.tsx")).default
+  const selected = { ...data, selected: ["d1"] }
+  const html = renderToStaticMarkup(createElement(AgentToolCalls, {
+    calls: [{ id: "c1", name: "render_ui", arguments: {} }, { id: "c2", name: "render_ui", arguments: {} }],
+    results: { c1: toolResult("jobs-old", selected), c2: toolResult("jobs-new", selected) },
+    onSurfaceAction: () => {},
+    surfaceConversation: { latestSurfaceId: "jobs-new", answered: new Set(), runActive: false },
+  }))
+  const [older, newer] = html.split('data-surface-id="jobs-new"')
+  assert.match(older, /data-surface-id="jobs-old"/)
+  assert.match(older, /<button[^>]*disabled=""[^>]*>อนุมัติ<\/button>/)
+  assert.match(older, /สถานะเอกสารอาจไม่เป็นปัจจุบัน/)
+  assert.match(newer, />อนุมัติ<\/button>/)
+  assert.doesNotMatch(newer, /disabled=""[^>]*>อนุมัติ/)
+  assert.doesNotMatch(newer, /สถานะเอกสารอาจไม่เป็นปัจจุบัน/)
+})
+
 test("the confirmation names the documents it will change", () => {
   const ConfirmationDialog = load(path.join(root, "components/agent/ConfirmationDialog.tsx")).default
   const action = {

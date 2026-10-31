@@ -8,7 +8,7 @@ import {
     type ChatToolCallStatus,
 } from "@astryxdesign/core/Chat"
 import { downloadAgentFile, normalizeAgentFilePath } from "@/lib/agent-download"
-import { surfaceFromToolResult } from "@/lib/a2ui"
+import { surfaceAvailability, surfaceFromToolResult, type SurfaceConversation } from "@/lib/a2ui"
 import A2uiSurface from "./a2ui/A2uiSurface"
 
 type JsonRecord = Record<string, unknown>
@@ -28,7 +28,8 @@ interface AgentToolCallsProps {
     autoConfirmedIds?: Set<string>
     /** Sends a surface button click to the agent as a user message. */
     onSurfaceAction?: (message: string) => void
-    surfaceActionsDisabled?: boolean
+    /** Decides which surface keeps working buttons; without it every surface is read-only. */
+    surfaceConversation?: SurfaceConversation
     onOpenDocument?: (documentId: string) => void
 }
 
@@ -172,7 +173,7 @@ export default function AgentToolCalls({
     conversationId,
     autoConfirmedIds,
     onSurfaceAction,
-    surfaceActionsDisabled,
+    surfaceConversation,
     onOpenDocument,
 }: AgentToolCallsProps) {
     const [downloadError, setDownloadError] = useState<string | null>(null)
@@ -242,16 +243,23 @@ export default function AgentToolCalls({
     return (
         <>
             {listed.length > 0 && toolList(listed)}
-            {entries.map(({ item, surface }, index) => surface && (
-                <A2uiSurface
-                    key={item.key ?? index}
-                    surface={surface}
-                    fallback={toolList([item])}
-                    actionsDisabled={surfaceActionsDisabled}
-                    onAction={onSurfaceAction}
-                    onOpenDocument={onOpenDocument}
-                />
-            ))}
+            {entries.map(({ item, surface }, index) => {
+                if (!surface) return null
+                const availability = surfaceConversation
+                    ? surfaceAvailability(surface.surfaceId, surfaceConversation)
+                    : { actionable: false, notes: [] }
+                return (
+                    <A2uiSurface
+                        key={item.key ?? index}
+                        surface={surface}
+                        fallback={toolList([item])}
+                        actionsDisabled={!availability.actionable}
+                        notes={availability.notes}
+                        onAction={onSurfaceAction}
+                        onOpenDocument={onOpenDocument}
+                    />
+                )
+            })}
         </>
     )
 }

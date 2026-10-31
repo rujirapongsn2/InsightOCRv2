@@ -25,6 +25,8 @@ export interface A2uiSurfaceProps {
     /** Shown instead of the surface if rendering fails. */
     fallback: ReactNode
     actionsDisabled?: boolean
+    /** Short lines under the surface saying why its buttons are off. */
+    notes?: string[]
     /** Receives the user message a button click sends to the agent. */
     onAction?: (message: string) => void
     onOpenDocument?: (documentId: string) => void
@@ -145,7 +147,7 @@ class SurfaceBoundary extends Component<{ fallback: ReactNode; children: ReactNo
     }
 }
 
-function SurfaceBody({ surface, actionsDisabled = false, onAction, onOpenDocument }: Omit<A2uiSurfaceProps, "fallback">) {
+function SurfaceBody({ surface, actionsDisabled = false, notes = [], onAction, onOpenDocument }: Omit<A2uiSurfaceProps, "fallback">) {
     const [data, setDataModel] = useState<DataModel>(surface.dataModel)
     const ctx: RenderContext = {
         surface,
@@ -163,6 +165,7 @@ function SurfaceBody({ surface, actionsDisabled = false, onAction, onOpenDocumen
     return (
         <div className="mx-3 rounded-lg border border-hairline bg-white p-3" data-surface-id={surface.surfaceId}>
             {ctx.render("root")}
+            {notes.map(note => <p key={note} className="mt-2 text-xs text-slate-gray">{note}</p>)}
         </div>
     )
 }

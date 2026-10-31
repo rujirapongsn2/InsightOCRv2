@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef, useCallback, type KeyboardEvent, type ReactNode } from "react"
 import { X, Plus, Trash2, Bot, ChevronDown, AlertTriangle, Loader2, Brain, Library, Sparkles, ListChecks, Check, Circle, ShieldCheck, ShieldAlert, FileText, GitCompare, CheckCircle2, Send, ArrowUpRight } from "lucide-react"
 import { getApiBaseUrl } from "@/lib/api"
+import { answeredSurfaceIds, latestSurfaceId, type SurfaceConversation } from "@/lib/a2ui"
 import AgentMessage from "./AgentMessage"
 import AgentToolCalls from "./AgentToolCalls"
 import ConfirmationDialog, { type PendingAction } from "./ConfirmationDialog"
@@ -416,9 +417,17 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay", onOpenDoc
         }
     }
 
+    const surfaceConversation: SurfaceConversation = {
+        latestSurfaceId: latestSurfaceId([
+            ...messages.filter(msg => msg.role === "tool").map(msg => msg.tool_result),
+            ...events.filter(evt => evt.type === "tool_result").map(evt => evt.result),
+        ]),
+        answered: answeredSurfaceIds(messages.filter(msg => msg.role === "user").map(msg => msg.content || "")),
+        runActive: streaming || (activeRun !== null && ["queued", "running"].includes(activeRun.status)),
+    }
     const surfaceProps = {
         onSurfaceAction: (message: string) => { void sendMessage(message) },
-        surfaceActionsDisabled: streaming,
+        surfaceConversation,
         onOpenDocument,
     }
 
