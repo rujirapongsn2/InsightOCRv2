@@ -104,7 +104,12 @@ const CATALOG: { [K in ComponentType]: (component: ComponentOf<K>, ctx: RenderCo
     ),
     Row: (component, ctx) => (
         <div className="flex flex-wrap gap-2">
-            {component.children.map(id => <div key={id} className="min-w-[9rem] flex-1">{ctx.render(id)}</div>)}
+            {/* Tiles share the width and wrap on narrow screens; buttons keep their own width. */}
+            {component.children.map(id => (
+                <div key={id} className={ctx.surface.components[id].component === "Metric" ? "min-w-[9rem] flex-1" : "shrink-0"}>
+                    {ctx.render(id)}
+                </div>
+            ))}
         </div>
     ),
     Metric: component => <Metric component={component} />,
