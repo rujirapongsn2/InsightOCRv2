@@ -8,6 +8,7 @@ can fix its call and retry.
 from __future__ import annotations
 
 import copy
+import json
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -18,6 +19,7 @@ MAX_DOCUMENTS = 200
 MAX_TEXT_CHARS = 2000
 MAX_LABEL_CHARS = 60
 MAX_NOTE_CHARS = 300
+MAX_DATA_CHARS = 100_000
 ACTION_EVENTS = ("approve_documents", "reject_documents", "ask_agent")
 TEXT_VARIANTS = ("body", "caption", "heading")
 BUTTON_VARIANTS = ("primary", "secondary")
@@ -99,8 +101,6 @@ def _check_document_list(comp: dict) -> list[str]:
         errors.append('a selectable DocumentList needs "selection", a JSON pointer such as "/selected"')
     if selection is not None and not selectable:
         errors.append('"selection" is only valid with "selectable": true')
-    if is_binding(comp.get("documents")) and selection == comp["documents"]["path"]:
-        errors.append('"selection" must be a different pointer from "documents"')
     return errors
 
 
@@ -191,6 +191,77 @@ def _check_document_rows(path: str, rows: Any) -> list[str]:
     return errors
 
 
+def _escape(token: str) -> str:
+    return token.replace("~", "~0").replace("/", "~1")
+
+
+def _object_path_problem(data: dict, path: str) -> str | None:
+    """Why a pointer the system writes through is not a plain object path in data, or None.
+
+    Missing parents are fine (they are created as objects); a list or a value on
+    the way is not, because writing there would fail or replace it.
+    """
+    node = data
+    for token in _pointer_tokens(path)[:-1]:
+        if token not in node:
+            return None
+        node = node[token]
+        if not isinstance(node, dict):
+            kind = "an array" if isinstance(node, list) else "not an object"
+            return (f'pointer "{path}" must lead through objects only, but "{token}" is {kind}; '
+                    'use a plain path such as "/documents" or "/selected"')
+    return None
+
+
+def _overlaps(path: str, other: str) -> bool:
+    return path == other or path.startswith(other + "/") or other.startswith(path + "/")
+
+
+def _unused_data(node: dict, prefix: str, used: set[str]) -> list[str]:
+    errors: list[str] = []
+    for key, value in node.items():
+        path = f"{prefix}/{_escape(str(key))}"
+        if path in used:
+            continue
+        if isinstance(value, dict) and any(u.startswith(path + "/") for u in used):
+            errors.extend(_unused_data(value, path, used))
+        else:
+            errors.append(f'data "{path}" is not used by any component; remove it')
+    return errors
+
+
+def _check_data(by_id: dict[str, dict], data: dict) -> list[str]:
+    """Data may hold only what components bind to, in the shapes they render."""
+    lists = [c for c in by_id.values() if c["component"] == "DocumentList"]
+    documents = [c["documents"]["path"] for c in lists]
+    selections = [c["selection"] for c in lists if c.get("selection")]
+    texts = [c["text"]["path"] for c in by_id.values() if c["component"] == "Text" and is_binding(c["text"])]
+    errors = [p for p in (_object_path_problem(data, path) for path in documents + selections) if p]
+    for selection in selections:
+        errors.extend(f'"selection" "{selection}" overlaps the documents at "{doc}"; use a separate key such as "/selected"'
+                      for doc in documents if _overlaps(selection, doc))
+        value = resolve_pointer(data, selection)
+        if value is not None and not (isinstance(value, list) and len(value) <= MAX_DOCUMENTS
+                                      and all(isinstance(v, str) for v in value)):
+            errors.append(f'data "{selection}" is a selection and must be an array of document ids (or left out)')
+    for path in texts:
+        value = resolve_pointer(data, path)
+        if not isinstance(value, str) or len(value) > MAX_TEXT_CHARS:
+            errors.append(f'data "{path}" is shown by a Text and must be a string of at most {MAX_TEXT_CHARS} characters')
+    for comp in by_id.values():
+        if comp["component"] != "Button":
+            continue
+        for key, value in comp["action"]["event"].get("context", {}).items():
+            if is_binding(value) and value["path"] not in selections:
+                errors.append(f'component "{comp["id"]}" (Button): action context "{key}" may only bind to a '
+                              'DocumentList "selection" pointer; use a literal otherwise')
+    errors.extend(_unused_data(data, "", set(documents + selections + texts)))
+    size = len(json.dumps(data, ensure_ascii=False, default=str))
+    if size > MAX_DATA_CHARS:
+        errors.append(f'"data" is {size} characters; the limit is {MAX_DATA_CHARS}')
+    return errors
+
+
 def parse_surface(components: Any, data: Any) -> Surface:
     """Validate render_ui arguments. Raises SurfaceError listing every problem."""
     if not isinstance(components, list) or not components:
@@ -220,6 +291,8 @@ def parse_surface(components: Any, data: Any) -> Surface:
         errors.extend(f'component "{comp_id}" ({comp["component"]}): {problem}' for problem in check(comp))
     if not errors:
         errors.extend(_check_tree(by_id))
+    if not errors:
+        errors.extend(_check_data(by_id, data))
 
     document_lists: list[tuple[str, list[dict]]] = []
     for comp in by_id.values():

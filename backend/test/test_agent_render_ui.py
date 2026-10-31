@@ -104,6 +104,58 @@ def test_one_malformed_id_rejects_the_whole_surface(db):
     assert "not-a-uuid" in result["error"] and "list_documents" in result["error"]
 
 
+@pytest.mark.parametrize(("overrides", "data", "expected"), [
+    ({"list": {"id": "list", "component": "DocumentList", "documents": {"path": "/groups/0/docs"},
+               "selectable": True, "selection": "/selected"}},
+     lambda doc: {"groups": [{"docs": [{"document_id": doc}]}]},
+     'pointer "/groups/0/docs" must lead through objects only, but "groups" is an array'),
+    ({"list": {"id": "list", "component": "DocumentList", "documents": {"path": "/documents"},
+               "selectable": True, "selection": "/documents/sel"}},
+     lambda doc: {"documents": [{"document_id": doc}]},
+     '"selection" "/documents/sel" overlaps the documents at "/documents"'),
+])
+def test_pointers_through_arrays_are_a_corrective_error(db, overrides, data, expected):
+    doc_id = _doc(db, JOB, "a.pdf")
+    result = _render(db, _surface(**overrides), data(doc_id))
+    assert result["ok"] is False
+    assert result["error"].startswith("render_ui was not shown. Fix these problems")
+    assert expected in result["error"]
+
+
+def test_data_holds_only_what_components_bind_to(db):
+    doc_id = _doc(db, JOB, "a.pdf")
+    bound_title = {"title": {"id": "title", "component": "Text", "text": {"path": "/heading"}}}
+    rows = [{"document_id": doc_id}]
+
+    ok = _render(db, _surface(**bound_title), {"heading": "รออนุมัติ", "documents": rows})
+    assert ok["ok"] is True
+
+    unused = _render(db, _surface(), {"documents": rows, "dump": "x" * 10})
+    assert 'data "/dump" is not used by any component' in unused["error"]
+
+    long_text = _render(db, _surface(**bound_title), {"heading": "x" * 2001, "documents": rows})
+    assert 'data "/heading" is shown by a Text and must be a string of at most 2000' in long_text["error"]
+
+    not_text = _render(db, _surface(**bound_title), {"heading": {"nested": "x"}, "documents": rows})
+    assert 'data "/heading" is shown by a Text' in not_text["error"]
+
+    rogue_button = {"approve": {"id": "approve", "component": "Button", "label": "ถาม",
+                                "action": {"event": {"name": "ask_agent", "context": {"q": {"path": "/heading"}}}}}}
+    bound = _render(db, _surface(**bound_title, **rogue_button), {"heading": "x", "documents": rows})
+    assert 'action context "q" may only bind to a DocumentList "selection" pointer' in bound["error"]
+
+
+def test_data_size_is_capped(db):
+    texts = [{"id": f"t{i}", "component": "Text", "text": {"path": f"/t{i}"}} for i in range(45)]
+    components = [{"id": "root", "component": "Column", "children": ["list"] + [t["id"] for t in texts]},
+                  {"id": "list", "component": "DocumentList", "documents": {"path": "/documents"}}] + texts
+    data = {f"t{i}": "x" * 2000 for i in range(45)}
+    data["documents"] = [{"document_id": str(uuid.uuid4()), "note": "n" * 300} for _ in range(40)]
+    result = _render(db, components, data)
+    assert result["ok"] is False
+    assert "the limit is 100000" in result["error"]
+
+
 def test_only_foreign_ids_is_a_corrective_error(db):
     foreign = _doc(db, OTHER_JOB, "x.pdf")
     result = _render(db, _surface(), {"documents": [{"document_id": foreign}]})
