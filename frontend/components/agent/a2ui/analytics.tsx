@@ -274,22 +274,53 @@ function linePath(values: (number | null)[], x: (index: number) => number, y: (v
     return path
 }
 
-function LineChart({ points, series, format }: { points: ChartPoint[]; series: ChartSeries[]; format: (value: number) => string }) {
+/**
+ * The point indices that get an x label: the first, every step-th, and the last, at most
+ * maxLabels. A step label closer than step to the last one is dropped so the two never collide.
+ */
+export function xLabelIndices(count: number, maxLabels: number): number[] {
+    if (count <= 0) return []
+    const last = count - 1
+    const step = Math.max(1, Math.ceil(last / (maxLabels - 1)))
+    const indices: number[] = []
+    for (let index = 0; index < last; index += step) indices.push(index)
+    if (indices.length > 1 && last - indices[indices.length - 1] < step) indices.pop()
+    return [...indices, last]
+}
+
+/** A value-axis tick: compact digits, with the percent sign; the unit is the axis title. */
+export function formatTick(value: number, format: NumberFormat): string {
+    const digits = COMPACT.format(value)
+    return format === "percent" ? `${digits}%` : digits
+}
+
+function LineChart({ points, series, format, tickFormat, unit }: {
+    points: ChartPoint[]
+    series: ChartSeries[]
+    format: (value: number) => string
+    tickFormat: NumberFormat
+    unit?: string
+}) {
     const count = points.length
     const { min, max, ticks } = niceScale(points.flatMap(point => point.values.filter(isFiniteNumber)), false)
     const x = (index: number) => (count === 1 ? 50 : (index / (count - 1)) * 100)
     const y = (value: number) => 100 - ((value - min) / (max - min)) * 100
-    const step = Math.max(1, Math.ceil((count - 1) / (MAX_X_LABELS - 1)))
-    const labelled = points.map((_, index) => index).filter(index => index % step === 0 || index === count - 1)
+    const labelled = xLabelIndices(count, MAX_X_LABELS)
     // Every point gets a marker while they stay legible; past that, only each series' last point does.
-    const marked = (seriesIndex: number, index: number) => count <= MAX_MARKED_POINTS
-        || index === points.map(point => point.values[seriesIndex]).findLastIndex(value => value !== null)
+    const lastIndex = series.map((_, seriesIndex) => points.findLastIndex(point => point.values[seriesIndex] !== null))
+    const marked = (seriesIndex: number, index: number) => count <= MAX_MARKED_POINTS || index === lastIndex[seriesIndex]
+    const axisTitle = tickFormat === "percent" ? undefined : unit
     return (
-        <div className="relative mb-6 ml-12 mr-3 mt-2 h-40">
+        <div className={`relative mb-6 ml-12 mr-3 h-40 ${axisTitle ? "mt-7" : "mt-2"}`}>
+            {axisTitle && (
+                <span data-axis-title="" className="absolute -left-12 bottom-full mb-3 whitespace-nowrap text-[11px] text-viz-muted">
+                    {axisTitle}
+                </span>
+            )}
             {ticks.map(tick => (
-                <span key={tick} className="absolute -left-12 w-10 -translate-y-1/2 text-right text-[11px] text-viz-muted tabular-nums"
+                <span key={tick} data-tick="" className="absolute -left-12 w-10 -translate-y-1/2 text-right text-[11px] text-viz-muted tabular-nums"
                     style={{ top: `${round(y(tick))}%` }}>
-                    {COMPACT.format(tick)}
+                    {formatTick(tick, tickFormat)}
                 </span>
             ))}
             <svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"
@@ -356,7 +387,8 @@ export function Chart({ component, data }: { component: ComponentOf<"Chart">; da
                 <div role="img" aria-label={`${kind}${component.title ? ` ${component.title}` : ""} ${points.length} รายการ ดูค่าในตารางด้านล่าง`}>
                     {component.type === "bar"
                         ? <BarChart points={points} series={component.series} format={format} />
-                        : <LineChart points={points} series={component.series} format={format} />}
+                        : <LineChart points={points} series={component.series} format={format}
+                            tickFormat={component.format} unit={component.unit} />}
                 </div>
             ) : (
                 <p className="text-xs text-viz-muted">ไม่มีข้อมูล</p>

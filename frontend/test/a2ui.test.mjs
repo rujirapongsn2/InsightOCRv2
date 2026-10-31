@@ -314,7 +314,32 @@ test("a line Chart draws a path per series and a marker per point; one series ha
   assert.equal(dense.match(/<path data-point=""/g).length, 1)
 })
 
-const riskComponents = [column("r"), { id: "r", component: "RiskList", title: "ความเสี่ยงของสัญญา", items: { path: "/risks" } }]
+test("line Chart x labels keep the first and last and never crowd them", () => {
+  const { xLabelIndices } = load(path.join(root, "components/agent/a2ui/analytics.tsx"))
+  const cases = { 0: [], 1: [0], 2: [0, 1], 3: [0, 1, 2], 5: [0, 1, 2, 3, 4], 6: [0, 2, 5], 7: [0, 2, 4, 6], 9: [0, 2, 4, 6, 8], 60: [0, 15, 30, 59] }
+  for (const [count, expected] of Object.entries(cases)) assert.deepEqual([...xLabelIndices(Number(count), 5)], expected, `count ${count}`)
+  for (let count = 2; count <= 200; count++) {
+    const indices = xLabelIndices(count, 5)
+    const step = Math.ceil((count - 1) / 4)
+    assert.ok(indices.length <= 5 && indices[0] === 0 && indices.at(-1) === count - 1, `count ${count}: ${indices}`)
+    assert.ok(indices.slice(1).every((index, i) => index - indices[i] >= step), `count ${count}: ${indices} crowd at step ${step}`)
+  }
+})
+
+test("line Chart value ticks carry the percent sign, and the unit as the axis title", () => {
+  const points = [{ label: "ม.ค.", y2025: 12.5 }, { label: "ก.พ.", y2025: 40 }]
+  const ticks = (html) => [...html.matchAll(/data-tick=""[^>]*>([^<]*)</g)].map(([, text]) => text)
+  const percent = render(analytic([column("c"), { ...chartComponent("line", twoSeries.slice(0, 1))[1], format: "percent", unit: "บาท" }], { points }))
+  assert.ok(ticks(percent).length > 1 && ticks(percent).every((tick) => /^\d[\d.]*%$/.test(tick)), ticks(percent).join(","))
+  assert.doesNotMatch(percent, /data-axis-title/)
+
+  const money = render(analytic(chartComponent("line", twoSeries.slice(0, 1)), { points: [{ label: "ม.ค.", y2025: 1200 }, { label: "ก.พ.", y2025: 250000 }] }))
+  assert.match(money, /data-axis-title=""[^>]*>บาท</)
+  assert.ok(ticks(money).includes("300K"), ticks(money).join(","))
+  assert.ok(ticks(money).every((tick) => !tick.includes("%")))
+})
+
+const riskComponents =[column("r"), { id: "r", component: "RiskList", title: "ความเสี่ยงของสัญญา", items: { path: "/risks" } }]
 const risk = (title, level, extra = {}) => ({ title, level, description: `คำอธิบาย ${title}`, ...extra })
 
 test("a RiskList counts levels, sorts by severity and marks quote verification", () => {
