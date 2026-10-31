@@ -227,11 +227,11 @@ export default function AgentToolCalls({
         }
     }), [autoConfirmedIds, calls, conversationId, downloadError, downloadingPath, handleDownload, results])
 
-    // A successful render_ui result is shown as its surface; anything that does
-    // not parse stays an ordinary tool call.
+    // A successful panel tool result is shown as its surface; anything that does
+    // not parse (an older v1 panel included) stays an ordinary tool call.
     const entries = useMemo(() => items.map(item => ({
         item,
-        surface: item.name === "render_ui" ? surfaceFromToolResult((item.data as { result?: unknown }).result) : null,
+        surface: surfaceFromToolResult((item.data as { result?: unknown }).result),
     })), [items])
     const listed = entries.filter(entry => !entry.surface).map(entry => entry.item)
     const toolList = (shown: ChatToolCallItem[]) => (

@@ -2,19 +2,14 @@
 
 import { Component, useState, type ReactNode } from "react"
 import { Button } from "@/components/ui/button"
-import { Chart, DataTable, Metric, OpenDocumentButton, RiskBadge, RiskList } from "@/components/agent/a2ui/analytics"
+import { Chart, DataTable, Metric, OpenDocumentButton, RiskList, Sources } from "@/components/agent/a2ui/analytics"
 import {
-    COMPUTED_NOTE,
     actionMessage,
     buildAction,
-    documentRows,
     documentStatusLabel,
-    getPointer,
     hasEmptyBinding,
-    resolveValue,
     selectedIds,
     setPointer,
-    showsComputedNumbers,
     type A2uiComponent,
     type ComponentOf,
     type ComponentType,
@@ -51,7 +46,7 @@ const TEXT_CLASS = {
 } as const
 
 function DocumentList({ component, ctx }: { component: ComponentOf<"DocumentList">; ctx: RenderContext }) {
-    const rows = documentRows(getPointer(ctx.data, component.documents.path))
+    const rows = component.documents
     const selected = new Set(selectedIds(ctx.data, component.selection))
     const setSelected = (ids: string[]) => component.selection && ctx.setData(component.selection, ids)
     const toggle = (id: string) => setSelected(
@@ -112,15 +107,12 @@ const CATALOG: { [K in ComponentType]: (component: ComponentOf<K>, ctx: RenderCo
             {component.children.map(id => <div key={id} className="min-w-[9rem] flex-1">{ctx.render(id)}</div>)}
         </div>
     ),
-    Metric: (component, ctx) => <Metric component={component} data={ctx.data} />,
-    DataTable: (component, ctx) => <DataTable component={component} data={ctx.data} onOpenDocument={ctx.onOpenDocument} />,
-    Chart: (component, ctx) => <Chart component={component} data={ctx.data} />,
-    RiskList: (component, ctx) => <RiskList component={component} data={ctx.data} onOpenDocument={ctx.onOpenDocument} />,
-    RiskBadge: component => <RiskBadge level={component.level} />,
-    Text: (component, ctx) => {
-        const text = resolveValue(component.text, ctx.data)
-        return <p className={TEXT_CLASS[component.variant]}>{typeof text === "string" ? text : ""}</p>
-    },
+    Metric: component => <Metric component={component} />,
+    DataTable: (component, ctx) => <DataTable component={component} onOpenDocument={ctx.onOpenDocument} />,
+    Chart: component => <Chart component={component} />,
+    RiskList: (component, ctx) => <RiskList component={component} onOpenDocument={ctx.onOpenDocument} />,
+    Sources: (component, ctx) => <Sources component={component} onOpenDocument={ctx.onOpenDocument} />,
+    Text: component => <p className={TEXT_CLASS[component.variant]}>{component.text}</p>,
     DocumentList: (component, ctx) => <DocumentList component={component} ctx={ctx} />,
     Button: (component, ctx) => {
         const disabled = ctx.actionsDisabled || !ctx.onAction || hasEmptyBinding(component.action.event.context, ctx.data)
@@ -168,9 +160,6 @@ function SurfaceBody({ surface, actionsDisabled = false, notes = [], onAction, o
     return (
         <div className="mx-3 rounded-lg border border-hairline bg-white p-3" data-surface-id={surface.surfaceId}>
             {ctx.render("root")}
-            {showsComputedNumbers(surface) && (
-                <p className="mt-2 text-xs text-viz-muted">{COMPUTED_NOTE}</p>
-            )}
             {notes.map(note => <p key={note} className="mt-2 text-xs text-slate-gray">{note}</p>)}
         </div>
     )

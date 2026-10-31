@@ -1,71 +1,104 @@
-// A2UI v0.9 surfaces for the Jobs agent. The server validates render_ui, but a
-// persisted tool result is still external data here: parseSurface checks it once
-// and returns null for anything this catalog cannot render, so callers fall back.
+// A2UI v0.9 panels for the Jobs agent, catalog v2. The backend composes every
+// panel from a typed tool call and computes every comparison; a persisted tool
+// result is still external data here, so parseSurface checks it once, resolves
+// each component's bound data into typed values, and returns null for anything
+// outside this catalog (older v1 panels included), so callers fall back to the
+// ordinary tool-call entry.
 
 export const A2UI_VERSION = "v0.9"
-export const JOBS_CATALOG_ID = "https://insightdoc.app/a2ui/catalogs/jobs/v1"
+export const JOBS_CATALOG_ID = "https://insightdoc.app/a2ui/catalogs/jobs/v2"
 export const ACTION_FENCE = "a2ui-action"
 
-export type Binding = { path: string }
-export type Dynamic<T> = T | Binding
-export type ActionEventName = "approve_documents" | "reject_documents" | "ask_agent"
-type ActionContext = Record<string, unknown>
-
-export const NUMBER_FORMATS = ["number", "currency", "percent"] as const
-export const COLUMN_TYPES = ["text", "number", "currency", "percent", "date", "delta", "risk"] as const
 export const RISK_LEVELS = ["critical", "high", "medium", "low"] as const
+export const MAX_CHART_SERIES = 8
 const DIRECTIONS = ["up", "down", "flat"] as const
 const SENTIMENTS = ["good", "bad", "neutral"] as const
-const ALIGNS = ["left", "center", "right"] as const
-export const MAX_CHART_SERIES = 8
+const X_KINDS = ["text", "date", "month"] as const
+const ACTION_EVENTS = ["approve_documents", "reject_documents"] as const
 
-export type NumberFormat = (typeof NUMBER_FORMATS)[number]
-export type ColumnType = (typeof COLUMN_TYPES)[number]
 export type RiskLevel = (typeof RISK_LEVELS)[number]
 export type Direction = (typeof DIRECTIONS)[number]
 export type Sentiment = (typeof SENTIMENTS)[number]
+export type XKind = (typeof X_KINDS)[number]
+export type ActionEventName = (typeof ACTION_EVENTS)[number]
 
-/** A change: direction is which way the number moved, sentiment whether that is good for the user. */
-export interface Delta {
-    value: number
+/** How a number reads; money always names its currency. */
+export type Measure = { kind: "count" | "number" | "percent" } | { kind: "money"; currency: string }
+
+/** A change the backend computed: delta in the measure's unit (points for a percent), percent relative. */
+export interface Change {
+    delta: number
+    percent: number | null
     direction: Direction
     sentiment: Sentiment
-    label?: string
 }
+
+export interface DocumentRef {
+    document_id: string
+    filename: string
+}
+
+export interface DocumentRow extends DocumentRef {
+    status: string
+    note?: string
+}
+
+export interface MetricValue {
+    value: number
+    previous?: number
+    change?: Change
+}
+
+export type ColumnFormat =
+    | { kind: "text" | "date" | "month" | "document" }
+    | { kind: "measure"; measure: Measure }
+    | { kind: "change"; measure: Measure }
 
 export interface TableColumn {
     key: string
     label: string
-    type: ColumnType
-    align: (typeof ALIGNS)[number]
-    unit?: string
-    /** How a delta column formats its change; a number column is formatted by its type. */
-    format?: NumberFormat
+    format: ColumnFormat
 }
+
+export type TableCell =
+    | { kind: "empty" }
+    | { kind: "text" | "date" | "month"; value: string }
+    | { kind: "document"; value: DocumentRef }
+    | { kind: "measure"; value: number; measure: Measure }
+    | { kind: "change"; value: Change; measure: Measure }
 
 export interface ChartSeries {
     key: string
     label: string
 }
 
+export interface ChartPoint {
+    x: string
+    /** One value per series, in series order; null where the series has no value. */
+    values: (number | null)[]
+}
+
 export interface RiskItem {
+    id: string
     title: string
     level: RiskLevel
-    category?: string
+    category: string
     description: string
-    quote?: string
-    /** Set by the server after looking for the quote in the document's text. */
-    quote_verified?: boolean
-    document_id?: string
+    quote: string
+    /** Set by the backend after looking for the quote in the document's text. */
+    quoteVerified: boolean
     page?: number
-    recommendation?: string
+    recommendation: string
 }
+
+type ActionContext = Record<string, unknown>
+export type Binding = { path: string }
 
 export type A2uiComponent =
     | { id: string; component: "Column"; children: string[] }
     | { id: string; component: "Row"; children: string[] }
-    | { id: string; component: "Text"; text: Dynamic<string>; variant: "body" | "caption" | "heading" }
-    | { id: string; component: "DocumentList"; documents: Binding; selectable: boolean; selection?: string }
+    | { id: string; component: "Text"; text: string; variant: "body" | "caption" | "heading" }
+    | { id: string; component: "DocumentList"; documents: DocumentRow[]; selectable: boolean; selection?: string }
     | {
         id: string
         component: "Button"
@@ -73,31 +106,20 @@ export type A2uiComponent =
         variant: "primary" | "secondary"
         action: { event: { name: ActionEventName; context: ActionContext } }
     }
-    | {
-        id: string
-        component: "Metric"
-        label: string
-        value: Dynamic<number>
-        unit?: string
-        format: NumberFormat
-        delta?: Delta
-    }
-    | { id: string; component: "DataTable"; columns: TableColumn[]; rows: Binding; caption?: string }
+    | { id: string; component: "Metric"; label: string; measure: Measure; previousLabel?: string; value: MetricValue }
+    | { id: string; component: "DataTable"; columns: TableColumn[]; rows: TableCell[][] }
     | {
         id: string
         component: "Chart"
         type: "bar" | "line"
-        title?: string
-        x: string
+        title: string
+        x: { label: string; kind: XKind }
         series: ChartSeries[]
-        data: Binding
-        unit?: string
-        format: NumberFormat
+        measure: Measure
+        points: ChartPoint[]
     }
-    | { id: string; component: "RiskList"; items: Binding; title?: string }
-    | { id: string; component: "RiskBadge"; level: RiskLevel }
-
-export const COMPUTED_NOTE = "ตัวเลขในแผงนี้ AI คำนวณจากข้อมูลที่ดึงจากเอกสาร ควรตรวจทานก่อนนำไปใช้"
+    | { id: string; component: "RiskList"; document: DocumentRef; items: RiskItem[] }
+    | { id: string; component: "Sources"; documents: DocumentRef[] }
 
 export type ComponentType = A2uiComponent["component"]
 export type ComponentOf<K extends ComponentType> = Extract<A2uiComponent, { component: K }>
@@ -107,14 +129,8 @@ export interface Surface {
     surfaceId: string
     catalogId: string
     components: Record<string, A2uiComponent>
+    /** Only the selections a DocumentList writes and its buttons read live here after parsing. */
     dataModel: DataModel
-}
-
-export interface DocumentRow {
-    document_id: string
-    filename: string
-    status: string
-    note?: string
 }
 
 export interface A2uiAction {
@@ -125,16 +141,30 @@ export interface A2uiAction {
     context: ActionContext
 }
 
-const ACTION_EVENTS: readonly ActionEventName[] = ["approve_documents", "reject_documents", "ask_agent"]
-
 type Raw = Record<string, unknown>
 
 function isRecord(value: unknown): value is Raw {
     return typeof value === "object" && value !== null && !Array.isArray(value)
 }
 
+const isFiniteNumber = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value)
+const isString = (value: unknown): value is string => typeof value === "string"
+const oneOf = <T extends string>(value: unknown, allowed: readonly T[]): T | null =>
+    allowed.includes(value as T) ? (value as T) : null
+const optional = <T>(value: unknown, parse: (value: unknown) => T | null): T | undefined | null =>
+    value === undefined ? undefined : parse(value)
+const asString = (value: unknown): string | null => (isString(value) ? value : null)
+const asNumber = (value: unknown): number | null => (isFiniteNumber(value) ? value : null)
+
+/** Every item parsed, or null if any is not. */
+function all<T>(value: unknown, parse: (item: unknown) => T | null): T[] | null {
+    if (!Array.isArray(value)) return null
+    const items = value.map(parse)
+    return items.every((item): item is T => item !== null) ? items : null
+}
+
 export function isBinding(value: unknown): value is Binding {
-    return isRecord(value) && Object.keys(value).length === 1 && typeof value.path === "string" && value.path.startsWith("/")
+    return isRecord(value) && Object.keys(value).length === 1 && isString(value.path) && value.path.startsWith("/")
 }
 
 function pointerTokens(path: string): string[] {
@@ -151,27 +181,6 @@ export function getPointer(data: unknown, path: string): unknown {
     return node
 }
 
-/** Whether every parent on path is an object (or missing), so setPointer never replaces an array or a value. */
-function isObjectPath(data: DataModel, path: string): boolean {
-    let node: unknown = data
-    for (const token of pointerTokens(path).slice(0, -1)) {
-        if (!isRecord(node)) return false
-        if (!Object.hasOwn(node, token)) return true
-        node = node[token]
-    }
-    return isRecord(node)
-}
-
-const overlaps = (a: string, b: string) => a === b || a.startsWith(b + "/") || b.startsWith(a + "/")
-
-/** The pointers the renderer reads rows from and writes selections to are plain object paths. */
-function hasSafePointers(surface: Surface): boolean {
-    return Object.values(surface.components).every(c => c.component !== "DocumentList" || (
-        isObjectPath(surface.dataModel, c.documents.path)
-        && (!c.selection || (isObjectPath(surface.dataModel, c.selection) && !overlaps(c.selection, c.documents.path)))
-    ))
-}
-
 export function setPointer(data: DataModel, path: string, value: unknown): DataModel {
     const tokens = pointerTokens(path)
     if (tokens.length === 0) return isRecord(value) ? value : data
@@ -180,120 +189,189 @@ export function setPointer(data: DataModel, path: string, value: unknown): DataM
     return { ...data, [head]: rest.length === 0 ? value : setPointer(child, "/" + rest.join("/"), value) }
 }
 
-export function resolveValue<T>(value: Dynamic<T>, data: DataModel): unknown {
-    return isBinding(value) ? getPointer(data, value.path) : value
+/** The data a component binds to, or undefined when the prop is not a binding. */
+const bound = (data: DataModel, value: unknown): unknown => (isBinding(value) ? getPointer(data, value.path) : undefined)
+
+// ── Values ──────────────────────────────────────────────────────────────────
+
+function parseMeasure(kind: unknown, currency: unknown): Measure | null {
+    if (kind === "money") return isString(currency) && /^[A-Z]{3}$/.test(currency) ? { kind, currency } : null
+    return kind === "count" || kind === "number" || kind === "percent" ? { kind } : null
 }
 
-const oneOf = <T extends string>(value: unknown, allowed: readonly T[], fallback: T): T | null =>
-    value === undefined ? fallback : allowed.includes(value as T) ? (value as T) : null
-
-export const isFiniteNumber = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value)
-const optionalString = (value: unknown): string | undefined | null =>
-    value === undefined ? undefined : typeof value === "string" ? value : null
-const stringChildren = (value: unknown): string[] | null =>
-    Array.isArray(value) && value.every(c => typeof c === "string") ? value : null
-
-/** The values each direction allows, as the server checks them: "flat" is exactly no change. */
-const DIRECTION_ALLOWS: Record<Direction, (value: number) => boolean> = {
-    up: value => value >= 0,
-    down: value => value <= 0,
-    flat: value => value === 0,
+export function parseChange(value: unknown): Change | null {
+    if (!isRecord(value) || !isFiniteNumber(value.delta)) return null
+    const percent = value.percent === null ? null : asNumber(value.percent)
+    const direction = oneOf(value.direction, DIRECTIONS)
+    const sentiment = oneOf(value.sentiment, SENTIMENTS)
+    if ((value.percent !== null && percent === null) || !direction || !sentiment) return null
+    return { delta: value.delta, percent, direction, sentiment }
 }
 
-export function parseDelta(value: unknown): Delta | null {
+function parseDocumentRef(value: unknown): DocumentRef | null {
+    return isRecord(value) && isString(value.document_id) && isString(value.filename)
+        ? { document_id: value.document_id, filename: value.filename } : null
+}
+
+function parseDocumentRow(value: unknown): DocumentRow | null {
+    const ref = parseDocumentRef(value)
+    if (!ref || !isRecord(value) || !isString(value.status)) return null
+    const note = optional(value.note, asString)
+    return note === null ? null : { ...ref, status: value.status, ...(note ? { note } : {}) }
+}
+
+const ISO = { date: /^\d{4}-\d{2}-\d{2}$/, month: /^\d{4}-\d{2}$/ } as const
+
+function parseX(value: unknown, kind: XKind): string | null {
+    if (!isString(value)) return null
+    return kind === "text" || ISO[kind].test(value) ? value : null
+}
+
+function parseMetricValue(value: unknown): MetricValue | null {
     if (!isRecord(value) || !isFiniteNumber(value.value)) return null
-    const direction = DIRECTIONS.find(d => d === value.direction)
-    const sentiment = SENTIMENTS.find(s => s === value.sentiment)
-    const label = optionalString(value.label)
-    if (!direction || !sentiment || label === null || !DIRECTION_ALLOWS[direction](value.value)) return null
-    return { value: value.value, direction, sentiment, ...(label ? { label } : {}) }
+    const previous = optional(value.previous, asNumber)
+    const change = optional(value.change, parseChange)
+    if (previous === null || change === null) return null
+    return { value: value.value, ...(previous !== undefined ? { previous } : {}), ...(change ? { change } : {}) }
 }
 
 function parseColumn(raw: unknown): TableColumn | null {
-    if (!isRecord(raw) || typeof raw.key !== "string" || typeof raw.label !== "string") return null
-    const type = COLUMN_TYPES.find(t => t === raw.type)
-    if (!type) return null
-    const numeric = type === "number" || type === "currency" || type === "percent" || type === "delta"
-    const align = oneOf(raw.align, ALIGNS, numeric ? "right" : "left")
-    const unit = optionalString(raw.unit)
-    const format = raw.format === undefined ? undefined : NUMBER_FORMATS.find(f => f === raw.format)
-    if (!align || unit === null || (raw.format !== undefined && !format)) return null
-    return { key: raw.key, label: raw.label, type, align, ...(unit ? { unit } : {}), ...(format ? { format } : {}) }
+    if (!isRecord(raw) || !isString(raw.key) || !isString(raw.label)) return null
+    const column = (format: ColumnFormat | null) => (format ? { key: raw.key as string, label: raw.label as string, format } : null)
+    switch (raw.kind) {
+        case "text":
+        case "date":
+        case "month":
+        case "document":
+            return column({ kind: raw.kind })
+        case "change": {
+            const measure = parseMeasure(raw.value_kind, raw.currency)
+            return column(measure && { kind: "change", measure })
+        }
+        default: {
+            const measure = parseMeasure(raw.kind, raw.currency)
+            return column(measure && { kind: "measure", measure })
+        }
+    }
 }
 
-const COMPONENT_PARSERS: { [K in ComponentType]: (raw: Raw, id: string) => ComponentOf<K> | null } = {
-    Column: (raw, id) => {
-        const children = stringChildren(raw.children)
-        return children && { id, component: "Column", children }
+function parseCell(value: unknown, format: ColumnFormat): TableCell | null {
+    if (value === null || value === undefined) return { kind: "empty" }
+    switch (format.kind) {
+        case "text":
+            return isString(value) ? { kind: "text", value } : null
+        case "date":
+        case "month": {
+            const iso = parseX(value, format.kind)
+            return iso === null ? null : { kind: format.kind, value: iso }
+        }
+        case "document": {
+            const ref = parseDocumentRef(value)
+            return ref && { kind: "document", value: ref }
+        }
+        case "measure":
+            return isFiniteNumber(value) ? { kind: "measure", value, measure: format.measure } : null
+        case "change": {
+            const change = parseChange(value)
+            return change && { kind: "change", value: change, measure: format.measure }
+        }
+    }
+}
+
+function parseRiskItem(raw: unknown): RiskItem | null {
+    if (!isRecord(raw)) return null
+    const level = oneOf(raw.level, RISK_LEVELS)
+    const text = ["id", "title", "category", "description", "quote", "recommendation"].map(key => raw[key])
+    const page = optional(raw.page, value => (Number.isInteger(value) && (value as number) > 0 ? value as number : null))
+    if (!level || !text.every(isString) || typeof raw.quote_verified !== "boolean" || page === null) return null
+    const [id, title, category, description, quote, recommendation] = text as string[]
+    return { id, title, level, category, description, quote, quoteVerified: raw.quote_verified, recommendation,
+        ...(page ? { page } : {}) }
+}
+
+// ── Components ──────────────────────────────────────────────────────────────
+
+const children = (raw: Raw) => all(raw.children, asString)
+
+const COMPONENT_PARSERS: { [K in ComponentType]: (raw: Raw, data: DataModel) => Omit<ComponentOf<K>, "id" | "component"> | null } = {
+    Column: raw => {
+        const ids = children(raw)
+        return ids && { children: ids }
     },
-    Row: (raw, id) => {
-        const children = stringChildren(raw.children)
-        return children && { id, component: "Row", children }
+    Row: raw => {
+        const ids = children(raw)
+        return ids && { children: ids }
     },
-    Metric: (raw, id) => {
-        const format = oneOf(raw.format, NUMBER_FORMATS, "number")
-        const unit = optionalString(raw.unit)
-        const delta = raw.delta === undefined ? undefined : parseDelta(raw.delta)
-        const value = raw.value
-        if (typeof raw.label !== "string" || !format || unit === null || delta === null) return null
-        if (!isFiniteNumber(value) && !isBinding(value)) return null
-        return { id, component: "Metric", label: raw.label, value, unit, format, delta }
+    Text: raw => {
+        const variant = raw.variant === undefined ? "body" : oneOf(raw.variant, ["body", "caption", "heading"] as const)
+        return isString(raw.text) && variant ? { text: raw.text, variant } : null
     },
-    DataTable: (raw, id) => {
-        const columns = Array.isArray(raw.columns) ? raw.columns.map(parseColumn) : []
-        const caption = optionalString(raw.caption)
-        if (columns.length === 0 || columns.some(c => c === null) || !isBinding(raw.rows) || caption === null) return null
-        return { id, component: "DataTable", columns: columns as TableColumn[], rows: raw.rows, caption }
-    },
-    Chart: (raw, id) => {
-        const type = raw.type === "bar" || raw.type === "line" ? raw.type : null
-        const format = oneOf(raw.format, NUMBER_FORMATS, "number")
-        const title = optionalString(raw.title)
-        const unit = optionalString(raw.unit)
-        const series = Array.isArray(raw.series) && raw.series.length > 0 && raw.series.length <= MAX_CHART_SERIES
-            && raw.series.every(s => isRecord(s) && typeof s.key === "string" && typeof s.label === "string")
-            ? raw.series.map(s => ({ key: s.key, label: s.label }) as ChartSeries) : null
-        if (!type || !format || title === null || unit === null || !series) return null
-        if (typeof raw.x !== "string" || !isBinding(raw.data)) return null
-        return { id, component: "Chart", type, title, x: raw.x, series, data: raw.data, unit, format }
-    },
-    RiskList: (raw, id) => {
-        const title = optionalString(raw.title)
-        return isBinding(raw.items) && title !== null ? { id, component: "RiskList", items: raw.items, title } : null
-    },
-    RiskBadge: (raw, id) => {
-        const level = RISK_LEVELS.find(l => l === raw.level)
-        return level ? { id, component: "RiskBadge", level } : null
-    },
-    Text: (raw, id) => {
-        const variant = oneOf(raw.variant, ["body", "caption", "heading"] as const, "body")
-        if (!variant || !(typeof raw.text === "string" || isBinding(raw.text))) return null
-        return { id, component: "Text", text: raw.text, variant }
-    },
-    DocumentList: (raw, id) => {
-        if (!isBinding(raw.documents)) return null
+    DocumentList: (raw, data) => {
+        const documents = all(bound(data, raw.documents), parseDocumentRow)
         const selectable = raw.selectable === true
-        const selection = typeof raw.selection === "string" && raw.selection.startsWith("/") ? raw.selection : undefined
-        if (selectable && !selection) return null
-        return { id, component: "DocumentList", documents: raw.documents, selectable, selection }
+        const selection = isString(raw.selection) && raw.selection.startsWith("/") ? raw.selection : undefined
+        if (!documents || (selectable && !selection)) return null
+        return { documents, selectable, ...(selectable ? { selection } : {}) }
     },
-    Button: (raw, id) => {
-        const variant = oneOf(raw.variant, ["primary", "secondary"] as const, "secondary")
+    Button: raw => {
+        const variant = oneOf(raw.variant, ["primary", "secondary"] as const)
         const event = isRecord(raw.action) && isRecord(raw.action.event) ? raw.action.event : null
-        if (!variant || typeof raw.label !== "string" || !event) return null
-        const name = ACTION_EVENTS.find(allowed => allowed === event.name)
-        if (!name) return null
-        const context = event.context === undefined ? {} : event.context
-        if (!isRecord(context)) return null
-        return { id, component: "Button", label: raw.label, variant, action: { event: { name, context } } }
+        const name = event && oneOf(event.name, ACTION_EVENTS)
+        if (!variant || !isString(raw.label) || !event || !name || !isRecord(event.context)) return null
+        return { label: raw.label, variant, action: { event: { name, context: event.context } } }
+    },
+    Metric: (raw, data) => {
+        const measure = parseMeasure(raw.kind, raw.currency)
+        const previousLabel = optional(raw.previous_label, asString)
+        const value = parseMetricValue(bound(data, raw.data))
+        if (!isString(raw.label) || !measure || previousLabel === null || !value) return null
+        return { label: raw.label, measure, value, ...(previousLabel ? { previousLabel } : {}) }
+    },
+    DataTable: (raw, data) => {
+        const columns = all(raw.columns, parseColumn)
+        const rows = columns && all(bound(data, raw.rows), row => {
+            if (!isRecord(row)) return null
+            const cells = columns.map(column => parseCell(row[column.key], column.format))
+            return cells.every((cell): cell is TableCell => cell !== null) ? cells : null
+        })
+        if (!columns || columns.length === 0 || !rows) return null
+        return { columns, rows }
+    },
+    Chart: (raw, data) => {
+        const type = oneOf(raw.type, ["bar", "line"] as const)
+        const x = isRecord(raw.x) ? raw.x : null
+        const xKind = x && oneOf(x.kind, X_KINDS)
+        const measure = parseMeasure(raw.value_kind, raw.currency)
+        const series = all(raw.series, item => (isRecord(item) && isString(item.key) && isString(item.label)
+            ? { key: item.key, label: item.label } : null))
+        if (!type || !x || !isString(x.key) || !isString(x.label) || !xKind || !measure || !isString(raw.title)) return null
+        if (!series || series.length === 0 || series.length > MAX_CHART_SERIES) return null
+        const points = all(bound(data, raw.points), point => {
+            if (!isRecord(point)) return null
+            const label = parseX(point[x.key as string], xKind)
+            const values = series.map(s => point[s.key] ?? null)
+            return label !== null && values.every((v): v is number | null => v === null || isFiniteNumber(v))
+                ? { x: label, values } : null
+        })
+        return points && { type, title: raw.title, x: { label: x.label, kind: xKind }, series, measure, points }
+    },
+    RiskList: (raw, data) => {
+        const document = parseDocumentRef(bound(data, raw.document))
+        const items = all(bound(data, raw.items), parseRiskItem)
+        return document && items && { document, items }
+    },
+    Sources: (raw, data) => {
+        const documents = all(bound(data, raw.documents), parseDocumentRef)
+        return documents && { documents }
     },
 }
 
-function parseComponent(raw: unknown): A2uiComponent | null {
-    if (!isRecord(raw) || typeof raw.id !== "string" || typeof raw.component !== "string") return null
+function parseComponent(raw: unknown, data: DataModel): A2uiComponent | null {
+    if (!isRecord(raw) || !isString(raw.id) || !isString(raw.component)) return null
     if (!Object.hasOwn(COMPONENT_PARSERS, raw.component)) return null
-    const parse = COMPONENT_PARSERS[raw.component as ComponentType] as (raw: Raw, id: string) => A2uiComponent | null
-    return parse(raw, raw.id)
+    const parse = COMPONENT_PARSERS[raw.component as ComponentType] as (raw: Raw, data: DataModel) => object | null
+    const props = parse(raw, data)
+    return props && ({ ...props, id: raw.id, component: raw.component } as A2uiComponent)
 }
 
 function isTree(components: Record<string, A2uiComponent>): boolean {
@@ -307,102 +385,47 @@ function isTree(components: Record<string, A2uiComponent>): boolean {
     return walk("root")
 }
 
-/** Fold a render_ui message list into one surface; null when anything is outside this catalog. */
+/** Fold a panel's message list into one typed surface; null when anything is outside this catalog. */
 export function parseSurface(messages: unknown): Surface | null {
     if (!Array.isArray(messages)) return null
-    let surface: Surface | null = null
+    let header: { surfaceId: string; catalogId: string } | null = null
+    const rawComponents: unknown[] = []
+    let dataModel: DataModel = {}
     for (const message of messages) {
         if (!isRecord(message) || message.version !== A2UI_VERSION) return null
         if (isRecord(message.createSurface)) {
             const { surfaceId, catalogId } = message.createSurface
-            if (surface || typeof surfaceId !== "string" || catalogId !== JOBS_CATALOG_ID) return null
-            surface = { surfaceId, catalogId, components: {}, dataModel: {} }
+            if (header || !isString(surfaceId) || catalogId !== JOBS_CATALOG_ID) return null
+            header = { surfaceId, catalogId }
         } else if (isRecord(message.updateComponents)) {
             const update = message.updateComponents
-            if (!surface || update.surfaceId !== surface.surfaceId || !Array.isArray(update.components)) return null
-            for (const raw of update.components) {
-                const component = parseComponent(raw)
-                if (!component) return null
-                surface.components[component.id] = component
-            }
+            if (!header || update.surfaceId !== header.surfaceId || !Array.isArray(update.components)) return null
+            rawComponents.push(...update.components)
         } else if (isRecord(message.updateDataModel)) {
             const update = message.updateDataModel
-            if (!surface || update.surfaceId !== surface.surfaceId || typeof update.path !== "string") return null
-            if (!isObjectPath(surface.dataModel, update.path)) return null
-            surface.dataModel = setPointer(surface.dataModel, update.path, update.value)
+            if (!header || update.surfaceId !== header.surfaceId || update.path !== "/" || !isRecord(update.value)) return null
+            dataModel = update.value
         } else {
             return null
         }
     }
-    return surface && isTree(surface.components) && hasSafePointers(surface) ? surface : null
-}
-
-const COMPUTED_COLUMN_TYPES: readonly ColumnType[] = ["number", "currency", "percent", "delta"]
-
-const showsComputedNumber = (component: A2uiComponent): boolean =>
-    component.component === "Metric" || component.component === "Chart"
-    || (component.component === "DataTable" && component.columns.some(c => COMPUTED_COLUMN_TYPES.includes(c.type)))
-
-/** Whether a component the surface renders (one reachable from root) shows a number the agent computed. */
-export function showsComputedNumbers(surface: Surface): boolean {
-    const shows = (id: string): boolean => {
-        const component = surface.components[id]
-        return showsComputedNumber(component) || ("children" in component && component.children.some(shows))
+    if (!header) return null
+    const components: Record<string, A2uiComponent> = {}
+    for (const raw of rawComponents) {
+        const component = parseComponent(raw, dataModel)
+        if (!component || Object.hasOwn(components, component.id)) return null
+        components[component.id] = component
     }
-    return shows("root")
+    return isTree(components) ? { ...header, components, dataModel } : null
 }
 
 export function surfaceFromToolResult(result: unknown): Surface | null {
     return isRecord(result) && result.ok === true ? parseSurface(result.a2ui) : null
 }
 
-export function documentRows(value: unknown): DocumentRow[] {
-    if (!Array.isArray(value)) return []
-    return value.filter((row): row is DocumentRow =>
-        isRecord(row) && typeof row.document_id === "string" && typeof row.filename === "string" && typeof row.status === "string")
-}
-
-export function tableRows(value: unknown): Raw[] {
-    return Array.isArray(value) ? value.filter(isRecord) : []
-}
-
-export interface ChartPoint {
-    label: string
-    /** One value per series, in series order; null where the series has no value. */
-    values: (number | null)[]
-}
-
-export function chartPoints(value: unknown, x: string, series: readonly ChartSeries[]): ChartPoint[] {
-    return tableRows(value)
-        .filter(point => typeof point[x] === "string" || isFiniteNumber(point[x]))
-        .map(point => ({
-            label: String(point[x]),
-            values: series.map(s => (isFiniteNumber(point[s.key]) ? point[s.key] as number : null)),
-        }))
-}
-
-function parseRiskItem(raw: unknown): RiskItem | null {
-    if (!isRecord(raw) || typeof raw.title !== "string" || typeof raw.description !== "string") return null
-    const level = RISK_LEVELS.find(l => l === raw.level)
-    if (!level) return null
-    const text = (key: string) => (typeof raw[key] === "string" && raw[key] ? { [key]: raw[key] as string } : {})
-    return {
-        title: raw.title,
-        level,
-        description: raw.description,
-        ...text("category"),
-        ...text("quote"),
-        ...text("document_id"),
-        ...text("recommendation"),
-        ...(typeof raw.quote_verified === "boolean" ? { quote_verified: raw.quote_verified } : {}),
-        ...(Number.isInteger(raw.page) && (raw.page as number) > 0 ? { page: raw.page as number } : {}),
-    }
-}
-
-/** Risk items, most severe first; the server's order is kept within a level. */
-export function riskItems(value: unknown): RiskItem[] {
-    const items = Array.isArray(value) ? value.map(parseRiskItem).filter((item): item is RiskItem => item !== null) : []
-    return items.sort((a, b) => RISK_LEVELS.indexOf(a.level) - RISK_LEVELS.indexOf(b.level))
+/** Risk items, most severe first; the backend's order is kept within a level. */
+export function bySeverity(items: readonly RiskItem[]): RiskItem[] {
+    return [...items].sort((a, b) => RISK_LEVELS.indexOf(a.level) - RISK_LEVELS.indexOf(b.level))
 }
 
 export function riskCounts(items: readonly RiskItem[]): Record<RiskLevel, number> {
@@ -411,13 +434,23 @@ export function riskCounts(items: readonly RiskItem[]): Record<RiskLevel, number
     return counts
 }
 
+/** The system-written verification line of a risk panel; it names every risk whose quote was not found. */
+export function quoteSummary(items: readonly RiskItem[]): string {
+    const missing = items.filter(item => !item.quoteVerified)
+    if (missing.length === 0) return `ข้อความอ้างอิงตรวจพบในเอกสารครบทั้ง ${items.length} รายการ`
+    const found = `ข้อความอ้างอิงตรวจพบในเอกสาร ${items.length - missing.length} จาก ${items.length} รายการ`
+    return `${found} · ไม่พบ: ${missing.map(item => item.title).join(", ")}`
+}
+
+// ── Actions ─────────────────────────────────────────────────────────────────
+
 export function selectedIds(data: DataModel, path: string | undefined): string[] {
     const value = path ? getPointer(data, path) : undefined
-    return Array.isArray(value) ? value.filter((id): id is string => typeof id === "string") : []
+    return Array.isArray(value) ? value.filter(isString) : []
 }
 
 export function resolveContext(context: ActionContext, data: DataModel): ActionContext {
-    return Object.fromEntries(Object.entries(context).map(([key, value]) => [key, resolveValue(value, data)]))
+    return Object.fromEntries(Object.entries(context).map(([key, value]) => [key, isBinding(value) ? getPointer(data, value.path) : value]))
 }
 
 /** A button bound to a selection is usable only once something is selected. */
@@ -441,10 +474,10 @@ export function buildAction(surface: Surface, button: ComponentOf<"Button">, dat
 
 function describeAction(action: A2uiAction, label: string): string {
     const list = Object.values(action.context).find(Array.isArray)
-    if (action.name === "approve_documents" && list) return `อนุมัติเอกสาร ${list.length} รายการที่เลือก`
-    if (action.name === "reject_documents" && list) return `ปฏิเสธเอกสาร ${list.length} รายการที่เลือก`
-    const question = action.context.question
-    return typeof question === "string" && question.trim() ? question.trim() : label
+    if (!list) return label
+    return action.name === "approve_documents"
+        ? `อนุมัติเอกสาร ${list.length} รายการที่เลือก`
+        : `ปฏิเสธเอกสาร ${list.length} รายการที่เลือก`
 }
 
 /** The user message a button click sends: a readable line, then the action for the agent. */
@@ -482,7 +515,7 @@ export function answeredSurfaceIds(userMessages: readonly string[]): Set<string>
         if (!block) continue
         try {
             const action: unknown = JSON.parse(block)
-            if (isRecord(action) && typeof action.surfaceId === "string") ids.add(action.surfaceId)
+            if (isRecord(action) && isString(action.surfaceId)) ids.add(action.surfaceId)
         } catch {
             // Not an action this panel sent; it answers nothing.
         }
@@ -490,7 +523,7 @@ export function answeredSurfaceIds(userMessages: readonly string[]): Set<string>
     return ids
 }
 
-/** The newest render_ui surface among tool results given in conversation order. */
+/** The newest panel among tool results given in conversation order. */
 export function latestSurfaceId(results: readonly unknown[]): string | null {
     for (let index = results.length - 1; index >= 0; index--) {
         const surface = surfaceFromToolResult(results[index])
