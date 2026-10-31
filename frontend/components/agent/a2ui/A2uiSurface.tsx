@@ -4,7 +4,6 @@ import { Component, useState, type ReactNode } from "react"
 import { Button } from "@/components/ui/button"
 import { Chart, DataTable, Metric, OpenDocumentButton, RiskBadge, RiskList } from "@/components/agent/a2ui/analytics"
 import {
-    COMPUTED_COMPONENTS,
     COMPUTED_NOTE,
     actionMessage,
     buildAction,
@@ -15,6 +14,7 @@ import {
     resolveValue,
     selectedIds,
     setPointer,
+    showsComputedNumbers,
     type A2uiComponent,
     type ComponentOf,
     type ComponentType,
@@ -168,7 +168,7 @@ function SurfaceBody({ surface, actionsDisabled = false, notes = [], onAction, o
     return (
         <div className="mx-3 rounded-lg border border-hairline bg-white p-3" data-surface-id={surface.surfaceId}>
             {ctx.render("root")}
-            {Object.values(surface.components).some(c => COMPUTED_COMPONENTS.includes(c.component)) && (
+            {showsComputedNumbers(surface) && (
                 <p className="mt-2 text-xs text-viz-muted">{COMPUTED_NOTE}</p>
             )}
             {notes.map(note => <p key={note} className="mt-2 text-xs text-slate-gray">{note}</p>)}

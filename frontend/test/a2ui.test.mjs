@@ -235,6 +235,19 @@ test("surfaces with computed numbers say the agent computed them", () => {
   const badge = analytic([column("b"), { id: "b", component: "RiskBadge", level: "critical" }], {})
   assert.doesNotMatch(render(badge), new RegExp(a2ui.COMPUTED_NOTE))
   assert.match(render(badge), /วิกฤต/)
+
+  const table = (type) => [column("t"), { id: "t", component: "DataTable", rows: { path: "/rows" },
+    columns: [{ key: "vendor", label: "ผู้ขาย", type: "text" }, { key: "x", label: "x", type }] }]
+  for (const type of ["number", "currency", "percent", "delta"]) {
+    assert.match(render(analytic(table(type), { rows: [] })), new RegExp(a2ui.COMPUTED_NOTE), type)
+  }
+  for (const type of ["text", "date", "risk"]) {
+    assert.doesNotMatch(render(analytic(table(type), { rows: [] })), new RegExp(a2ui.COMPUTED_NOTE), type)
+  }
+  const orphanMetric = analytic([column("b"), { id: "b", component: "RiskBadge", level: "low" },
+    { id: "lost", component: "Metric", label: "ยอด", value: 1 }], {})
+  assert.ok(orphanMetric)
+  assert.doesNotMatch(render(orphanMetric), new RegExp(a2ui.COMPUTED_NOTE))
 })
 
 const tableComponents = [column("t"), { id: "t", component: "DataTable", caption: "เทียบผู้ขาย", rows: { path: "/rows" }, columns: [

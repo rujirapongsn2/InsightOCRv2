@@ -97,8 +97,6 @@ export type A2uiComponent =
     | { id: string; component: "RiskList"; items: Binding; title?: string }
     | { id: string; component: "RiskBadge"; level: RiskLevel }
 
-/** Components that show numbers the agent computed; a surface with any of them says so. */
-export const COMPUTED_COMPONENTS: readonly ComponentType[] = ["Metric", "DataTable", "Chart"]
 export const COMPUTED_NOTE = "ตัวเลขในแผงนี้ AI คำนวณจากข้อมูลที่ดึงจากเอกสาร ควรตรวจทานก่อนนำไปใช้"
 
 export type ComponentType = A2uiComponent["component"]
@@ -337,6 +335,21 @@ export function parseSurface(messages: unknown): Surface | null {
         }
     }
     return surface && isTree(surface.components) && hasSafePointers(surface) ? surface : null
+}
+
+const COMPUTED_COLUMN_TYPES: readonly ColumnType[] = ["number", "currency", "percent", "delta"]
+
+const showsComputedNumber = (component: A2uiComponent): boolean =>
+    component.component === "Metric" || component.component === "Chart"
+    || (component.component === "DataTable" && component.columns.some(c => COMPUTED_COLUMN_TYPES.includes(c.type)))
+
+/** Whether a component the surface renders (one reachable from root) shows a number the agent computed. */
+export function showsComputedNumbers(surface: Surface): boolean {
+    const shows = (id: string): boolean => {
+        const component = surface.components[id]
+        return showsComputedNumber(component) || ("children" in component && component.children.some(shows))
+    }
+    return shows("root")
 }
 
 export function surfaceFromToolResult(result: unknown): Surface | null {
