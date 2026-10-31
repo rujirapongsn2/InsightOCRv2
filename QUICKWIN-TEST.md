@@ -1534,20 +1534,33 @@ Date: 2026-06-30
   line, inline SVG), `RiskList` and `RiskBadge`.
 - A delta has a direction (▲ ▼ ▬) and a sentiment (good, bad, neutral). Color
   follows the sentiment only, so "cost up" shows ▲ in red with "(แย่ลง)". The
-  direction is also read out as text for screen readers.
+  direction is also read out as text for screen readers. The value sign must
+  match the direction: `up` needs a value of 0 or more, `down` 0 or less,
+  and `flat` exactly 0. Anything else is a corrective error.
+- DataTable columns take an optional `unit` (number, currency, percent and
+  delta columns) and `format` (delta columns only, number|currency|percent).
+  A delta column with `format: "currency", unit: "บาท"` shows "+25,000.00 บาท".
 - Server bounds: numbers must be finite, enums are enforced, strings are
   capped, at most 500 rows x 12 columns, 8 series x 200 points, 50 risks.
   Data keys that no component binds to are rejected. The 100000-character
   data cap is unchanged.
 - Any `document_id` in table rows or risk items must be a document of the
   job; otherwise the whole surface is rejected with a corrective error.
-- Each risk `quote` is checked against the document's OCR text (whitespace
-  ignored, every other character exact). The server stores
+- No binding may overlap a DocumentList `documents` pointer (the same path or
+  one nested in it), because the system replaces those rows. Bind the table
+  or text to a separate key such as `/rows`.
+- Each risk `quote` is checked against the document's OCR text with the same
+  normalization as `search_documents`: whitespace, case, and Thai versus
+  Arabic digits are ignored, so "ชำระภายใน 30 วัน" matches OCR text
+  "ชำระภายใน ๓๐ วัน". OCR text is read only for documents that a quote
+  cites. The server stores
   `quote_verified`. A model that sends `quote_verified` itself, or a quote
   without `document_id`, gets a corrective error. The model sees component
   counts, risk counts per level, `quotes` and `unverified_quotes`.
-- A surface with a Metric, DataTable or Chart shows "ตัวเลขในแผงนี้ AI
-  คำนวณจากข้อมูลที่ดึงจากเอกสาร ควรตรวจทานก่อนนำไปใช้".
+- A surface shows "ตัวเลขในแผงนี้ AI คำนวณจากข้อมูลที่ดึงจากเอกสาร
+  ควรตรวจทานก่อนนำไปใช้" only when a component reachable from root shows a
+  computed number: a Metric, a Chart, or a DataTable with a number,
+  currency, percent or delta column. A text-only table does not show it.
 - Manual check, numbers: ask "สรุปยอดรวมของเอกสารใน job นี้ เทียบกับเดือนก่อน".
   Expect metric tiles with ▲/▼, a signed amount and "(แย่ลง)" / "(ดีขึ้น)",
   plus the computed-numbers note.
@@ -1556,7 +1569,10 @@ Date: 2026-06-30
   grouping (1,234,567.89), dates use the Thai calendar (30 พ.ย. 2569), long
   tables scroll inside the panel, and "ดูข้อมูลเป็นตาราง" opens the values
   behind each chart. Bars show their value at the right; a chart with
-  several series has a legend.
+  several series has a legend. A line chart labels at most 5 x positions,
+  always the first and last, and adjacent labels never sit closer than one
+  step (6 months label ม.ค., มี.ค., มิ.ย.). Value ticks are compact (300K)
+  with "%" on percent charts; any other unit appears once above the axis.
 - Manual check, risks: upload a contract with OCR text and ask
   "วิเคราะห์ความเสี่ยงของสัญญานี้". Expect counts per level (วิกฤต / สูง /
   ปานกลาง / ต่ำ), items ordered from วิกฤต down, a quote with "พบในเอกสาร"
