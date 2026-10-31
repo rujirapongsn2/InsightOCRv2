@@ -251,3 +251,35 @@ def test_quote_found_uses_the_document_search_normalization():
     assert not quote_found("ชำระภายใน 60 วัน", "ผู้ซื้อต้องชำระภายใน ๓๐ วัน")
     assert not quote_found("   ", "anything")
     assert not quote_found("abc", None)
+
+
+def _document_list_and(*others):
+    return [_root("docs", *(c["id"] for c in others)),
+            {"id": "docs", "component": "DocumentList", "documents": {"path": "/documents"}}, *others]
+
+
+NOTE_COLUMNS = [{"key": "note", "label": "หมายเหตุ", "type": "text"}]
+
+
+def test_bindings_may_not_overlap_document_list_rows(db):
+    """The system rewrites DocumentList rows, so nothing else may read them as the model wrote them."""
+    kept = _doc(db, JOB, "kept.pdf")
+    dropped = str(uuid.uuid4())
+    rows = [{"document_id": kept, "note": "ตรวจ"}, {"document_id": dropped, "note": "ตรวจ"}]
+    same_path = _document_list_and({"id": "table", "component": "DataTable", "rows": {"path": "/documents"},
+                                    "columns": NOTE_COLUMNS})
+    _fails(_render(db, same_path, {"documents": rows}),
+           'data "/documents" is bound by another component but overlaps the DocumentList documents at "/documents"')
+
+    nested = _document_list_and({"id": "note", "component": "Text", "text": {"path": "/documents/0/note"}})
+    _fails(_render(db, nested, {"documents": rows}),
+           'data "/documents/0/note" is bound by another component but overlaps the DocumentList documents')
+
+    separate = _document_list_and({"id": "table", "component": "DataTable", "rows": {"path": "/rows"},
+                                   "columns": NOTE_COLUMNS})
+    table_rows = [{"note": "ตรวจ", "document_id": kept}]
+    result = _render(db, separate, {"documents": rows, "rows": table_rows})
+    assert result["ok"] is True, result
+    assert [row["document_id"] for row in _model(result)["documents"]] == [kept]
+    assert _model(result)["rows"] == table_rows
+    assert result["dropped_document_ids"] == [dropped]

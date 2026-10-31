@@ -557,6 +557,9 @@ def _check_data(by_id: dict[str, dict], data: dict) -> list[str]:
     reads = [read for c in by_id.values() for read in BOUND_VALUES.get(c["component"], lambda _: [])(c)]
     read_paths = [path for path, _ in reads]
     errors = [p for p in (_object_path_problem(data, path) for path in documents + selections + read_paths) if p]
+    errors.extend(f'data "{path}" is bound by another component but overlaps the DocumentList documents at "{doc}", '
+                  'whose rows the system replaces; bind it to a separate key such as "/rows"'
+                  for doc in documents for path in read_paths if _overlaps(path, doc))
     for selection in selections:
         errors.extend(f'"selection" "{selection}" overlaps the documents at "{doc}"; use a separate key such as "/selected"'
                       for doc in documents if _overlaps(selection, doc))
