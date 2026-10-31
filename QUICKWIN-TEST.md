@@ -1511,13 +1511,54 @@ Date: 2026-06-30
   count, and per-risk `{id, title, level, quote: found|not_found}`.
 - `show_documents` keeps the old behaviour. Foreign ids are dropped and
   reported, one malformed id rejects the call, and `actions` adds the
-  "อนุมัติที่เลือก" / "ปฏิเสธที่เลือก" buttons. A click sends an `a2ui-action`
-  message and the agent calls `bulk_approve` / `bulk_reject` with one frozen
-  confirmation. Only the newest unanswered panel keeps working buttons.
+  "อนุมัติที่เลือก" / "ปฏิเสธที่เลือก" buttons. The agent answers a click with
+  `bulk_approve` / `bulk_reject` and one frozen confirmation.
+- A click is a structured `ui_action` message, not text. The browser posts
+  `{surface_id, name, source_component_id, document_ids}` to
+  `POST /agent/conversations/{id}/ui-actions`. The server refuses the click
+  with a reason when the panel belongs to another conversation (404), was
+  already answered or superseded (409), did not offer that button (422), or
+  did not show one of the documents (422). An accepted click stores
+  `kind = "ui_action"` and the payload on the user message. The chat bubble
+  and the conversation title show the server's text ("อนุมัติเอกสาร 2
+  รายการที่เลือก"). The model reads `[ui_action] {"surface_id", "name",
+  "document_ids"}`, which is rendered from the payload.
+- Panel status lives on the server, in `agent_surfaces`: `active`,
+  `answered` or `superseded`. A new panel supersedes the earlier panels that
+  have buttons, and an accepted click answers its panel. Panels without
+  buttons (metrics, tables, charts, risks) stay `active` and never show the
+  "ไม่ใช่แผงล่าสุด" note. `GET /agent/conversations/{id}` returns every
+  panel's status and `generated_at` in `surfaces`, whichever page of
+  messages is loaded. Every panel shows "ข้อมูล ณ 31 ต.ค. 2569 14:05".
+- History pages: `GET /agent/conversations/{id}?before=<message id>&limit=50`
+  returns the older page and `has_more`. The chat shows
+  "โหลดข้อความก่อนหน้า" while older messages remain.
+- Confirmations that nobody answers expire. After 5 minutes the request
+  becomes `expired`, not `rejected`. The tool result says the request
+  expired, and the agent says so and offers to ask again. Every run poll
+  carries the run's latest request with its status. The dialog shows while
+  the status is `pending`, shows "คำขอยืนยันหมดเวลา" once it is `expired`, and
+  disappears once it is answered, without a reload. Confirming a request
+  that is no longer pending returns 409 with a reason.
+- The panel root is the layout boundary (`relative min-w-0 overflow-x-clip`).
+  No component can widen the page. Wide tables and charts scroll inside
+  their own wrapper.
+- Migration `0031_agent_ui_actions` adds `agent_messages.kind`,
+  `agent_messages.ui_action`, `agent_runs.ui_action` and `agent_surfaces`.
+  It converts old text-encoded clicks (```` ```a2ui-action ```` blocks in
+  user messages and runs) into `ui_action` rows and repairs the
+  conversation titles that were cut from them. It also backfills a status
+  row for every catalog-v2 panel. Running it again changes nothing, and
+  its downgrade restores the text encoding.
 - Panels from the v1 catalog in old conversations show as an ordinary tool
   call.
 - Manual check: ask "หาเอกสารที่ยังไม่อนุมัติ", select 2, click
-  "อนุมัติที่เลือก", and confirm once. Ask "สรุปยอดรวมเทียบเดือนก่อน", a
+  "อนุมัติที่เลือก", and confirm once. The bubble and the conversation list
+  show "อนุมัติเอกสาร 2 รายการที่เลือก" with no code block, and the panel
+  says "ส่งคำสั่งแล้ว". Ask again and leave the confirmation unanswered for
+  5 minutes. The dialog changes to "คำขอยืนยันหมดเวลา", and the agent says
+  the request expired. In a conversation with more than 50 messages, reload
+  and use "โหลดข้อความก่อนหน้า". The first panel's status stays the same. Ask "สรุปยอดรวมเทียบเดือนก่อน", a
   comparison by vendor, a monthly trend and "วิเคราะห์ความเสี่ยงของสัญญานี้".
   Expect Thai formatting as above, changes like "▲ +12.5% (แย่ลง)", month
   names on the x axis, the sources list, and a risk summary that names
@@ -1527,7 +1568,16 @@ Date: 2026-06-30
   result to `frontend/test/fixtures/a2ui/*.json`, and the frontend tests
   render the same files. After an intended change, regenerate them with
   `cd backend && A2UI_WRITE_FIXTURES=1 SECRET_KEY=test python -m pytest test/test_agent_panels.py -k golden`.
-- Automated: `cd backend && SECRET_KEY=test python -m pytest test/test_agent_panels.py`
-  (Python 3.11) and `cd frontend && node --test test/a2ui.test.mjs`.
-- Rendered the fixtures with headless Chrome at 360px and 860px. Not yet
-  checked in the running app or against a live model.
+- Automated: `cd backend && SECRET_KEY=test python -m pytest test/test_agent_panels.py
+  test/test_agent_ui_actions.py test/test_agent_confirmation_expiry.py`
+  (Python 3.11) and `cd frontend && node --test test/a2ui.test.mjs`. The
+  frontend run includes a headless Chrome check at a 360px viewport.
+  `document.documentElement.scrollWidth` stays at 360 with every fixture
+  panel. The same markup without the root containment measures 756px, so
+  the check detects the defect it guards. Set `CHROME_PATH` if Chrome is
+  not in `/Applications`. Without Chrome, the check is skipped.
+- Migration 0031 was run against a throwaway Postgres 16. The steps were:
+  build the phase-A schema, stamp it at 0030, add a legacy click, upgrade,
+  run the data step again, downgrade, and upgrade again. Every step gave
+  the expected rows.
+- Not yet checked in the running app or against a live model.
