@@ -241,10 +241,13 @@ def test_quotes_are_verified_against_the_document_text(db):
                     "components": {"RiskList": 1}, "risks": result["risks"], "quotes": 4, "unverified_quotes": 2}
 
 
-def test_quote_found_ignores_whitespace_only():
+def test_quote_found_uses_the_document_search_normalization():
     assert quote_found("ร้อยละ 0.5 ของมูลค่างาน", "ในอัตราร้อยละ 0.5\nของ มูลค่างาน ต่อวัน")
-    assert quote_found("ABC  def", "xx ABC\tdef yy")
+    assert quote_found("ชำระภายใน 30 วัน", "ผู้ซื้อต้องชำระภายใน ๓๐ วัน นับจาก")
+    assert quote_found("ชำระภายใน ๓๐ วัน", "ผู้ซื้อต้องชำระภายใน 30 วัน นับจาก")
+    assert quote_found("abc def", "xx ABC\tDEF yy")
+    assert quote_found("ค่าปรับร้อยละ", "ค่า ปรับ ร้อย ละ")
     assert not quote_found("ร้อยละ 5 ของมูลค่างาน", "ในอัตราร้อยละ 0.5 ของมูลค่างาน")
-    assert not quote_found("abc def", "ABC DEF")
+    assert not quote_found("ชำระภายใน 60 วัน", "ผู้ซื้อต้องชำระภายใน ๓๐ วัน")
     assert not quote_found("   ", "anything")
     assert not quote_found("abc", None)

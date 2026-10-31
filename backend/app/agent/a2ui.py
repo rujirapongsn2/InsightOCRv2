@@ -11,11 +11,12 @@ import copy
 import json
 import math
 import re
-import unicodedata
 from collections import Counter
 from dataclasses import dataclass
 from datetime import date
 from typing import Any, Callable
+
+from app.utils.search_text import compact_search_text
 
 A2UI_VERSION = "v0.9"
 CATALOG_ID = "https://insightdoc.app/a2ui/catalogs/jobs/v1"
@@ -636,19 +637,15 @@ def parse_surface(components: Any, data: Any) -> Surface:
     return Surface(components=components, data=data, document_lists=document_lists, cited_rows=cited_rows)
 
 
-def _compact(text: str) -> str:
-    return re.sub(r"\s+", "", unicodedata.normalize("NFKC", text))
-
-
 def quote_found(quote: str, document_text: str | None) -> bool:
-    """Whether quote occurs verbatim in the document text, ignoring whitespace.
+    """Whether quote occurs in the document text under the same normalization as document search.
 
-    Whitespace is dropped rather than collapsed because OCR of Thai text puts
-    spaces inside words and line breaks inside clauses; every other character
-    must match exactly.
+    That ignores whitespace (OCR of Thai text puts spaces inside words and line
+    breaks inside clauses), case, and Thai versus Arabic digits; every other
+    character must match.
     """
-    needle = _compact(quote)
-    return bool(needle) and needle in _compact(document_text or "")
+    needle = compact_search_text(quote)
+    return bool(needle) and needle in compact_search_text(document_text)
 
 
 @dataclass(frozen=True)
