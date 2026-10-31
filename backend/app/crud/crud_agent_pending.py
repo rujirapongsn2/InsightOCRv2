@@ -2,11 +2,12 @@ from typing import Optional
 from uuid import UUID
 from datetime import datetime, timedelta, timezone
 from sqlalchemy.orm import Session
+from app.agent.confirmations import CONFIRMATION_TIMEOUT_S
 from app.models.agent_pending_action import AgentPendingAction
 
 
 class CRUDAgentPending:
-    def create(self, db: Session, *, conversation_id: UUID, user_id: UUID, tool_name: str, tool_arguments: dict, description: Optional[str] = None, kind: str = "confirmation", expires_minutes: int = 5, run_id: Optional[UUID] = None, documents: Optional[list[dict]] = None) -> AgentPendingAction:
+    def create(self, db: Session, *, conversation_id: UUID, user_id: UUID, tool_name: str, tool_arguments: dict, description: Optional[str] = None, kind: str = "confirmation", expires_minutes: int = CONFIRMATION_TIMEOUT_S // 60, run_id: Optional[UUID] = None, documents: Optional[list[dict]] = None) -> AgentPendingAction:
         # `result` is empty until a confirmation is answered, so it carries the
         # documents the user is shown, frozen when the action is created.
         result = {"confirmation_documents": documents} if documents is not None else None
@@ -17,11 +18,11 @@ class CRUDAgentPending:
         return action
 
     def expire_for_run(self, db: Session, run_id: UUID) -> int:
-        """Reject whatever a run left waiting when it ended."""
+        """Expire whatever a run left waiting when it ended: the user never answered it."""
         count = (
             db.query(AgentPendingAction)
             .filter(AgentPendingAction.run_id == run_id, AgentPendingAction.status == "pending")
-            .update({"status": "rejected", "resolved_at": datetime.now(timezone.utc)}, synchronize_session=False)
+            .update({"status": "expired", "resolved_at": datetime.now(timezone.utc)}, synchronize_session=False)
         )
         db.commit()
         return count

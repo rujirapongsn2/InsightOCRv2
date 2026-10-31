@@ -1,4 +1,14 @@
 EXPLICIT_CONFIRMATION_TOOLS = frozenset({"create_skill", "web_search"})
+# How long the loop waits for an answer before the request expires.
+CONFIRMATION_TIMEOUT_S = 300
+
+
+def declined_result(tool_name: str, answer: str) -> dict:
+    """The tool result for a request the user rejected or never answered."""
+    if answer == "expired":
+        return {"error": "The confirmation request expired: the user did not answer in time, so nothing was done.",
+                "expired": True, "tool_name": tool_name}
+    return {"error": "User rejected action", "tool_name": tool_name}
 
 
 def requires_explicit_confirmation(tool_name: str) -> bool:

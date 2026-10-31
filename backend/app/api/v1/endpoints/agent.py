@@ -150,32 +150,46 @@ def _build_agent_llm_config(db: Session, conv) -> dict:
     return _ai_settings_to_config(setting, "fallback_ai_settings")
 
 
-def _agent_run_payload(db: Session, run: AgentRun) -> dict:
-    """Return only UI-safe run state; messages remain the source of evidence."""
-    # Only a request this active run made: an older run's leftover request must
-    # never be shown (or auto-approved) as if the current run were waiting for it.
-    pending = None
-    if run.status in {"queued", "running"}:
-        query = db.query(AgentPendingAction).filter(
+def _run_pending_action(db: Session, run: AgentRun) -> AgentPendingAction | None:
+    """The latest request this run made, in whatever state it is now.
+
+    Only this run's: an older run's leftover request must never be shown (or
+    auto-approved) as if the current run were waiting for it.
+    """
+    from sqlalchemy import or_
+    # Requests carry the run that made them; older rows without one fall back to time.
+    return (
+        db.query(AgentPendingAction)
+        .filter(
             AgentPendingAction.conversation_id == run.conversation_id,
             AgentPendingAction.user_id == run.user_id,
-            AgentPendingAction.status == "pending",
+            or_(
+                AgentPendingAction.run_id == run.id,
+                AgentPendingAction.run_id.is_(None) & (AgentPendingAction.created_at >= run.created_at)
+                if run.created_at is not None else AgentPendingAction.run_id.is_(None),
+            ),
         )
-        from sqlalchemy import or_
-        # Requests carry the run that made them; older rows without one fall back to time.
-        query = query.filter(or_(
-            AgentPendingAction.run_id == run.id,
-            AgentPendingAction.run_id.is_(None) & (AgentPendingAction.created_at >= run.created_at)
-            if run.created_at is not None else AgentPendingAction.run_id.is_(None),
-        ))
-        pending = query.order_by(AgentPendingAction.created_at.desc()).first()
+        .order_by(AgentPendingAction.created_at.desc())
+        .first()
+    )
+
+
+def _agent_run_payload(db: Session, run: AgentRun) -> dict:
+    """Return only UI-safe run state; messages remain the source of evidence.
+
+    pending_action carries its status (pending | confirmed | rejected | expired)
+    on every poll, so the UI shows the dialog only while the server still waits.
+    """
+    pending = _run_pending_action(db, run)
     pending_payload = None
     if pending:
         pending_payload = {
             "pending_action_id": str(pending.id),
+            "status": pending.status,
             "tool_name": pending.tool_name,
             "description": pending.description or pending.tool_name,
             "arguments": pending.tool_arguments,
+            "expires_at": pending.expires_at.isoformat() if pending.expires_at else None,
         }
         # Frozen when the action was created, from this job's rows; never the model's arguments.
         documents = (pending.result or {}).get("confirmation_documents")
@@ -444,6 +458,13 @@ async def cancel_agent_run(
     return {"run": _agent_run_payload(db, run)}
 
 
+_NOT_WAITING = {
+    "expired": "คำขอยืนยันนี้หมดเวลาแล้ว ไม่มีการเปลี่ยนแปลงใดๆ ขอให้ Agent ถามใหม่ได้",
+    "confirmed": "คำขอยืนยันนี้ได้รับคำตอบแล้ว",
+    "rejected": "คำขอยืนยันนี้ได้รับคำตอบแล้ว",
+}
+
+
 @router.post("/confirm/{pending_action_id}")
 async def confirm_pending_action(
     pending_action_id: UUID,
@@ -455,14 +476,16 @@ async def confirm_pending_action(
     if not action or action.user_id != current_user.id:
         raise HTTPException(status_code=404)
     if action.status != "pending":
-        raise HTTPException(status_code=400, detail=f"Action is {action.status}")
+        raise HTTPException(status_code=409, detail=_NOT_WAITING.get(action.status, _NOT_WAITING["confirmed"]))
     if data.approved and requires_explicit_confirmation(action.tool_name) and not data.explicit_confirmation:
         raise HTTPException(
             status_code=400,
             detail=f"{action.tool_name} requires explicit user confirmation",
         )
     if not crud_pending.resolve(db, pending_action_id, "confirmed" if data.approved else "rejected"):
-        raise HTTPException(status_code=409, detail="This request is no longer waiting for an answer")
+        db.expire_all()
+        settled = crud_pending.get(db, pending_action_id)
+        raise HTTPException(status_code=409, detail=_NOT_WAITING.get(settled.status if settled else "", _NOT_WAITING["confirmed"]))
     return {"ok": True}
 
 

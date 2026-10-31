@@ -32,7 +32,7 @@ from app.agent.context import (
     tool_content_for_llm,
 )
 from app.agent.events import sse_event, SSEEventType
-from app.agent.confirmations import requires_confirmation, describe_action
+from app.agent.confirmations import CONFIRMATION_TIMEOUT_S, declined_result, describe_action, requires_confirmation
 from app.agent.tools.document_tools import freeze_confirmation
 from app.agent.a2ui import PANEL_TOOLS
 from app.agent.tools.registry import tool_registry
@@ -1277,10 +1277,10 @@ class AgentLoop:
                                     "documents": frozen.documents,
                                     "arguments": tool_args,
                                 })
-                                approved = await self._wait_for_confirmation(pending.id)
-                                if not approved:
-                                    result = {"error": "User rejected action", "tool_name": tool_name}
-                                    yield sse_event(SSEEventType.TOOL_REJECTED, {"id": tc.id, "name": tool_name})
+                                answer = await self._wait_for_confirmation(pending.id)
+                                if answer != "confirmed":
+                                    result = declined_result(tool_name, answer)
+                                    yield sse_event(SSEEventType.TOOL_REJECTED, {"id": tc.id, "name": tool_name, "status": answer})
                                 else:
                                     result = await tool_registry.execute(tool_name, tool_args, self.context)
                                     result = _verify_file_tool_result(self.context, tool_name, result)
@@ -2174,30 +2174,21 @@ class AgentLoop:
             })
             # Poll for the user's decision, emitting a keepalive every ~10s so the
             # SSE stream survives however long the user takes to confirm.
-            approved = None
-            for tick in range(300):
+            answer = None
+            for tick in range(CONFIRMATION_TIMEOUT_S):
                 self.db.rollback()  # end the read txn before sleeping
                 action = crud_pending.get(self.db, pending.id)
-                if action and action.status == "confirmed":
-                    approved = True
-                    break
-                if action and action.status == "rejected":
-                    approved = False
+                if action is None or action.status != "pending":
+                    answer = action.status if action else "rejected"
                     break
                 if tick % 10 == 0:
                     yield ": keepalive\n\n"
                 await asyncio.sleep(1)
-            if approved is None:
-                if crud_pending.resolve(self.db, pending.id, "rejected"):
-                    approved = False
-                else:
-                    # Answered in the last second: honour the stored answer.
-                    self.db.expire_all()
-                    action = crud_pending.get(self.db, pending.id)
-                    approved = bool(action and action.status == "confirmed")
-            if not approved:
-                result = {"error": "User rejected action", "tool_name": tool_name}
-                yield sse_event(SSEEventType.TOOL_REJECTED, {"id": call_id, "name": tool_name})
+            if answer is None:
+                answer = self._expire_confirmation(pending.id)
+            if answer != "confirmed":
+                result = declined_result(tool_name, answer)
+                yield sse_event(SSEEventType.TOOL_REJECTED, {"id": call_id, "name": tool_name, "status": answer})
             else:
                 result = await tool_registry.execute(tool_name, tool_args, self.context)
         else:
@@ -2546,10 +2537,10 @@ __TOOL_CATALOG__
                         "documents": frozen.documents,
                         "arguments": tool_args,
                     })
-                    approved = await self._wait_for_confirmation(pending.id)
-                    if not approved:
-                        result = {"error": "User rejected action", "tool_name": tool_name}
-                        yield sse_event(SSEEventType.TOOL_REJECTED, {"id": call_id, "name": tool_name})
+                    answer = await self._wait_for_confirmation(pending.id)
+                    if answer != "confirmed":
+                        result = declined_result(tool_name, answer)
+                        yield sse_event(SSEEventType.TOOL_REJECTED, {"id": call_id, "name": tool_name, "status": answer})
                     else:
                         result = await tool_registry.execute(tool_name, tool_args, self.context)
                         result = _verify_file_tool_result(self.context, tool_name, result)
@@ -2604,7 +2595,16 @@ __TOOL_CATALOG__
         with SessionLocal() as check:
             return check.query(AgentRun.status).filter(AgentRun.id == self.run_id).scalar() == "running"
 
-    async def _wait_for_confirmation(self, pending_id: UUID, timeout_s: int = 300) -> bool:
+    def _expire_confirmation(self, pending_id: UUID) -> str:
+        """Mark an unanswered request expired; an answer stored at the last moment wins."""
+        if crud_pending.resolve(self.db, pending_id, "expired"):
+            return "expired"
+        self.db.expire_all()
+        action = crud_pending.get(self.db, pending_id)
+        return action.status if action else "expired"
+
+    async def _wait_for_confirmation(self, pending_id: UUID, timeout_s: int = CONFIRMATION_TIMEOUT_S) -> str:
+        """The answer to a confirmation request: "confirmed", "rejected" or "expired"."""
         settled = False
         try:
             for _ in range(timeout_s):
@@ -2612,33 +2612,24 @@ __TOOL_CATALOG__
                     # A stopped run must never carry out an action approved afterwards.
                     crud_pending.resolve(self.db, pending_id, "rejected")
                     settled = True
-                    return False
+                    return "rejected"
                 # End the read transaction before sleeping so the session does
                 # not sit idle-in-transaction on a pooled connection all night.
                 self.db.rollback()
                 await asyncio.sleep(1)
                 self.db.expire_all()
                 action = crud_pending.get(self.db, pending_id)
-                if action and action.status == "confirmed":
+                if action is None or action.status != "pending":
                     settled = True
-                    return True
-                if action and action.status == "rejected":
-                    settled = True
-                    return False
-            if crud_pending.resolve(self.db, pending_id, "rejected"):
-                settled = True
-                return False
-            # The user answered at the last moment: honour that answer.
-            self.db.expire_all()
-            action = crud_pending.get(self.db, pending_id)
+                    return action.status if action else "rejected"
             settled = True
-            return bool(action and action.status == "confirmed")
+            return self._expire_confirmation(pending_id)
         finally:
             if not settled:
                 # The run ended while waiting (runtime limit, Stop): the request must not
                 # stay "pending" and be approved later for a run that no longer exists.
                 try:
                     self.db.rollback()
-                    crud_pending.resolve(self.db, pending_id, "rejected")
+                    crud_pending.resolve(self.db, pending_id, "expired")
                 except Exception:  # noqa: BLE001
                     logger.warning("Could not expire pending action %s", pending_id)
