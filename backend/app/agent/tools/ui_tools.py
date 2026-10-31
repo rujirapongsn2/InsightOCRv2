@@ -7,20 +7,33 @@ from app.agent.a2ui import (
     MAX_TABLE_COLUMNS, MAX_TABLE_ROWS, CitedDocument, SurfaceError, analytics_summary, parse_surface,
     resolve_citations, resolve_documents, resolve_pointer, surface_messages,
 )
-from app.agent.tools.document_tools import DocIdError, job_documents, parse_doc_ids
+from app.agent.tools.document_tools import DocIdError, parse_doc_ids
 from app.agent.tools.registry import ToolDef, tool_registry
+from app.models.document import Document
+
+
+def _job_rows(db, job_id, ids: list[uuid.UUID], *columns) -> dict:
+    """Only the named columns of this job's documents among ids, keyed by id."""
+    if not ids:
+        return {}
+    return {row.id: row for row in db.query(Document.id, *columns)
+            .filter(Document.job_id == job_id, Document.id.in_(ids))}
 
 
 async def _render_ui_handler(args: dict, context) -> dict:
     try:
         surface = parse_surface(args.get("components"), args.get("data"))
         listed_ids, cited_ids = surface.document_ids(), surface.cited_document_ids()
-        docs = {d.id: d for d in job_documents(context.db, context.job_id, parse_doc_ids(listed_ids + cited_ids))}
+        # OCR text can be large, so it is read only for documents a quote must be checked against.
+        docs = _job_rows(context.db, context.job_id, parse_doc_ids(listed_ids + cited_ids),
+                         Document.filename, Document.status)
+        texts = _job_rows(context.db, context.job_id, parse_doc_ids(surface.quoted_document_ids()), Document.ocr_text)
         known = {raw: docs[uuid.UUID(raw)] for raw in listed_ids + cited_ids if uuid.UUID(raw) in docs}
         rows = {raw: {"document_id": str(d.id), "filename": d.filename, "status": d.status}
                 for raw, d in known.items() if raw in listed_ids}
         data, dropped = resolve_documents(surface, rows)
-        data = resolve_citations(surface, data, {raw: CitedDocument(str(d.id), d.ocr_text) for raw, d in known.items()})
+        data = resolve_citations(surface, data, {raw: CitedDocument(str(d.id), texts[d.id].ocr_text if d.id in texts else None)
+                                                 for raw, d in known.items()})
     except DocIdError as error:
         return {"ok": False, "error": f"render_ui was not shown: {error}"}
     except SurfaceError as error:

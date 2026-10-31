@@ -8,7 +8,7 @@ import uuid
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import sessionmaker
@@ -277,6 +277,29 @@ def test_quote_found_uses_the_document_search_normalization():
     assert not quote_found("ชำระภายใน 60 วัน", "ผู้ซื้อต้องชำระภายใน ๓๐ วัน")
     assert not quote_found("   ", "anything")
     assert not quote_found("abc", None)
+
+
+def _statements(db):
+    seen: list[str] = []
+    event.listen(db.get_bind(), "before_cursor_execute", lambda conn, cursor, statement, *_: seen.append(statement))
+    return seen
+
+
+def test_document_text_is_read_only_for_quoted_rows(db):
+    doc_id = _doc(db, JOB, "contract.pdf", CONTRACT_TEXT)
+    statements = _statements(db)
+    listed = _render(db, [_root("docs"), {"id": "docs", "component": "DocumentList", "documents": {"path": "/documents"}}],
+                     {"documents": [{"document_id": doc_id}]})
+    assert listed["ok"] is True, listed
+    cited = _render(db, *_table([_row(document_id=doc_id)]))
+    assert cited["ok"] is True, cited
+    unquoted = {k: v for k, v in _risk(doc_id).items() if k != "quote"}
+    assert _render(db, *_risks([unquoted]))["ok"] is True
+    assert statements and not [s for s in statements if "ocr_text" in s]
+
+    quoted = _render(db, *_risks([_risk(doc_id), unquoted]))
+    assert [item.get("quote_verified") for item in _model(quoted)["risks"]] == [True, None]
+    assert len([s for s in statements if "ocr_text" in s]) == 1
 
 
 def _document_list_and(*others):

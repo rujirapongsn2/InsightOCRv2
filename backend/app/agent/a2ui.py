@@ -473,6 +473,11 @@ class Surface:
     def cited_document_ids(self) -> list[str]:
         return [row["document_id"] for _, rows in self.cited_rows for row in rows if "document_id" in row]
 
+    def quoted_document_ids(self) -> list[str]:
+        """The cited ids whose rows carry a quote: the only documents whose text is needed."""
+        return [row["document_id"] for _, rows in self.cited_rows for row in rows
+                if "document_id" in row and "quote" in row]
+
 
 def _check_tree(by_id: dict[str, dict]) -> list[str]:
     errors: list[str] = []
