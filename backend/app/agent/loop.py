@@ -34,6 +34,7 @@ from app.agent.context import (
 from app.agent.events import sse_event, SSEEventType
 from app.agent.confirmations import requires_confirmation, describe_action
 from app.agent.tools.document_tools import freeze_confirmation
+from app.agent.a2ui import PANEL_TOOLS
 from app.agent.tools.registry import tool_registry
 from app.agent.tools import document_tools, integration_tools, memory_tools, code_tools, skill_tools, filesystem_tools, web_search_tools, workflow_tools, ui_tools  # noqa: F401 — side-effect: registers tools
 from app.crud.crud_agent_message import agent_message as crud_msg
@@ -424,7 +425,7 @@ def _aggregate_success(
 
 # Tools whose failure is a corrective message to the model, not a failed action:
 # a later success of the same tool means the model fixed its call.
-SELF_CORRECTING_TOOLS = frozenset({"render_ui"})
+SELF_CORRECTING_TOOLS = frozenset(PANEL_TOOLS)
 
 
 def _settle_corrected_failures(tool_name: str, *failure_lists: list[dict[str, Any]]) -> None:

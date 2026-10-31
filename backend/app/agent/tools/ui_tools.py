@@ -1,99 +1,139 @@
+"""The Jobs agent's panel tools: one call shows one A2UI panel in the chat.
+
+Arguments are parsed by the models in app.agent.a2ui; this module resolves
+document ids against the current job and composes the surface. The stored
+result keeps "a2ui" for the chat; tool_content_for_llm strips it, so the model
+sees only the itemised summary.
+"""
 from __future__ import annotations
 
 import uuid
+from typing import Any, Awaitable, Callable
 
 from app.agent.a2ui import (
-    ACTION_EVENTS, CATALOG, MAX_CHART_POINTS, MAX_CHART_SERIES, MAX_COMPONENTS, MAX_DOCUMENTS, MAX_RISK_ITEMS,
-    MAX_TABLE_COLUMNS, MAX_TABLE_ROWS, CitedDocument, SurfaceError, analytics_summary, parse_surface,
-    resolve_citations, resolve_documents, resolve_pointer, surface_messages,
+    DocumentRef, Panel, PanelError, ShowChart, ShowDocuments, ShowMetrics, ShowRisks, ShowTable, ValueColumn,
+    chart_panel, documents_panel, metrics_panel, parse_args, risks_panel, surface_messages, table_panel,
+    tool_parameters,
 )
 from app.agent.tools.document_tools import DocIdError, parse_doc_ids
 from app.agent.tools.registry import ToolDef, tool_registry
 from app.models.document import Document
 
 
-def _job_rows(db, job_id, ids: list[uuid.UUID], *columns) -> dict:
-    """Only the named columns of this job's documents among ids, keyed by id."""
+def new_panel_id() -> str:
+    return f"jobs-{uuid.uuid4().hex[:12]}"
+
+
+def _job_rows(context, raw_ids: list[str], *columns) -> dict[str, Any]:
+    """This job's documents among raw_ids, keyed by the id as the model wrote it."""
+    ids = parse_doc_ids(raw_ids)
     if not ids:
         return {}
-    return {row.id: row for row in db.query(Document.id, *columns)
-            .filter(Document.job_id == job_id, Document.id.in_(ids))}
+    found = {row.id: row for row in context.db.query(Document.id, *columns)
+             .filter(Document.job_id == context.job_id, Document.id.in_(ids))}
+    return {raw: found[uuid.UUID(raw)] for raw in raw_ids if uuid.UUID(raw) in found}
 
 
-async def _render_ui_handler(args: dict, context) -> dict:
-    try:
-        surface = parse_surface(args.get("components"), args.get("data"))
-        listed_ids, cited_ids = surface.document_ids(), surface.cited_document_ids()
-        # OCR text can be large, so it is read only for documents a quote must be checked against.
-        docs = _job_rows(context.db, context.job_id, parse_doc_ids(listed_ids + cited_ids),
-                         Document.filename, Document.status)
-        texts = _job_rows(context.db, context.job_id, parse_doc_ids(surface.quoted_document_ids()), Document.ocr_text)
-        known = {raw: docs[uuid.UUID(raw)] for raw in listed_ids + cited_ids if uuid.UUID(raw) in docs}
-        rows = {raw: {"document_id": str(d.id), "filename": d.filename, "status": d.status}
-                for raw, d in known.items() if raw in listed_ids}
-        data, dropped = resolve_documents(surface, rows)
-        data = resolve_citations(surface, data, {raw: CitedDocument(str(d.id), texts[d.id].ocr_text if d.id in texts else None)
-                                                 for raw, d in known.items()})
-    except DocIdError as error:
-        return {"ok": False, "error": f"render_ui was not shown: {error}"}
-    except SurfaceError as error:
-        return {"ok": False, "error": str(error)}
-    surface_id = f"jobs-{uuid.uuid4().hex[:12]}"
-    # The model sees everything but "a2ui" (see tool_content_for_llm); the chat renders "a2ui".
-    result: dict = {"ok": True, "surface_id": surface_id, "document_count": sum(len(resolve_pointer(data, path)) for path, _ in surface.document_lists),
-                    **analytics_summary(surface.components, data),
-                    "a2ui": surface_messages(surface_id, surface.components, data)}
-    if dropped:
-        result["dropped_document_ids"] = dropped
-        result["note"] = "These ids are not documents of this job and were not shown."
-    return result
+def _job_documents(context, raw_ids: list[str], what: str) -> dict[str, DocumentRef]:
+    """Every id must be this job's document: a number must never lose its source silently."""
+    rows = _job_rows(context, raw_ids, Document.filename)
+    if unknown := sorted({raw for raw in raw_ids if raw not in rows}):
+        raise PanelError(f"these {what} are not documents of this job: {unknown[:5]}. "
+                         'Use the "id" values from list_documents.')
+    return {raw: DocumentRef(str(row.id), row.filename) for raw, row in rows.items()}
 
 
-tool_registry.register(ToolDef(
-    name="render_ui", category="document",
-    description=(
-        "Show a panel in the chat (A2UI): documents the user may act on, or analytics (headline numbers, "
-        "comparison tables, charts, risk analysis). Still give a short text answer; do not repeat the panel in "
-        "text. Buttons only send a message: approving or rejecting still goes through bulk_approve / "
-        "bulk_reject. Compute numbers with tools (execute_python, document fields), never guess.\n"
-        f"Components ({', '.join(CATALOG)}) form a flat list; one must have id \"root\" (usually a Column). "
-        "Lists of rows/points/items live in data and are bound with {path}.\n"
-        "- Column / Row {children: [ids]} (Row: side by side, e.g. Metrics)\n"
-        "- Text {text: string | {path}, variant?: body|caption|heading}\n"
-        "- DocumentList {documents: {path: \"/documents\"}, selectable?: bool, selection?: \"/selected\"}; "
-        "rows {document_id, note?}, the system fills in filename and status\n"
-        f"- Button {{label, variant?: primary|secondary, action: {{event: {{name: {'|'.join(ACTION_EVENTS)}, "
-        "context: {document_ids: {path: \"/selected\"}}}}}}\n"
-        "- Metric {label, value: number | {path}, unit?, format?: number|currency|percent, delta?: {value, "
-        "direction: up|down|flat, sentiment: good|bad|neutral, label?}} (cost up = up + bad; percent = 12.5 for 12.5%)\n"
-        "- DataTable {columns: [{key, label, type: text|number|currency|percent|date|delta|risk, align?, "
-        "unit? (number columns and delta), format?: number|currency|percent (delta only)}], rows: {path}, "
-        "caption?}; a row holds column keys (date \"YYYY-MM-DD\", delta like Metric.delta, risk = level) and an "
-        "optional document_id\n"
-        "- Chart {type: bar (categories) | line (over time), title?, x: key, series: [{key, label}], data: {path}, "
-        "unit?, format?}; points {<x>: label, <series key>: number}\n"
-        "- RiskList {items: {path}, title?}; item {title, level: critical|high|medium|low, category?, description, "
-        "quote?, document_id?, page?, recommendation?}. quote must be copied verbatim from the document's text and "
-        "needs document_id; the system checks it and marks quote_verified (do not send that field).\n"
-        "- RiskBadge {level}\n"
-        f"Limits: {MAX_COMPONENTS} components, {MAX_DOCUMENTS} documents, {MAX_TABLE_ROWS} rows x "
-        f"{MAX_TABLE_COLUMNS} columns, {MAX_CHART_SERIES} series x {MAX_CHART_POINTS} points, "
-        f"{MAX_RISK_ITEMS} risks. The result reports unverified_quotes: tell the user about them."
-    ),
-    parameters_schema={
-        "type": "object",
-        "properties": {
-            "components": {
-                "type": "array", "maxItems": MAX_COMPONENTS,
-                "items": {
-                    "type": "object",
-                    "properties": {"id": {"type": "string"}, "component": {"type": "string", "enum": list(CATALOG)}},
-                    "required": ["id", "component"],
-                },
-            },
-            "data": {"type": "object", "description": "The surface data model: only what components bind to"},
-        },
-        "required": ["components", "data"],
-    },
-    handler=_render_ui_handler,
-))
+def _sources(context, raw_ids: list[str]) -> list[DocumentRef]:
+    refs = _job_documents(context, raw_ids, "sources")
+    return list({ref.document_id: ref for ref in (refs[raw] for raw in raw_ids)}.values())
+
+
+def _show_documents(args: ShowDocuments, context) -> tuple[Panel, dict]:
+    raw_ids = [item.document_id for item in args.documents]
+    known = _job_rows(context, raw_ids, Document.filename, Document.status)
+    rows: dict[str, dict] = {}
+    for item in args.documents:
+        doc = known.get(item.document_id)
+        if doc is not None and str(doc.id) not in rows:
+            rows[str(doc.id)] = {"document_id": str(doc.id), "filename": doc.filename, "status": doc.status,
+                                 **({"note": item.note} if item.note else {})}
+    if not rows:
+        raise PanelError('none of these documents belong to this job. Call list_documents and use its "id" values.')
+    dropped = [raw for raw in dict.fromkeys(raw_ids) if raw not in known]
+    note = {"dropped": dropped, "note": "These ids are not documents of this job and were not shown."} if dropped else {}
+    return documents_panel(args, list(rows.values())), note
+
+
+def _show_metrics(args: ShowMetrics, context) -> tuple[Panel, dict]:
+    return metrics_panel(args, _sources(context, args.sources)), {}
+
+
+def _show_table(args: ShowTable, context) -> tuple[Panel, dict]:
+    keys = [c.key for c in args.columns if isinstance(c, ValueColumn) and c.kind == "document"]
+    cited = list(dict.fromkeys(row[key] for row in args.rows for key in keys if row.get(key) is not None))
+    documents = _job_documents(context, cited, "document column values") if cited else {}
+    return table_panel(args, _sources(context, args.sources), documents), {}
+
+
+def _show_chart(args: ShowChart, context) -> tuple[Panel, dict]:
+    return chart_panel(args, _sources(context, args.sources)), {}
+
+
+def _show_risks(args: ShowRisks, context) -> tuple[Panel, dict]:
+    document = _job_documents(context, [args.document_id], "document_id")[args.document_id]
+    # OCR text can be large, so it is read for this one document only.
+    text = _job_rows(context, [args.document_id], Document.ocr_text)[args.document_id].ocr_text
+    return risks_panel(args, document, text), {}
+
+
+def _handler(name: str, model: type, show: Callable[[Any, Any], tuple[Panel, dict]]) -> Callable[..., Awaitable[dict]]:
+    async def handle(args: dict, context) -> dict:
+        try:
+            panel, extra = show(parse_args(name, model, args), context)
+        except DocIdError as error:
+            return {"ok": False, "error": f"{name} was not shown: {error}"}
+        except PanelError as error:
+            message = str(error)
+            return {"ok": False, "error": message if message.startswith(name) else f"{name} was not shown: {message}"}
+        panel_id = new_panel_id()
+        return {"ok": True, "panel_id": panel_id, **panel.summary, **extra,
+                "a2ui": surface_messages(panel_id, panel)}
+    return handle
+
+
+_SHOWN = ("The panel already shows its sources and, for risks, which quotes were found; do not restate or "
+          "reinterpret them in text. Still write a short text answer with the conclusion.")
+_COMPUTED = ("Send raw values (numbers, ISO dates \"2026-01-31\", months \"2026-01\"); the system formats them. "
+             "Compute every number first with tools (execute_python, get_document_detail, compare_documents); "
+             "never estimate. sources: every document the numbers come from.")
+
+PANELS = [
+    ("show_documents", ShowDocuments, _show_documents,
+     "Show a list of this job's documents the user may act on, e.g. documents awaiting approval or with problems. "
+     "actions adds buttons for the selected documents; a click only sends a message, and approving or rejecting "
+     "still goes through bulk_approve / bulk_reject. Filenames and statuses are filled in by the system. "
+     "Ids that are not documents of this job are dropped and listed in the result."),
+    ("show_metrics", ShowMetrics, _show_metrics,
+     "Show 1-6 headline numbers as tiles. Give previous to compare with: the system computes the change, its "
+     "direction and (with higher_is) whether it is good or bad. kind money takes currency (default THB); percent "
+     "values are percentage points (12.5 = 12.5%). " + _COMPUTED + " " + _SHOWN),
+    ("show_table", ShowTable, _show_table,
+     "Show a comparison table. Each column has a kind; rows hold raw values for the value columns. A change column "
+     "{kind: \"change\", of, vs, higher_is} is computed by the system from two numeric columns of the same kind: "
+     "never put it in rows. Include a document column whenever a row comes from one document; it shows the "
+     "filename with an open link. " + _COMPUTED + " " + _SHOWN),
+    ("show_chart", ShowChart, _show_chart,
+     "Show a chart: bar for categories, line for a trend over dates or months (the system sorts the points). "
+     "value_kind formats every value. " + _COMPUTED + " " + _SHOWN),
+    ("show_risks", ShowRisks, _show_risks,
+     "Show a contract risk analysis for one document. Read its text first (get_document_detail). Each risk needs "
+     "a quote copied verbatim from that document's text; the system checks every quote and the result lists each "
+     "risk's id, title and quote: found | not_found. If you mention an unverified quote, use its title from the "
+     "result. " + _SHOWN),
+]
+
+for _name, _model, _show, _description in PANELS:
+    tool_registry.register(ToolDef(
+        name=_name, category="document", description=_description,
+        parameters_schema=tool_parameters(_model), handler=_handler(_name, _model, _show),
+    ))

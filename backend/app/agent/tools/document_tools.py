@@ -343,7 +343,7 @@ class DocIdError(ValueError):
 def parse_doc_ids(raw: Any) -> list[uuid.UUID]:
     """Document ids from a tool call, de-duplicated in order.
 
-    One policy for every tool that takes a list of ids (render_ui, bulk_approve,
+    One policy for every tool that takes a list of ids (the panel tools, bulk_approve,
     bulk_reject): a single malformed id rejects the whole call, so the model fixes
     it instead of acting on a silently shortened list. Well-formed ids outside the
     job are not an error here; job_documents leaves them out and each tool reports them.
