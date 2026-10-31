@@ -1476,114 +1476,58 @@ Date: 2026-06-30
   "OCR degraded"), banner "ไม่พบ buyer — …", and no duplicate "รอตรวจ" chip
   beside "ยืนยันถูกต้อง" on `line_items`.
 
-## Agent generative UI (A2UI prototype)
+## Agent generative UI (A2UI panels, catalog v2)
 
-- The Jobs agent has a `render_ui` tool. It returns A2UI v0.9 messages
-  (`createSurface`, `updateComponents`, `updateDataModel`) for the catalog
-  `https://insightdoc.app/a2ui/catalogs/jobs/v1` (Column, Text, DocumentList,
-  Button). The chat renders a successful result inline instead of a tool card.
-  A result that does not parse stays a normal tool call.
-- Filenames and statuses in a surface come from the job's documents. Ids from
-  another job are dropped and reported. One malformed id rejects the whole
-  call (render_ui, `bulk_approve`, `bulk_reject`) with a corrective error.
-- render_ui data may hold only what components bind to. Pointers must lead
-  through objects only (no `/groups/0/docs`), a selection may not sit inside
-  the documents array, bound Text is a string of at most 2000 characters, and
-  the data object is capped at 100000 characters.
-- The model sees only a render_ui summary (`ok`, `surface_id`,
-  `document_count`, dropped ids). The stored tool result keeps `a2ui` for the
-  chat. A render_ui failure that the model fixes later in the run does not
-  count as a run failure.
-- Confirmations freeze their targets when they are created. `bulk_approve`
-  and `bulk_reject` are rewritten to the exact eligible `doc_ids` (this job,
-  `extraction_completed`, `min_confidence` applied). Execution changes at most
-  that set and reports anything no longer waiting in
-  `not_approved_doc_ids` / `not_rejected_doc_ids`. The confirmation's document
-  list is the frozen snapshot, stored in the pending action's `result` column
-  (no migration). If nothing is eligible, the agent gets the error and the user
-  is not asked.
-- Manual check: open a job with at least 3 documents in `extraction_completed`,
-  open the AI Agent tab and ask "หาเอกสารที่ยังไม่อนุมัติ". Expect a short text
-  answer and a selectable list with filename, status "รอตรวจ" and an optional
-  note. "เปิดดู" opens that document's preview.
-- With nothing selected, the approve button is disabled. Select 2 and click it.
-  The chat shows "อนุมัติเอกสาร 2 รายการที่เลือก" without the JSON block. While
-  a run is queued or running, the surface buttons are disabled. After the
-  click the surface shows "ส่งคำสั่งแล้ว" and its buttons stay disabled, also
-  after a page reload.
-- Expect one confirmation: "อนุมัติเอกสารที่รอตรวจ 2 รายการ", the 2 filenames
-  with Thai status labels, and the raw arguments under "Show arguments".
-  Confirm, then check that only those 2 documents became reviewed. Reject
-  instead and check that nothing changed.
-- Select 2 and click a reject button. Expect one `bulk_reject` confirmation for
-  both documents, not one per document.
-- Freeze check: ask "อนุมัติเอกสารที่รอตรวจทั้งหมด". While the confirmation is
-  open, upload or finish extracting another document. Confirm. Only the
-  documents listed in the dialog become reviewed.
-- Ask for a second panel. The older panel's buttons become disabled with
-  "แผงนี้ไม่ใช่แผงล่าสุด สถานะเอกสารอาจไม่เป็นปัจจุบัน".
-- Automated: `cd backend && SECRET_KEY=test python -m pytest test/test_agent_render_ui.py
-  test/test_agent_document_confirm.py test/test_agent_tools_reliability.py`
+- The Jobs agent shows panels with five tools. One call shows one panel:
+  `show_documents`, `show_metrics`, `show_table`, `show_chart` and
+  `show_risks`. `render_ui` and the v1 catalog are gone.
+- Each tool's parameters schema is generated from the Pydantic model that
+  also validates the call (`app/agent/a2ui.py`). Extra keys are rejected,
+  definitions are inlined (no `$ref`), and numbers must be JSON numbers.
+  A rejected call returns a corrective error that lists every problem. If
+  the model fixes it later in the run, the run does not count it as a
+  failure.
+- The model sends raw values with a kind: `text`, `count`, `number`,
+  `money` (with an ISO 4217 `currency`, default THB), `percent` (12.5 means
+  12.5%), `date` (`2026-01-31`), `month` (`2026-01`) or `document` (an id).
+  The frontend is the only formatter: "1,250.00 บาท", "12.5%",
+  "31 ม.ค. 2569", "ม.ค. 69".
+- The backend computes every comparison. A metric with `previous` and
+  `higher_is` gets a change with direction, sentiment, the amount and the
+  relative change (none when `previous` is 0; percent metrics change in
+  points, "จุด"). A table `change` column compares two numeric columns of the
+  same kind per row. The model cannot send a delta or a direction.
+- `sources` (required for metrics, tables and charts) must all be documents
+  of the job. The panel shows "AI คำนวณจาก N เอกสาร", which opens to the
+  filenames with "เปิดดู". A `document` column shows the filename and
+  "เปิดดู" per row.
+- `show_risks` takes one `document_id`. The system numbers the risks r1..rn
+  and checks each quote against that document's OCR text (whitespace, case,
+  and Thai versus Arabic digits are ignored). The panel states, for example,
+  "ข้อความอ้างอิงตรวจพบในเอกสาร 3 จาก 4 รายการ · ไม่พบ: <title>" and marks each
+  quote as found or not found.
+- The model sees an itemised result without the A2UI payload: shown and
+  dropped ids, per-metric changes, row and point counts with the source
+  count, and per-risk `{id, title, level, quote: found|not_found}`.
+- `show_documents` keeps the old behaviour. Foreign ids are dropped and
+  reported, one malformed id rejects the call, and `actions` adds the
+  "อนุมัติที่เลือก" / "ปฏิเสธที่เลือก" buttons. A click sends an `a2ui-action`
+  message and the agent calls `bulk_approve` / `bulk_reject` with one frozen
+  confirmation. Only the newest unanswered panel keeps working buttons.
+- Panels from the v1 catalog in old conversations show as an ordinary tool
+  call.
+- Manual check: ask "หาเอกสารที่ยังไม่อนุมัติ", select 2, click
+  "อนุมัติที่เลือก", and confirm once. Ask "สรุปยอดรวมเทียบเดือนก่อน", a
+  comparison by vendor, a monthly trend and "วิเคราะห์ความเสี่ยงของสัญญานี้".
+  Expect Thai formatting as above, changes like "▲ +12.5% (แย่ลง)", month
+  names on the x axis, the sources list, and a risk summary that names
+  unverified items. The text answer should not restate the sources or the
+  verification.
+- Golden fixtures: `backend/test/test_agent_panels.py` writes each tool's real
+  result to `frontend/test/fixtures/a2ui/*.json`, and the frontend tests
+  render the same files. After an intended change, regenerate them with
+  `cd backend && A2UI_WRITE_FIXTURES=1 SECRET_KEY=test python -m pytest test/test_agent_panels.py -k golden`.
+- Automated: `cd backend && SECRET_KEY=test python -m pytest test/test_agent_panels.py`
   (Python 3.11) and `cd frontend && node --test test/a2ui.test.mjs`.
-- Not yet checked against a live model or in a browser.
-
-### Analytics components (same catalog id, additive)
-
-- New components: `Row` (tiles side by side, wraps on narrow widths),
-  `Metric` (number with an optional delta), `DataTable`, `Chart` (bar or
-  line, inline SVG), `RiskList` and `RiskBadge`.
-- A delta has a direction (▲ ▼ ▬) and a sentiment (good, bad, neutral). Color
-  follows the sentiment only, so "cost up" shows ▲ in red with "(แย่ลง)". The
-  direction is also read out as text for screen readers. The value sign must
-  match the direction: `up` needs a value of 0 or more, `down` 0 or less,
-  and `flat` exactly 0. Anything else is a corrective error.
-- DataTable columns take an optional `unit` (number, currency, percent and
-  delta columns) and `format` (delta columns only, number|currency|percent).
-  A delta column with `format: "currency", unit: "บาท"` shows "+25,000.00 บาท".
-- Server bounds: numbers must be finite, enums are enforced, strings are
-  capped, at most 500 rows x 12 columns, 8 series x 200 points, 50 risks.
-  Data keys that no component binds to are rejected. The 100000-character
-  data cap is unchanged.
-- Any `document_id` in table rows or risk items must be a document of the
-  job; otherwise the whole surface is rejected with a corrective error.
-- No binding may overlap a DocumentList `documents` pointer (the same path or
-  one nested in it), because the system replaces those rows. Bind the table
-  or text to a separate key such as `/rows`.
-- Each risk `quote` is checked against the document's OCR text with the same
-  normalization as `search_documents`: whitespace, case, and Thai versus
-  Arabic digits are ignored, so "ชำระภายใน 30 วัน" matches OCR text
-  "ชำระภายใน ๓๐ วัน". OCR text is read only for documents that a quote
-  cites. The server stores
-  `quote_verified`. A model that sends `quote_verified` itself, or a quote
-  without `document_id`, gets a corrective error. The model sees component
-  counts, risk counts per level, `quotes` and `unverified_quotes`.
-- A surface shows "ตัวเลขในแผงนี้ AI คำนวณจากข้อมูลที่ดึงจากเอกสาร
-  ควรตรวจทานก่อนนำไปใช้" only when a component reachable from root shows a
-  computed number: a Metric, a Chart, or a DataTable with a number,
-  currency, percent or delta column. A text-only table does not show it.
-- Manual check, numbers: ask "สรุปยอดรวมของเอกสารใน job นี้ เทียบกับเดือนก่อน".
-  Expect metric tiles with ▲/▼, a signed amount and "(แย่ลง)" / "(ดีขึ้น)",
-  plus the computed-numbers note.
-- Manual check, table and charts: ask for a comparison by vendor, a bar
-  chart by vendor or category, and a monthly trend. Numbers use Thai
-  grouping (1,234,567.89), dates use the Thai calendar (30 พ.ย. 2569), long
-  tables scroll inside the panel, and "ดูข้อมูลเป็นตาราง" opens the values
-  behind each chart. Bars show their value at the right; a chart with
-  several series has a legend. A line chart labels at most 5 x positions,
-  always the first and last, and adjacent labels never sit closer than one
-  step (6 months label ม.ค., มี.ค., มิ.ย.). Value ticks are compact (300K)
-  with "%" on percent charts; any other unit appears once above the axis.
-- Manual check, risks: upload a contract with OCR text and ask
-  "วิเคราะห์ความเสี่ยงของสัญญานี้". Expect counts per level (วิกฤต / สูง /
-  ปานกลาง / ต่ำ), items ordered from วิกฤต down, a quote with "พบในเอกสาร"
-  for verified quotes and "ไม่พบข้อความนี้ในเอกสาร ควรตรวจสอบ" for the rest,
-  and "เปิดดู" opening the cited document. The text answer mentions any
-  unverified quotes.
-- Phone width: at about 360px the tiles wrap, the table scrolls sideways
-  inside its box, and the page itself does not scroll sideways.
-- The app is light-only (`data-theme="light"`), so the panel stays light
-  when the OS is in dark mode.
-- Automated: add `test/test_agent_render_ui_analytics.py` to the pytest
-  command above. The frontend tests are in `test/a2ui.test.mjs`.
-- Rendered with headless Chrome from static markup at 360px and 860px.
-  Not yet checked in the running app or against a live model.
+- Rendered the fixtures with headless Chrome at 360px and 860px. Not yet
+  checked in the running app or against a live model.
