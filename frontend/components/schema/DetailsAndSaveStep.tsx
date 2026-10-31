@@ -8,7 +8,7 @@ import { SchemaField } from "@/types/schema"
 import { isValidFieldName, validateFields } from "@/lib/schema-validation"
 
 export function DetailsAndSaveStep() {
-    const { schemaId, schemaData, fields, updateSchemaData, isSaving, saveSchema, previousStep, studio, updateStudio } = useSchemaWizard()
+    const { schemaId, schemaData, fields, updateSchemaData, isSaving, saveSchema, previousStep, studio, updateStudio, referencePdf, referencePdfInfo, setReferenceConsent, isRemovingReference, fixedFieldCreationMode } = useSchemaWizard()
     const confirmedValues = studio
         ? Object.values(studio.expected).reduce(
             (sum, values) => sum + fields.filter((field) => field.id && values[field.id] !== undefined).length, 0)
@@ -17,7 +17,7 @@ export function DetailsAndSaveStep() {
 
     const fieldErrors = validateFields(fields).filter((error) => error.severity === "error")
     const hasInvalidFields = fieldErrors.length > 0
-    const canSave = fields.length > 0 && !hasInvalidFields && schemaData.name.trim().length > 0
+    const canSave = fixedFieldCreationMode === "idle" && fields.length > 0 && !hasInvalidFields && schemaData.name.trim().length > 0
 
     const handleSave = () => {
         if (!schemaData.name.trim()) {
@@ -78,6 +78,19 @@ export function DetailsAndSaveStep() {
             </div>
 
             <div className="pt-4 border-t text-sm text-slate-600">
+                {referencePdf.kind === "stored" && <p className="mb-2 break-words">PDF: {referencePdf.file.name} · Saved attachment</p>}
+                {referencePdf.kind === "selected" && <fieldset className="mb-4 space-y-2">
+                    <legend className="mb-2 font-medium text-slate-900 break-words">Reference PDF: {referencePdf.file.name}</legend>
+                    <label className="flex items-start gap-2">
+                        <input type="radio" name="reference-pdf-storage" className="mt-1" checked={referencePdf.consent} onChange={() => setReferenceConsent(true)} />
+                        <span>Keep this PDF with the schema<span className="block text-xs text-slate-500">I consent to storing this file until removed. Only schema managers can access it.</span></span>
+                    </label>
+                    <label className="flex items-start gap-2">
+                        <input type="radio" name="reference-pdf-storage" className="mt-1" checked={!referencePdf.consent} onChange={() => setReferenceConsent(false)} />
+                        <span>Do not attach this PDF{referencePdfInfo && <span className="block text-xs text-slate-500">The saved {referencePdfInfo.filename} remains attached.</span>}</span>
+                    </label>
+                    {referencePdf.consent === true && <p className="text-xs text-emerald-700">Will be attached when saved</p>}
+                </fieldset>}
                 <p>
                     {fields.length} field(s) ready for saving.
                 </p>
@@ -126,10 +139,10 @@ export function DetailsAndSaveStep() {
 
             {/* Navigation */}
             <div className="flex justify-between pt-6 border-t mt-8">
-                <Button variant="outline" onClick={previousStep} disabled={isSaving}>
+                <Button variant="outline" onClick={previousStep} disabled={isSaving || isRemovingReference}>
                     ← Back to fields
                 </Button>
-                <Button onClick={handleSave} disabled={isSaving || !canSave} className="min-w-[140px] bg-blue-600 hover:bg-blue-700 text-white">
+                <Button onClick={handleSave} disabled={isSaving || isRemovingReference || !canSave} className="min-w-[140px] bg-blue-600 hover:bg-blue-700 text-white">
                     {isSaving ? (
                         <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> Saving...</>
                     ) : (

@@ -2,10 +2,10 @@
 
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type PointerEvent, type KeyboardEvent } from "react"
 import { Document, Page, pdfjs } from "react-pdf"
-import { AlertCircle, ChevronLeft, ChevronRight, FileText, Loader2, LocateFixed, Plus, ScanLine, Sparkles, Trash2, ZoomIn, ZoomOut } from "lucide-react"
+import { AlertCircle, ChevronDown, ChevronLeft, ChevronRight, FileText, Loader2, LocateFixed, Plus, ScanLine, Sparkles, SquareDashed, Trash2, X, ZoomIn, ZoomOut } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { useSchemaWizard } from "@/contexts/SchemaWizardContext"
-import type { ArrayColumn, ArrayConfig, BboxLocator, SchemaField } from "@/types/schema"
+import type { ArrayColumn, ArrayConfig, BboxLocator, FixedFieldCreationMode, SchemaField } from "@/types/schema"
 import { getApiBaseUrl } from "@/lib/api"
 import { isValidFieldName } from "@/lib/schema-validation"
 import { evidenceSearchTexts, findTextBox, findWordBox, type Box, type PageWord, type TextItemLike } from "@/lib/evidence-search"
@@ -18,6 +18,11 @@ const genId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
 const BASE_PAGE_WIDTH = 760
 
 type Selection = { x: number; y: number; width: number; height: number } | null
+const fieldTypes: ReadonlyArray<{ value: SchemaField["type"]; label: string }> = [
+  { value: "text", label: "Text" }, { value: "number", label: "Number" },
+  { value: "date", label: "Date" }, { value: "currency", label: "Currency" },
+  { value: "boolean", label: "Yes/No" }, { value: "array", label: "Table array" },
+]
 type PdfProxy = {
   numPages: number
   getPage: (page: number) => Promise<{
@@ -72,8 +77,11 @@ function validArrayConfig(config?: ArrayConfig) {
 }
 
 export function FixedPositionFieldsStep() {
-  const { schemaId, fields, addField, updateField, removeField, nextStep } = useSchemaWizard()
-  const [file, setFile] = useState<File | null>(null)
+  const { schemaId, fields, addField, updateField, removeField, nextStep,
+    fixedFieldCreationMode: creationMode, setFixedFieldCreationMode: setCreationMode,
+    referencePdf, referencePdfInfo, selectReferencePdf, setReferenceConsent, loadReferencePdf, removeReferencePdf,
+    isRemovingReference: removingReference } = useSchemaWizard()
+  const file = referencePdf.kind === "stored" || referencePdf.kind === "selected" ? referencePdf.file : null
   const [pageNumber, setPageNumber] = useState(1)
   const [numPages, setNumPages] = useState(0)
   const [selection, setSelection] = useState<Selection>(null)
@@ -89,17 +97,89 @@ export function FixedPositionFieldsStep() {
   const [fitWidth, setFitWidth] = useState(BASE_PAGE_WIDTH)
   const [renderedPage, setRenderedPage] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
-  const [selectedFieldId, setSelectedFieldId] = useState<string | null>(null)
+  const [selectedFieldId, setSelectedFieldId] = useState<string | null>(fields.find((field) => field.locator)?.id || null)
+  const methodsRef = useRef<HTMLDetailsElement>(null)
+  const draftEditorRef = useRef<HTMLElement>(null)
+  const draftNameRef = useRef<HTMLInputElement>(null)
+  const searchInputRef = useRef<HTMLInputElement>(null)
+  const sidebarRef = useRef<HTMLElement>(null)
+  const boxRefs = useRef(new Map<string, HTMLDivElement>())
+  const rowRefs = useRef(new Map<string, HTMLDivElement>())
+  const draftBoxRef = useRef<HTMLDivElement>(null)
   const boxDrag = useRef<{ id: string; mode: "move" | "resize"; point: { x: number; y: number }; locator: BboxLocator } | null>(null)
+  const draftDrag = useRef<{ mode: "move" | "resize"; point: { x: number; y: number }; box: NonNullable<Selection> } | null>(null)
   const pdfRef = useRef<PdfProxy | null>(null)
   // Find a value in the sample and propose its box.
   const [findValue, setFindValue] = useState("")
-  const [findName, setFindName] = useState("")
-  const [findType, setFindType] = useState<SchemaField["type"]>("text")
   const [finding, setFinding] = useState(false)
   const [findMessage, setFindMessage] = useState<string | null>(null)
   const [pendingField, setPendingField] = useState<{ name: string; type: SchemaField["type"] } | null>(null)
   const ocrWords = useRef<Record<number, PageWord[]> | null>(null)
+
+  const cancelCreation = () => {
+    setCreationMode("idle")
+    setSelection(null)
+    setDragStart(null)
+    setPendingField(null)
+    setFindMessage(null)
+  }
+  const beginCreation = (mode: Exclude<FixedFieldCreationMode, "idle">) => {
+    if (methodsRef.current) methodsRef.current.open = false
+    let number = fields.length + 1
+    while (fields.some((field) => field.name === `field_${number}`)) number += 1
+    setPendingField({ name: `field_${number}`, type: "text" })
+    setCreationMode(mode)
+    setSelectedFieldId(null)
+    setSelection(mode === "coordinates" ? { x: 0, y: 0, width: 10, height: 5 } : null)
+    setFindMessage(null)
+    setFindValue("")
+    if (sidebarRef.current) sidebarRef.current.scrollTop = 0
+  }
+  const selectField = (field: SchemaField) => {
+    cancelCreation()
+    setSelectedFieldId(field.id || null)
+    if (field.locator) setPageNumber(field.locator.page)
+  }
+
+  useEffect(() => {
+    const dismissOutside = (event: Event) => {
+      const menu = methodsRef.current
+      if (menu?.open && event.target instanceof Node && !menu.contains(event.target)) menu.open = false
+    }
+    // Safari may blur the summary before delivering a menu item's click.
+    document.addEventListener("pointerdown", dismissOutside, true)
+    document.addEventListener("focusin", dismissOutside)
+    return () => {
+      document.removeEventListener("pointerdown", dismissOutside, true)
+      document.removeEventListener("focusin", dismissOutside)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (creationMode !== "search" && creationMode !== "coordinates") return
+    const frame = requestAnimationFrame(() => {
+      const input = creationMode === "search" ? searchInputRef.current : draftNameRef.current
+      input?.focus({ preventScroll: true })
+      draftEditorRef.current?.scrollIntoView({ block: "nearest" })
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [creationMode])
+
+  useEffect(() => {
+    const reveal = (container: HTMLElement | null, target?: HTMLElement) => {
+      if (!container || !target) return
+      const parent = container.getBoundingClientRect()
+      const child = target.getBoundingClientRect()
+      if (child.top < parent.top || child.bottom > parent.bottom) container.scrollTop += child.top - parent.top
+      if (child.left < parent.left || child.right > parent.right) container.scrollLeft += child.left - parent.left
+    }
+    if (selectedFieldId) {
+      if (!boxDrag.current) reveal(pageContainerRef.current, boxRefs.current.get(selectedFieldId))
+      reveal(sidebarRef.current, rowRefs.current.get(selectedFieldId))
+    } else if (selection && !dragStart && !draftDrag.current && validLocator({ type: "bbox", page: pageNumber, ...selection })) {
+      reveal(pageContainerRef.current, draftBoxRef.current || undefined)
+    }
+  }, [selectedFieldId, renderedPage, selection, dragStart, pageNumber])
 
   const fileUrl = useMemo(() => file ? URL.createObjectURL(file) : null, [file])
   const pageWidth = Math.round(fitWidth * zoom)
@@ -122,7 +202,8 @@ export function FixedPositionFieldsStep() {
       setError("Choose a PDF form for fixed-position fields")
       return
     }
-    setFile(selected)
+    selectReferencePdf(selected)
+    cancelCreation()
     ocrWords.current = null
     setPendingField(null)
     setFindMessage(null)
@@ -136,6 +217,23 @@ export function FixedPositionFieldsStep() {
     setError(null)
   }
 
+  const removeSavedPdf = async () => {
+    if (!confirm("Remove the saved PDF? Fields and boxes will be kept.")) return
+    try {
+      await removeReferencePdf()
+      cancelCreation()
+      if (referencePdf.kind !== "selected") {
+        pdfRef.current = null
+        ocrWords.current = null
+      }
+      setPreviewValues({})
+      setRawPreviewValues({})
+      setSelection(null)
+    } catch (error) {
+      setError(error instanceof Error ? error.message : "Unable to remove the saved PDF")
+    }
+  }
+
   const toPercent = (event: PointerEvent<Element>) => {
     const bounds = surfaceRef.current?.getBoundingClientRect()
     if (!bounds) return null
@@ -146,11 +244,10 @@ export function FixedPositionFieldsStep() {
   }
 
   const handlePointerDown = (event: PointerEvent<HTMLDivElement>) => {
-    if (!file || renderedPage !== renderKey || event.button !== 0) return
+    if (creationMode !== "draw" || !file || renderedPage !== renderKey || event.button !== 0) return
     const point = toPercent(event)
     if (!point) return
     event.currentTarget.setPointerCapture(event.pointerId)
-    setPendingField(null) // a box drawn by hand is a new field, not the value that was searched for
     setDragStart(point)
     setSelection({ ...point, width: 0, height: 0 })
   }
@@ -172,10 +269,37 @@ export function FixedPositionFieldsStep() {
     event.currentTarget.releasePointerCapture(event.pointerId)
     setDragStart(null)
     setSelection((current) => current && current.width >= 0.5 && current.height >= 0.5 ? current : null)
+    if (window.matchMedia("(max-width: 1023px)").matches) sidebarRef.current?.scrollIntoView({ block: "nearest" })
+  }
+
+  const startDraftDrag = (event: PointerEvent<HTMLButtonElement>, mode: "move" | "resize") => {
+    if (!selection || event.button !== 0) return
+    event.stopPropagation()
+    const point = toPercent(event)
+    if (!point) return
+    event.currentTarget.setPointerCapture(event.pointerId)
+    draftDrag.current = { mode, point, box: selection }
+  }
+  const moveDraft = (event: PointerEvent<HTMLButtonElement>) => {
+    const drag = draftDrag.current
+    if (!drag) return
+    event.stopPropagation()
+    const point = toPercent(event)
+    if (!point) return
+    const dx = point.x - drag.point.x
+    const dy = point.y - drag.point.y
+    setSelection(drag.mode === "move"
+      ? { ...drag.box, x: clamp(drag.box.x + dx, 0, 100 - drag.box.width), y: clamp(drag.box.y + dy, 0, 100 - drag.box.height) }
+      : { ...drag.box, width: clamp(drag.box.width + dx, 0.5, 100 - drag.box.x), height: clamp(drag.box.height + dy, 0.5, 100 - drag.box.y) })
+  }
+  const endDraftDrag = (event: PointerEvent<HTMLButtonElement>) => {
+    event.stopPropagation()
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
+    draftDrag.current = null
   }
 
   const startBoxDrag = (event: PointerEvent<HTMLButtonElement>, field: SchemaField, mode: "move" | "resize") => {
-    if (event.button !== 0 || !field.id || !field.locator) return
+    if (creationMode !== "idle" || event.button !== 0 || !field.id || !field.locator) return
     event.stopPropagation()
     const point = toPercent(event)
     if (!point) return
@@ -221,7 +345,9 @@ export function FixedPositionFieldsStep() {
   }
 
   const addSelection = () => {
-    if (!selection) return
+    if (!selection || !pendingField || !validLocator({ type: "bbox", page: pageNumber, ...selection }) ||
+        !isValidFieldName(pendingField.name.trim()) || fields.some((field) => field.name === pendingField.name.trim()) ||
+        (numPages > 0 && pageNumber > numPages)) return
     const locator: BboxLocator = {
       type: "bbox",
       page: pageNumber,
@@ -231,17 +357,18 @@ export function FixedPositionFieldsStep() {
       height: Number(selection.height.toFixed(2)),
     }
     const type = pendingField?.type || "text"
+    const id = genId()
     addField({
-      id: genId(),
-      name: pendingField?.name || `field_${fields.length + 1}`,
+      id,
+      name: pendingField.name.trim(),
       type,
       description: "",
       required: false,
       locator: { ...locator, clean_placeholders: true },
       array_config: type === "array" ? defaultArrayConfig() : undefined,
     })
-    setSelection(null)
-    setPendingField(null)
+    cancelCreation()
+    setSelectedFieldId(id)
   }
 
   const readOcrWords = async (): Promise<Record<number, PageWord[]>> => {
@@ -261,9 +388,10 @@ export function FixedPositionFieldsStep() {
   // Look for the typed value in the PDF text first, then in words read by OCR (scanned forms).
   const findInForm = async () => {
     const pdf = pdfRef.current
-    const texts = evidenceSearchTexts(findValue, null, findType)
-    if (!pdf || !texts.length) return
+    const texts = evidenceSearchTexts(findValue, null, pendingField?.type || "text")
+    if (!file || !pdf || !texts.length) return
     setFinding(true)
+    setSelection(null)
     setFindMessage(null)
     try {
       let found: { page: number; box: Box } | null = null
@@ -288,24 +416,12 @@ export function FixedPositionFieldsStep() {
       }
       setPageNumber(found.page)
       setSelection(widenForValues(found.box))
-      setPendingField({ name: findName.trim(), type: findType })
-      setFindMessage(`Found on page ${found.page}. The box is widened so longer values fit; adjust it if needed, then choose Add field.`)
+      setFindMessage(`Found on page ${found.page}`)
     } catch (err) {
       setFindMessage(err instanceof Error ? err.message : "Could not search the form")
     } finally {
       setFinding(false)
     }
-  }
-
-  const addCoordinateField = () => {
-    addField({
-      id: genId(),
-      name: `field_${fields.length + 1}`,
-      type: "text",
-      description: "",
-      required: false,
-      locator: { type: "bbox", page: pageNumber, x: 0, y: 0, width: 10, height: 5, clean_placeholders: true },
-    })
   }
 
   const updateLocator = (id: string, key: keyof BboxLocator, value: string) => {
@@ -444,27 +560,44 @@ export function FixedPositionFieldsStep() {
   const arrayValidationMessage = fields
     .filter((field) => field.type === "array" && field.locator && !validArrayConfig(field.array_config))
     .map((field) => field.name || "(unnamed)")
+  const fixedFields = fields.filter((field) => field.locator)
   const canProceed = fields.length > 0 && !fieldValidationMessage && arrayValidationMessage.length === 0 && fields.every((field) => (!field.locator && schemaId) || validLocator(field.locator))
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-5" onKeyDown={(event) => { if (event.key === "Escape" && creationMode !== "idle") { event.preventDefault(); event.stopPropagation(); if (!finding) cancelCreation() } }}>
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h2 className="text-xl font-semibold text-slate-900">Fixed-position fields</h2>
-          <p className="mt-1 text-sm text-slate-600">Draw a box for each value in a stable PDF form.</p>
         </div>
-        <div className="flex gap-2">
-          <Button type="button" variant="outline" size="sm" onClick={addCoordinateField}>
-            <Plus className="mr-1.5 h-4 w-4" />Add by coordinates
-          </Button>
-          <Button variant="outline" size="sm" onClick={previewFields} disabled={!file || !canProceed || reading}>
+        <div className="flex flex-wrap gap-2">
+          <div className="relative flex">
+            <Button type="button" size="sm" className="rounded-r-none" onClick={() => beginCreation("draw")} disabled={!file || !numPages || reading || finding || creationMode !== "idle"}>
+              <Plus className="mr-1.5 h-4 w-4" />Add field
+            </Button>
+            <details ref={methodsRef}
+              onKeyDown={(event) => { if (event.key === "Escape" && event.currentTarget.open) { event.stopPropagation(); event.currentTarget.open = false; event.currentTarget.querySelector("summary")?.focus() } }}>
+              <summary aria-label="More field methods" title="More field methods" className="flex h-8 w-8 cursor-pointer list-none items-center justify-center rounded-r-md border-l border-white/30 bg-[#2786C2] text-white hover:bg-[#1A5A8A] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#2786C2] [&::-webkit-details-marker]:hidden"><ChevronDown className="h-4 w-4" /></summary>
+              <div className="absolute left-0 top-full z-30 mt-1 w-60 rounded-md border border-slate-200 bg-white p-1 shadow-lg sm:left-auto sm:right-0">
+                <button type="button" className="flex w-full items-center gap-2 rounded px-3 py-2 text-left text-sm hover:bg-slate-100 disabled:opacity-40" disabled={!file || !numPages || reading || finding} onClick={() => beginCreation("draw")}><SquareDashed className="h-4 w-4" />Draw on document</button>
+                <button type="button" className="flex w-full items-center gap-2 rounded px-3 py-2 text-left text-sm hover:bg-slate-100 disabled:opacity-40" disabled={!file || !numPages || reading || finding} onClick={() => beginCreation("search")}><LocateFixed className="h-4 w-4" />Find text to place box</button>
+                <button type="button" className="flex w-full items-center gap-2 rounded px-3 py-2 text-left text-sm hover:bg-slate-100 disabled:opacity-40" disabled={reading || finding} onClick={() => beginCreation("coordinates")}><ScanLine className="h-4 w-4" />Enter coordinates</button>
+              </div>
+            </details>
+          </div>
+          <Button variant="outline" size="sm" onClick={previewFields} disabled={!file || !fixedFields.length || !canProceed || reading || creationMode !== "idle"}>
             {reading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Sparkles className="mr-2 h-4 w-4" />}
-            Read sample
+            Test extraction
           </Button>
         </div>
       </div>
 
-      <input ref={fileInputRef} id="fixed-schema-sample" aria-label="Sample PDF" type="file" accept="application/pdf" className="hidden" onChange={handleFileSelect} disabled={reading || finding} />
+      <input ref={fileInputRef} id="fixed-schema-sample" aria-label="Sample PDF" type="file" accept="application/pdf" className="hidden" onChange={handleFileSelect} disabled={reading || finding || removingReference} />
+      {referencePdf.kind === "loading" && <p role="status" className="flex items-center gap-2 text-sm text-slate-600"><Loader2 className="h-4 w-4 animate-spin" />Loading saved PDF…</p>}
+      {referencePdf.kind === "error" && <div role="alert" className="flex flex-wrap items-center gap-2 text-sm text-red-700"><span>{referencePdf.message}</span><Button variant="outline" size="sm" onClick={loadReferencePdf}>Retry PDF</Button></div>}
+      {referencePdfInfo && referencePdf.kind !== "stored" && <div className="flex items-center justify-between gap-2 rounded-md border border-slate-200 p-2 text-sm text-slate-700">
+        <span className="min-w-0 break-words">Saved attachment: {referencePdfInfo.filename}</span>
+        <button type="button" aria-label="Remove saved PDF" title="Remove saved PDF" disabled={removingReference || reading || finding} onClick={removeSavedPdf} className="shrink-0 text-slate-500 hover:text-red-600">{removingReference ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}</button>
+      </div>}
       {!file && (
         <button type="button" onClick={() => fileInputRef.current?.click()} className="flex min-h-32 w-full cursor-pointer flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-blue-300 bg-blue-50/50 p-6 text-center hover:border-blue-500">
           <FileText className="h-9 w-9 text-blue-500" />
@@ -474,54 +607,65 @@ export function FixedPositionFieldsStep() {
         <>
           {file && <div className="flex items-center justify-between rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm">
             <span className="flex min-w-0 items-center gap-2 truncate text-slate-700"><FileText className="h-4 w-4 shrink-0" />{file.name}</span>
-            <button disabled={reading || finding} className="text-slate-500 hover:text-red-600" onClick={() => fileInputRef.current?.click()}>Change</button>
+            <div className="flex shrink-0 items-center gap-3">
+              {referencePdf.kind === "stored" && <span className="text-xs text-emerald-700">Saved PDF</span>}
+              <button disabled={reading || finding || removingReference} className="text-slate-500 hover:text-red-600" onClick={() => fileInputRef.current?.click()}>Change</button>
+              {referencePdf.kind === "stored" && <button type="button" aria-label="Remove saved PDF" title="Remove saved PDF" disabled={reading || finding || removingReference} onClick={removeSavedPdf} className="text-slate-500 hover:text-red-600">{removingReference ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}</button>}
+            </div>
           </div>}
+          {referencePdf.kind === "selected" && <label className="flex items-start gap-2 text-sm text-slate-700">
+            <input type="checkbox" className="mt-1" checked={referencePdf.consent === true} onChange={(event) => setReferenceConsent(event.target.checked)} />
+            <span>Keep this PDF with the schema<span className="block text-xs text-slate-500">May contain personal data. Stored until removed and accessible only to schema managers. Unchecked files are preview only.</span></span>
+          </label>}
 
           <div className={`grid gap-5 ${file ? "lg:grid-cols-[minmax(0,1fr)_24rem]" : ""} lg:items-start`}>
             <section className={`${file ? "" : "hidden"} min-w-0 rounded-lg border border-slate-200 bg-slate-50`}>
               <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 px-3 py-2 text-sm text-slate-600">
                 <span className="font-medium">Page {pageNumber}{numPages ? ` of ${numPages}` : ""}</span>
                 <div className="flex flex-wrap items-center justify-end gap-1">
-                  <Button type="button" variant="outline" size="icon" className="h-8 w-8" aria-label="Previous page" title="Previous page" onClick={() => setPageNumber((page) => Math.max(1, page - 1))} disabled={pageNumber <= 1}><ChevronLeft className="h-4 w-4" /></Button>
-                  <Button type="button" variant="outline" size="icon" className="h-8 w-8" aria-label="Next page" title="Next page" onClick={() => setPageNumber((page) => Math.min(numPages, page + 1))} disabled={!numPages || pageNumber >= numPages}><ChevronRight className="h-4 w-4" /></Button>
+                  <Button type="button" variant="outline" size="icon" className="h-8 w-8" aria-label="Previous page" title="Previous page" onClick={() => setPageNumber((page) => Math.max(1, page - 1))} disabled={pageNumber <= 1 || creationMode !== "idle"}><ChevronLeft className="h-4 w-4" /></Button>
+                  <Button type="button" variant="outline" size="icon" className="h-8 w-8" aria-label="Next page" title="Next page" onClick={() => setPageNumber((page) => Math.min(numPages, page + 1))} disabled={!numPages || pageNumber >= numPages || creationMode !== "idle"}><ChevronRight className="h-4 w-4" /></Button>
                   <span className="mx-1 h-5 w-px bg-slate-300" />
                   <Button type="button" variant="outline" size="icon" className="h-8 w-8" aria-label="Zoom out" title="Zoom out" onClick={() => setZoom((value) => Math.max(0.75, Number((value - 0.25).toFixed(2))))} disabled={zoom <= 0.75}><ZoomOut className="h-4 w-4" /></Button>
                   <span className="min-w-12 text-center text-xs font-medium text-slate-500">{Math.round(zoom * 100)}%</span>
                   <Button type="button" variant="outline" size="icon" className="h-8 w-8" aria-label="Zoom in" title="Zoom in" onClick={() => setZoom((value) => Math.min(1.75, Number((value + 0.25).toFixed(2))))} disabled={zoom >= 1.75}><ZoomIn className="h-4 w-4" /></Button>
                   <Button type="button" variant="ghost" size="sm" className="ml-1 h-8 px-2 text-xs" onClick={() => setZoom(1)}>Fit</Button>
-                  <span className="mx-1 h-5 w-px bg-slate-300" />
-                  <Button type="button" size="sm" className="h-8" onClick={addSelection} disabled={!selection} title={selection ? "Add the selected box as a field" : "Draw a box first"}>
-                    <Plus className="mr-1.5 h-4 w-4" />Add field
-                  </Button>
                 </div>
               </div>
+              {creationMode !== "idle" && <div role="status" className="flex items-center justify-between gap-2 border-b border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-800">
+                <span>{creationMode === "draw" ? selection ? "Box selected" : "Draw a box" : creationMode === "search" ? "Find text to place box" : "Enter coordinates"}</span>
+                <button type="button" aria-label="Cancel new field" title="Cancel new field" disabled={finding} onClick={cancelCreation}><X className="h-4 w-4" /></button>
+              </div>}
               <div ref={pageContainerRef} className="max-h-[68vh] min-h-[32rem] overflow-auto p-5">
                 <div className="flex min-w-full justify-center">
                 <div
                   ref={surfaceRef}
-                  className="relative inline-block touch-none select-none shadow-sm"
+                  className={`relative inline-block select-none shadow-sm ${creationMode === "draw" ? "touch-none cursor-crosshair" : ""}`}
                   onPointerDown={handlePointerDown}
                   onPointerMove={handlePointerMove}
                   onPointerUp={handlePointerUp}
+                  onPointerCancel={() => { setDragStart(null); setSelection(null) }}
                 >
                   {fileUrl && <Document file={fileUrl} loading={<div style={{ width: pageWidth }} className="grid h-72 place-items-center"><Loader2 className="h-5 w-5 animate-spin" /></div>} onLoadSuccess={(pdf) => { pdfRef.current = pdf as unknown as PdfProxy; setNumPages(pdf.numPages) }}>
                     <Page pageNumber={pageNumber} width={pageWidth} renderTextLayer={false} renderAnnotationLayer={false} onRenderSuccess={() => setRenderedPage(renderKey)} />
                   </Document>}
                   {renderedPage === renderKey && fields.filter((field) => field.locator?.page === pageNumber).map((field) => field.locator && (
-                    <div key={field.id} className={`absolute border-2 ${selectedFieldId === field.id ? "z-10 border-emerald-600 bg-emerald-500/15" : "border-blue-600 bg-blue-500/15"}`} style={{ left: `${field.locator.x}%`, top: `${field.locator.y}%`, width: `${field.locator.width}%`, height: `${field.locator.height}%` }}>
+                    <div key={field.id} ref={(node) => { if (field.id) { if (node) boxRefs.current.set(field.id, node); else boxRefs.current.delete(field.id) } }} className={`absolute border-2 ${creationMode !== "idle" ? "pointer-events-none" : ""} ${selectedFieldId === field.id ? "z-10 border-emerald-600 bg-emerald-500/15" : "border-blue-600 bg-blue-500/15"}`} style={{ left: `${field.locator.x}%`, top: `${field.locator.y}%`, width: `${field.locator.width}%`, height: `${field.locator.height}%` }}>
                       <button type="button" aria-label={`Move ${field.name} box`} title={`Move ${field.name}`} aria-pressed={selectedFieldId === field.id}
-                        className="absolute inset-0 cursor-move focus-visible:outline-2 focus-visible:outline-emerald-600"
+                        className="absolute inset-0 touch-none cursor-move focus-visible:outline-2 focus-visible:outline-emerald-600"
+                        disabled={creationMode !== "idle"}
+                        onClick={() => setSelectedFieldId(field.id || null)}
                         onPointerDown={(event) => startBoxDrag(event, field, "move")} onPointerMove={moveBox} onPointerUp={endBoxDrag} onPointerCancel={endBoxDrag}
                         onKeyDown={(event) => nudgeBox(event, field)} />
                       {selectedFieldId === field.id && <>
                         <span className="pointer-events-none absolute bottom-full left-0 max-w-48 truncate bg-emerald-700 px-1 text-xs text-white">{field.name}</span>
-                        <button type="button" aria-label={`Resize ${field.name} box`} title={`Resize ${field.name}`} className="absolute -bottom-2 -right-2 h-4 w-4 cursor-nwse-resize border border-white bg-emerald-600"
+                        <button type="button" aria-label={`Resize ${field.name} box`} title={`Resize ${field.name}`} className="absolute -bottom-2 -right-2 h-4 w-4 touch-none cursor-nwse-resize border border-white bg-emerald-600"
                           onPointerDown={(event) => startBoxDrag(event, field, "resize")} onPointerMove={moveBox} onPointerUp={endBoxDrag} onPointerCancel={endBoxDrag}
                           onKeyDown={(event) => nudgeBox(event, field, true)} />
                       </>}
                     </div>
                   ))}
-                  {renderedPage === renderKey && fields.filter((field) => field.type === "array" && field.locator?.page === pageNumber && field.array_config).map((field) => {
+                  {creationMode === "idle" && renderedPage === renderKey && fields.filter((field) => field.type === "array" && field.locator?.page === pageNumber && field.array_config).map((field) => {
                     const locator = field.locator!
                     const columns = field.array_config!.columns
                     return (
@@ -559,39 +703,63 @@ export function FixedPositionFieldsStep() {
                       </div>
                     )
                   })}
-                  {selection && <div className="pointer-events-none absolute border-2 border-dashed border-emerald-600 bg-emerald-400/20 shadow-[0_0_0_1px_rgba(255,255,255,0.9)]" style={{ left: `${selection.x}%`, top: `${selection.y}%`, width: `${selection.width}%`, height: `${selection.height}%` }} />}
+                  {selection && <div ref={draftBoxRef} className="pointer-events-none absolute z-20 border-2 border-dashed border-emerald-600 bg-emerald-400/20 shadow-[0_0_0_1px_rgba(255,255,255,0.9)]" style={{ left: `${selection.x}%`, top: `${selection.y}%`, width: `${selection.width}%`, height: `${selection.height}%` }}>
+                    {!dragStart && validLocator({ type: "bbox", page: pageNumber, ...selection }) && <>
+                      <button type="button" aria-label="Move new field box" title="Move new field box" className="pointer-events-auto absolute inset-0 touch-none cursor-move" onPointerDown={(event) => startDraftDrag(event, "move")} onPointerMove={moveDraft} onPointerUp={endDraftDrag} onPointerCancel={endDraftDrag} />
+                      <button type="button" aria-label="Resize new field box" title="Resize new field box" className="pointer-events-auto absolute -bottom-2 -right-2 h-4 w-4 touch-none cursor-nwse-resize border border-white bg-emerald-600" onPointerDown={(event) => startDraftDrag(event, "resize")} onPointerMove={moveDraft} onPointerUp={endDraftDrag} onPointerCancel={endDraftDrag} />
+                    </>}
+                  </div>}
                 </div>
               </div>
               </div>
             </section>
 
-            <section className="min-w-0 space-y-2 lg:max-h-[68vh] lg:overflow-y-auto lg:pr-1">
-              <form className="space-y-2 rounded-lg border border-blue-100 bg-blue-50/50 p-3" onSubmit={(event) => { event.preventDefault(); findInForm() }}>
-                <p className="flex items-center gap-2 text-sm font-medium text-slate-700"><LocateFixed className="h-4 w-4 text-blue-600" />Find a value in this form</p>
-                <p className="text-xs text-slate-600">Type a value exactly as it appears in the sample, and the box is placed for you.</p>
-                <input id="fixed-find-value" aria-label="Value in the sample" placeholder="e.g. 0105558076541" value={findValue}
-                  onChange={(event) => setFindValue(event.target.value)} className="w-full rounded border border-slate-300 px-2 py-1.5 text-sm" />
-                <div className="flex gap-2">
-                  <input id="fixed-find-name" aria-label="Field name for the value" placeholder="Field name, e.g. tax_id" value={findName}
-                    onChange={(event) => setFindName(event.target.value)} className="min-w-0 flex-1 rounded border border-slate-300 px-2 py-1.5 text-sm" />
-                  <select id="fixed-find-type" aria-label="Field type for the value" value={findType} onChange={(event) => setFindType(event.target.value as SchemaField["type"])}
-                    className="rounded border border-slate-300 px-2 py-1.5 text-sm">
-                    <option value="text">Text</option><option value="number">Number</option><option value="date">Date</option><option value="currency">Currency</option>
+            <section ref={sidebarRef} className="min-w-0 space-y-2 lg:max-h-[68vh] lg:overflow-y-auto lg:pr-1">
+              {creationMode !== "idle" && pendingField && <section ref={draftEditorRef} aria-label="New field" className="space-y-3 border-b border-slate-200 pb-4">
+                <h3 className="text-sm font-semibold text-slate-900">New field</h3>
+                {creationMode === "search" && <form className="space-y-2" onSubmit={(event) => { event.preventDefault(); void findInForm() }}>
+                  <label className="block text-xs font-medium text-slate-600">Text in document
+                    <input ref={searchInputRef} aria-label="Text in document" value={findValue} onChange={(event) => { setFindValue(event.target.value); setSelection(null); setFindMessage(null) }} disabled={finding} className="mt-1 w-full rounded border border-slate-300 px-2 py-1.5 text-sm" />
+                  </label>
+                  <Button type="submit" size="sm" variant="outline" disabled={finding || !findValue.trim() || !numPages}>
+                    {finding ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" /> : <LocateFixed className="mr-1.5 h-4 w-4" />}Find text
+                  </Button>
+                  {findMessage && <p role="status" className="text-xs text-slate-700">{findMessage}</p>}
+                </form>}
+                <label className="block text-xs font-medium text-slate-600">Field name
+                  <input ref={draftNameRef} aria-label="New field name" className="mt-1 w-full rounded border border-slate-300 px-2 py-1.5 text-sm" value={pendingField.name} disabled={finding} onChange={(event) => setPendingField({ ...pendingField, name: event.target.value })} />
+                </label>
+                <label className="block text-xs font-medium text-slate-600">Type
+                  <select aria-label="New field type" className="mt-1 w-full rounded border border-slate-300 px-2 py-1.5 text-sm" value={pendingField.type} disabled={finding} onChange={(event) => { const type = fieldTypes.find((item) => item.value === event.target.value)?.value; if (type) setPendingField({ ...pendingField, type }) }}>
+                    {fieldTypes.map((type) => <option key={type.value} value={type.value}>{type.label}</option>)}
                   </select>
+                </label>
+                {(creationMode === "coordinates" || selection) && <details open={creationMode === "coordinates"} className="border-t border-slate-200 pt-2">
+                  <summary className="cursor-pointer text-xs font-medium text-slate-600">Position</summary>
+                  <div className="mt-2 grid grid-cols-2 gap-2">
+                    {(["page", "x", "y", "width", "height"] as const).map((key) => <label key={key} className="text-xs text-slate-600">{key === "page" ? "Page" : `${key} (%)`}
+                      <input aria-label={`New field ${key}`} type="number" min={key === "page" ? 1 : 0} max={key === "page" ? numPages || undefined : 100} step={key === "page" ? 1 : 0.01} value={key === "page" ? pageNumber : selection?.[key] ?? 0} className="mt-1 w-full rounded border border-slate-300 px-2 py-1.5 text-sm" onChange={(event) => { const value = Number(event.target.value); if (key === "page") setPageNumber(clamp(Math.trunc(value), 1, numPages || Math.max(1, value))); else setSelection((box) => ({ ...(box || { x: 0, y: 0, width: 10, height: 5 }), [key]: value })) }} />
+                    </label>)}
+                  </div>
+                </details>}
+                {(!isValidFieldName(pendingField.name.trim()) || fields.some((field) => field.name === pendingField.name.trim())) && <p role="alert" className="text-xs text-red-700">Use a unique field name with letters, numbers or underscores.</p>}
+                {selection && (!validLocator({ type: "bbox", page: pageNumber, ...selection }) || (numPages > 0 && pageNumber > numPages)) && <p role="alert" className="text-xs text-red-700">Keep the box within a valid document page.</p>}
+                <div className="flex gap-2">
+                  <Button type="button" size="sm" onClick={addSelection} disabled={finding || !selection || !validLocator({ type: "bbox", page: pageNumber, ...selection }) || (numPages > 0 && pageNumber > numPages) || !isValidFieldName(pendingField.name.trim()) || fields.some((field) => field.name === pendingField.name.trim())}><Plus className="mr-1 h-4 w-4" />Add</Button>
+                  <Button type="button" size="sm" variant="outline" disabled={finding} onClick={cancelCreation}>Cancel field</Button>
                 </div>
-                <Button type="submit" size="sm" variant="outline" disabled={finding || !findValue.trim() || !numPages}>
-                  {finding ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" /> : <LocateFixed className="mr-1.5 h-4 w-4" />}
-                  {finding ? "Searching (scanned forms take a few seconds)..." : "Find in form"}
-                </Button>
-                {findMessage && <p role="status" className="text-xs text-slate-700">{findMessage}</p>}
-              </form>
-              <div className="sticky top-0 z-10 flex items-center justify-between gap-2 bg-white pb-2 text-sm font-medium text-slate-700"><span className="flex items-center gap-2"><ScanLine className="h-4 w-4 text-emerald-600" />Fixed fields</span><span className="text-xs font-normal text-slate-500">{fields.filter((field) => field.locator).length} fields</span></div>
-              {fields.length === 0 ? <div className="rounded-lg border border-dashed border-slate-300 p-4 text-sm text-slate-500">Draw a box, or add a field by coordinates.</div> : fields.map((field) => {
+              </section>}
+              <div className="sticky top-0 z-10 flex items-center justify-between gap-2 bg-white pb-2 text-sm font-medium text-slate-700"><span className="flex items-center gap-2"><ScanLine className="h-4 w-4 text-emerald-600" />Fixed fields</span><span className="text-xs font-normal text-slate-500">{fixedFields.length} fields</span></div>
+              {fixedFields.length === 0 ? <p className="py-3 text-sm text-slate-500">No fields yet</p> : fixedFields.map((field) => {
                 const locator = field.locator
                 const previewValue = previewValues[field.name]
                 const rawPreviewValue = rawPreviewValues[field.name]
                 if (!locator) return null
-                return <div key={field.id} onFocus={() => { setSelectedFieldId(field.id || null); setPageNumber(locator.page) }} className={`space-y-2 rounded-lg border bg-white p-3 ${selectedFieldId === field.id ? "border-emerald-500" : "border-slate-200"}`}>
+                return <div key={field.id} ref={(node) => { if (field.id) { if (node) rowRefs.current.set(field.id, node); else rowRefs.current.delete(field.id) } }} className={`space-y-2 border-b bg-white p-3 ${selectedFieldId === field.id ? "border-emerald-300" : "border-slate-200"}`}>
+                  <button type="button" aria-label={`Edit ${field.name}`} aria-expanded={selectedFieldId === field.id} disabled={finding} onClick={() => selectField(field)} className="flex min-h-8 w-full min-w-0 items-center justify-between gap-2 text-left text-sm">
+                    <span className="min-w-0 break-words font-medium text-slate-800">{field.name || "Unnamed field"}</span><span className="flex shrink-0 items-center gap-2 text-xs text-slate-500">p. {locator.page} · {fieldTypes.find((type) => type.value === field.type)?.label}<ChevronDown className={`h-3.5 w-3.5 ${selectedFieldId === field.id ? "rotate-180" : ""}`} /></span>
+                  </button>
+                  {selectedFieldId === field.id && <>
                   <div className="flex gap-2">
                     <input aria-label="Field name" className="min-w-0 flex-1 rounded border border-slate-300 px-2 py-1.5 text-sm" value={field.name} onChange={(event) => updateField(field.id!, { name: event.target.value })} />
                     <select aria-label="Field type" className="rounded border border-slate-300 px-2 py-1.5 text-sm" value={field.type} onChange={(event) => updateFieldType(field.id!, event.target.value as SchemaField["type"])}>
@@ -602,7 +770,7 @@ export function FixedPositionFieldsStep() {
                   <label className="block text-xs text-slate-600">Description / Prompt<input aria-label={`${field.name} description`} className="mt-1 w-full rounded border border-slate-300 px-2 py-1.5 text-sm" value={field.description} onChange={(event) => updateField(field.id!, { description: event.target.value })} /></label>
                   <label className="flex items-center gap-2 text-xs text-slate-600"><input type="checkbox" checked={field.required} onChange={(event) => updateField(field.id!, { required: event.target.checked })} />Required</label>
                   <details className="rounded border border-slate-200 bg-slate-50 px-2 py-1.5">
-                    <summary className="cursor-pointer text-xs font-medium text-slate-600">Fine-tune position</summary>
+                    <summary className="cursor-pointer text-xs font-medium text-slate-600">Advanced position</summary>
                     <div className="mt-2 grid grid-cols-5 gap-1">
                       {(["page", "x", "y", "width", "height"] as const).map((key) => <label key={key} className="text-xs font-medium text-slate-500">{key === "width" ? "W (%)" : key === "height" ? "H (%)" : key === "page" ? "Page" : `${key.toUpperCase()} (%)`}<input aria-label={`${field.name} ${key}`} type="number" min={key === "page" ? 1 : 0} step={key === "page" ? 1 : 0.01} className="mt-1 w-full rounded border border-slate-300 px-1.5 py-1 text-xs text-slate-700" value={locator[key]} onChange={(event) => updateLocator(field.id!, key, event.target.value)} /></label>)}
                     </div>
@@ -669,6 +837,7 @@ export function FixedPositionFieldsStep() {
                       </>}
                     </div>
                   )}
+                  </>}
                 </div>
               } )}
             </section>
@@ -679,7 +848,7 @@ export function FixedPositionFieldsStep() {
       {fieldValidationMessage && <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800" role="alert"><AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />{fieldValidationMessage}</div>}
       {arrayValidationMessage.length > 0 && <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800" role="alert"><AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />Configure valid table columns and row detection for: {arrayValidationMessage.join(", ")}</div>}
 
-      <div className="flex justify-end border-t pt-4"><Button type="button" onClick={nextStep} disabled={!canProceed || reading}>Next</Button></div>
+      <div className="flex justify-end border-t pt-4"><Button type="button" onClick={nextStep} disabled={!canProceed || reading || finding || creationMode !== "idle"}>Next</Button></div>
     </div>
   )
 }

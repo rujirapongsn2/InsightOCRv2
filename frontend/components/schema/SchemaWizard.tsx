@@ -18,7 +18,7 @@ const FixedPositionFieldsStep = dynamic(
 )
 
 export function SchemaWizard({ embedded = false }: { embedded?: boolean }) {
-  const { schemaId, currentStep, startingPoint, manualEntry, setStartingPoint } = useSchemaWizard()
+  const { schemaId, currentStep, startingPoint, manualEntry, setStartingPoint, fixedFieldCreationMode } = useSchemaWizard()
 
   // We only show the stepper and content after a starting point is chosen
   const showStepper = startingPoint !== null
@@ -64,8 +64,8 @@ export function SchemaWizard({ embedded = false }: { embedded?: boolean }) {
       {/* Wizard Content */}
       <div className={embedded ? "min-h-[400px] bg-white pt-5" : "bg-white border rounded-lg p-8 min-h-[400px]"}>
         {schemaId && currentStep === 1 && <div className="mb-5 flex gap-1 border-b" aria-label="Field editor mode">
-          <Button variant={startingPoint === "fixed" ? "secondary" : "ghost"} onClick={() => setStartingPoint("fixed")} aria-pressed={startingPoint === "fixed"}>Fixed positions</Button>
-          <Button variant={startingPoint === "ai" ? "secondary" : "ghost"} onClick={() => setStartingPoint("ai")} aria-pressed={startingPoint === "ai"}>All fields</Button>
+          <Button variant={startingPoint === "fixed" ? "secondary" : "ghost"} onClick={() => setStartingPoint("fixed")} disabled={fixedFieldCreationMode !== "idle"} aria-pressed={startingPoint === "fixed"}>Fixed positions</Button>
+          <Button variant={startingPoint === "ai" ? "secondary" : "ghost"} onClick={() => setStartingPoint("ai")} disabled={fixedFieldCreationMode !== "idle"} aria-pressed={startingPoint === "ai"}>All fields</Button>
         </div>}
         {/* Mode Selection (before any startingPoint is chosen) */}
         {startingPoint === null && <WizardStep1 />}

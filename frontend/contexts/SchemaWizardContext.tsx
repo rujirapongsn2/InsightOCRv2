@@ -1,6 +1,6 @@
 "use client"
 
-import { createContext, useContext, useState, ReactNode } from "react"
+import { createContext, useCallback, useContext, useEffect, useRef, useState, ReactNode } from "react"
 import { useRouter } from "next/navigation"
 import {
   SchemaWizardState,
@@ -11,6 +11,8 @@ import {
   SchemaField,
   StudioSession,
   CreateSchemaResponse,
+  ReferencePdfInfo,
+  FixedFieldCreationMode,
 } from "@/types/schema"
 import { validateSchema, hasErrors } from "@/lib/schema-validation"
 import { toSchemaPayloadField } from "@/lib/schema-studio"
@@ -34,6 +36,10 @@ const initialSchemaData: SchemaData = {
 }
 
 const initialState: SchemaWizardState = {
+  fixedFieldCreationMode: "idle",
+  referencePdfInfo: null,
+  isRemovingReference: false,
+  referencePdf: { kind: "none" },
   currentStep: 1,
   startingPoint: null,
   manualEntry: false,
@@ -54,6 +60,7 @@ export function SchemaWizardProvider({ children, onSaved, initialSchema }: { chi
   const createInitialState = (): SchemaWizardState => initialSchema ? {
     ...initialState,
     schemaId: initialSchema.id,
+    referencePdf: { kind: "loading" },
     startingPoint: initialSchema.fields.some((field) => field.locator) ? "fixed" : "ai",
     schemaData: {
       name: initialSchema.name,
@@ -73,13 +80,85 @@ export function SchemaWizardProvider({ children, onSaved, initialSchema }: { chi
     })),
   } : initialState
   const [state, setState] = useState<SchemaWizardState>(createInitialState)
+  const referenceRequest = useRef<AbortController | null>(null)
+  const referenceMetadataLoaded = useRef(false)
+  const referenceSelectionVersion = useRef(0)
+
+  const loadReferencePdf = useCallback(async () => {
+    const id = initialSchema?.id
+    if (!id) return
+    referenceRequest.current?.abort()
+    const controller = new AbortController()
+    referenceRequest.current = controller
+    referenceMetadataLoaded.current = false
+    const selectionVersion = referenceSelectionVersion.current
+    setState(prev => prev.referencePdf.kind === "selected" ? prev : { ...prev, referencePdf: { kind: "loading" } })
+    const token = localStorage.getItem("token")
+    const options: RequestInit = { headers: token ? { Authorization: `Bearer ${token}` } : {}, signal: controller.signal }
+    try {
+      const response = await fetch(`${getApiBaseUrl()}/schemas/${id}/reference-pdf`, options)
+      if (response.status === 404) {
+        referenceMetadataLoaded.current = true
+        if (!controller.signal.aborted) setState(prev => ({ ...prev, referencePdfInfo: null, referencePdf: prev.referencePdf.kind === "loading" ? { kind: "none" } : prev.referencePdf }))
+        return
+      }
+      if (!response.ok) throw new Error("Unable to load the saved PDF")
+      const info: ReferencePdfInfo = await response.json()
+      referenceMetadataLoaded.current = true
+      if (controller.signal.aborted) return
+      setState(prev => ({ ...prev, referencePdfInfo: info }))
+      if (referenceSelectionVersion.current !== selectionVersion) return
+      const pdf = await fetch(`${getApiBaseUrl()}/schemas/${id}/reference-pdf/file`, options)
+      if (!pdf.ok) throw new Error("The saved PDF is unavailable. Retry or choose another file.")
+      const file = new File([await pdf.blob()], info.filename, { type: "application/pdf" })
+      if (!controller.signal.aborted) setState(prev => prev.referencePdf.kind === "loading" ? { ...prev, referencePdf: { kind: "stored", file, info } } : prev)
+    } catch (error) {
+      if (!controller.signal.aborted) setState(prev => prev.referencePdf.kind === "loading" ? { ...prev, referencePdf: { kind: "error", message: error instanceof Error ? error.message : "Unable to load the saved PDF" } } : prev)
+    }
+  }, [initialSchema?.id])
+
+  useEffect(() => {
+    if (initialSchema?.id) void loadReferencePdf()
+    return () => referenceRequest.current?.abort()
+  }, [initialSchema?.id, loadReferencePdf])
+
+  const selectReferencePdf = (file: File) => {
+    referenceSelectionVersion.current += 1
+    if (referenceMetadataLoaded.current) referenceRequest.current?.abort()
+    setState(prev => ({ ...prev, referencePdf: { kind: "selected", file, consent: true } }))
+  }
+
+  const setReferenceConsent = (consent: boolean) => {
+    setState(prev => prev.referencePdf.kind === "selected"
+      ? { ...prev, referencePdf: { ...prev.referencePdf, consent } } : prev)
+  }
+
+  const removeReferencePdf = async () => {
+    if (!state.schemaId || state.isSaving || state.isRemovingReference) return
+    referenceRequest.current?.abort()
+    setState(prev => ({ ...prev, isRemovingReference: true }))
+    const token = localStorage.getItem("token")
+    try {
+      const response = await fetch(`${getApiBaseUrl()}/schemas/${state.schemaId}/reference-pdf`, {
+        method: "DELETE", headers: token ? { Authorization: `Bearer ${token}` } : {},
+      })
+      if (!response.ok) throw new Error("Unable to remove the saved PDF")
+      setState(prev => ({ ...prev, referencePdfInfo: null, referencePdf: prev.referencePdf.kind === "selected" ? prev.referencePdf : { kind: "none" } }))
+    } finally {
+      setState(prev => ({ ...prev, isRemovingReference: false }))
+    }
+  }
 
   const setCurrentStep = (step: WizardStep) => {
-    setState(prev => ({ ...prev, currentStep: step }))
+    setState(prev => prev.fixedFieldCreationMode === "idle" ? { ...prev, currentStep: step } : prev)
+  }
+
+  const setFixedFieldCreationMode = (mode: FixedFieldCreationMode) => {
+    setState(prev => ({ ...prev, fixedFieldCreationMode: mode }))
   }
 
   const setStartingPoint = (point: StartingPoint) => {
-    setState(prev => ({ ...prev, startingPoint: point, manualEntry: false }))
+    setState(prev => prev.fixedFieldCreationMode === "idle" ? { ...prev, startingPoint: point, manualEntry: false } : prev)
   }
 
   const setManualEntry = (enabled: boolean) => {
@@ -156,9 +235,8 @@ export function SchemaWizardProvider({ children, onSaved, initialSchema }: { chi
   }
 
   const nextStep = () => {
-    if (state.currentStep < 2) {
-      setState(prev => ({ ...prev, currentStep: (prev.currentStep + 1) as WizardStep }))
-    }
+    setState(prev => prev.fixedFieldCreationMode === "idle" && prev.currentStep === 1
+      ? { ...prev, currentStep: 2 } : prev)
   }
 
   const previousStep = () => {
@@ -168,6 +246,11 @@ export function SchemaWizardProvider({ children, onSaved, initialSchema }: { chi
   }
 
   const saveSchema = async () => {
+    if (state.isRemovingReference) return
+    if (state.fixedFieldCreationMode !== "idle") {
+      alert("Add or cancel the pending field before saving.")
+      return
+    }
     setState(prev => ({ ...prev, isSaving: true }))
 
     try {
@@ -206,6 +289,28 @@ export function SchemaWizardProvider({ children, onSaved, initialSchema }: { chi
         throw new Error(typeof error.detail === "string" ? error.detail : "Failed to save schema")
       }
       const created = await res.json()
+      // A retry after an attachment failure must update this schema, not create a duplicate.
+      setState(prev => ({ ...prev, schemaId: created.id }))
+      const reference = state.referencePdf
+      if (reference.kind === "selected" && reference.consent) {
+        const form = new FormData()
+        form.append("file", reference.file)
+        form.append("consent", "true")
+        let upload: Response
+        try {
+          upload = await fetch(`${getApiBaseUrl()}/schemas/${created.id}/reference-pdf`, {
+            method: "PUT", headers: token ? { Authorization: `Bearer ${token}` } : {}, body: form,
+          })
+        } catch {
+          throw new Error("Schema saved, but the PDF was not attached. Save again to retry.")
+        }
+        if (!upload.ok) {
+          const error = await upload.json().catch(() => null)
+          throw new Error(`Schema saved, but the PDF was not attached. ${typeof error?.detail === "string" ? error.detail : "Save again to retry."}`)
+        }
+        const info: ReferencePdfInfo = await upload.json()
+        setState(prev => ({ ...prev, referencePdfInfo: info, referencePdf: { kind: "stored", file: reference.file, info } }))
+      }
       const studio = state.studio
       if (studio?.keepSamples && studio.files.length) {
         const kept = await storeTestSet(created.id, studio, state.fields, token)
@@ -246,6 +351,11 @@ export function SchemaWizardProvider({ children, onSaved, initialSchema }: { chi
 
   const value = {
     ...state,
+    setFixedFieldCreationMode,
+    selectReferencePdf,
+    setReferenceConsent,
+    loadReferencePdf,
+    removeReferencePdf,
     setCurrentStep,
     setStartingPoint,
     setManualEntry,

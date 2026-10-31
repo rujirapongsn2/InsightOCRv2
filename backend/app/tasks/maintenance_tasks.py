@@ -356,3 +356,43 @@ def purge_expired_schema_samples():
         logger.info("Purged %s expired schema samples", len(expired))
     finally:
         db.close()
+
+
+@celery_app.task
+def purge_deleted_schema_references():
+    """Retry committed PDF deletions after storage outages or worker crashes."""
+    from app.models.schema import DocumentSchema, SchemaReferenceDeletion, SchemaReferenceUpload
+    from app.services.storage import get_storage_service
+
+    db = SessionLocal()
+    try:
+        storage = get_storage_service()
+        rows = db.query(SchemaReferenceDeletion).order_by(
+            SchemaReferenceDeletion.created_at
+        ).limit(100).with_for_update(skip_locked=True).all()
+        for row in rows:
+            try:
+                storage.delete_file(row.storage_path)
+            except Exception:
+                logger.warning("Reference PDF cleanup will retry: %s", row.storage_path, exc_info=True)
+            else:
+                db.query(SchemaReferenceUpload).filter_by(storage_path=row.storage_path).delete()
+                db.delete(row)
+        db.commit()
+
+        uploads = db.query(SchemaReferenceUpload).filter(
+            SchemaReferenceUpload.expires_at <= datetime.now(timezone.utc)
+        ).order_by(SchemaReferenceUpload.expires_at).limit(100).with_for_update(skip_locked=True).all()
+        for upload in uploads:
+            schema = db.get(DocumentSchema, upload.schema_id)
+            reference = schema.reference_pdf if schema else None
+            if not reference or reference.get("storage_path") != upload.storage_path:
+                try:
+                    storage.delete_file(upload.storage_path)
+                except Exception:
+                    logger.warning("Abandoned reference upload cleanup will retry: %s", upload.storage_path, exc_info=True)
+                    continue
+            db.delete(upload)
+        db.commit()
+    finally:
+        db.close()

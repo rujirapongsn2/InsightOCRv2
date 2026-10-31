@@ -1344,6 +1344,65 @@ Date: 2026-06-30
 
 # Shared schema create/edit workspace (2026-10-30)
 
+## Unified fixed-field creation (2026-10-30)
+
+### Review regressions (2026-10-31)
+
+- Partially visible boxes no longer trigger PDF auto-scroll during an active
+  drag. The browser regression failed before the fix (`434 !== 46` scrollTop)
+  and now verifies both stable scrolling and a bounded one-pixel movement.
+- Fixed-field creation mode belongs to the wizard context. Pending drafts
+  disable mode switching, step advancement and saving; Add/Cancel releases the
+  guard. Closing the editor also recognizes an unfinished draft as unsaved work.
+- Reference uploads commit an intent before storage I/O, hold its row lock
+  while uploading, and remove it atomically with publication. Migration 0030
+  adds this operational table without changing existing schemas or objects.
+- Maintenance reconciles expired intents (one-hour grace, five-minute schedule)
+  using SKIP LOCKED. It preserves published files and active/unexpired uploads,
+  retries storage failures, and keeps records when cleanup cannot complete.
+  A lost commit acknowledgement must not delete an already published PDF.
+- Regression tests simulate process death after storage accepts both a new PDF
+  and a replacement. Both failed before the fix and now pass. Backend suite:
+  98 passed; Chromium desktop/mobile wizard suite: passed.
+- Optional real PostgreSQL check uses an isolated, uniquely named test schema:
+  `RUN_POSTGRES_LOCK_TEST=1 python -m pytest -q test/test_schema_reference_upload_locking.py`.
+  Verified one test passed; only its temporary namespace is removed afterward.
+  Normal unit tests still use SQLite and fake storage, without external services.
+- Deployed Dev backend/frontend and workflow worker after image import smoke
+  checks. Verified migration head 0030, healthy backend/frontend/nginx, the
+  browser regression suite through the public Dev URL, and a real API/storage
+  attach/replace/read/delete round trip with no outstanding intent after save.
+  The disposable test schema was removed; Production and existing schemas were
+  not edited. TypeScript, targeted ESLint and four payload tests also passed.
+
+- `Add field` enters drawing mode. The adjacent methods menu exposes text search
+  and coordinate entry; the search form is hidden outside search mode.
+- All methods create only a dashed draft box. Name/type and Add/Cancel share
+  one editor; Next is disabled until the draft is added or cancelled. Draft
+  boxes support dragging/resizing, duplicate names and invalid bounds are blocked,
+  and Escape cancels the draft without closing the schema editor.
+- The field list expands only the selected field. Selecting a field switches to
+  its PDF page, highlights the box, and reveals its editor. Exact coordinates
+  are under Advanced position. `Test extraction` replaces `Read sample`.
+- Menu dismissal uses outside pointer/focus events, not blur: Safari can blur
+  the summary before delivering a menu-item click. A regression reproduces that
+  sequence (failed before the fix), checks both methods, and preserves outside
+  click/keyboard dismissal. Search and coordinate entry focus and reveal their
+  editor immediately. Chromium simulates the blur sequence; native WebKit is
+  not installed in the verification runtime.
+- The blur regression failed against the previous Dev build and passed after
+  the fix, together with the full desktop/mobile suite against the public Dev
+  URL. TypeScript, targeted ESLint and the Docker production build passed.
+- Browser regression covers all three methods, coordinate cancellation without
+  creating a field, duplicate/bounds checks, search against real PDF text,
+  box move/resize, field selection across pages, and desktop/mobile layouts.
+  API/auth responses remain mocked; no existing user schemas are modified.
+- Verified targeted ESLint, TypeScript, production/Docker build, four payload
+  tests and the full browser suite against the public Dev URL. Screenshots in
+  `/tmp/insightdoc-mini-schema-unified` include the mobile methods menu, mobile
+  draft editor and desktop draft. Only the Dev frontend was recreated; backend,
+  workers, database and Production were left running unchanged.
+
 - Edit from `/schemas` and `/schemas/{id}/edit` uses the creation wizard with
   the existing metadata and complete field collection, saved with PUT.
 - For fixed-position fields, attach a sample PDF, drag a saved box, resize its
@@ -1366,6 +1425,39 @@ Date: 2026-06-30
 - Verified frontend production build, targeted ESLint/TypeScript, four payload
   tests, and 19 backend schema extraction-profile/portability tests. Production
   deployment and live OCR/provider accuracy are not part of this verification.
+
+## Consented reference PDF attachment (2026-10-30)
+
+- Create or edit a fixed-position schema and select a PDF. The default is
+  `Keep this PDF with the schema`; it uploads only on Save. Unchecked files are browser-only
+  previews; replacing a preview does not replace an existing stored attachment.
+- Reopen Edit: the saved PDF and existing boxes load automatically. Old schemas
+  can attach a PDF through the same control without changing their fields.
+- The final step shows `Keep this PDF with the schema` selected by default,
+  with `Do not attach this PDF` available to opt out. The browser regression
+  verifies that no upload happens before Save, opt-out sends no attachment,
+  and the default attaches an old schema's PDF and loads it on reopening.
+- Saved PDFs are available only to schema managers, have no automatic expiry,
+  and can be replaced or removed without removing fields. Reference files are
+  separate from OCR test samples and do not trigger OCR on upload.
+- Delete/replace operations record durable storage deletions transactionally;
+  the workflow maintenance worker retries failures every five minutes. Migration
+  0029 refuses downgrade while references or pending cleanup remain.
+- Backend fake-storage HTTP tests cover consent, permissions, Unicode filenames,
+  scanned PDFs, malformed/encrypted/oversized uploads, replacement/rollback,
+  cleanup retries and migration safety. No real storage is used by unit tests.
+- Verified 91 backend tests across reference PDFs, schema versions/samples,
+  extraction profiles, portability, Agent downloads, bbox and PDF rendering.
+  Four payload tests, targeted ESLint, TypeScript, browser desktop/mobile
+  round trips and frontend/Docker builds also passed.
+- Dev deployment target is `https://insightdoc-mini.softnix.ai`, backed by this
+  machine's Docker Compose. Production is `https://insightdoc.softnix.ai` and
+  must not be updated by pushing main as part of this test deployment.
+- Deployed backend/frontend and workflow maintenance/beat on Dev. Alembic is
+  at 0029; public `/health` returns 200. Real Dev API/storage consent/upload/
+  read/delete checks passed using a disposable schema, then removed it. The
+  desktop/mobile browser suite also passed against the public Dev frontend
+  (API responses mocked). No existing user schema was modified by these checks.
 
 ## Review warnings: fewer, accurate alerts
 

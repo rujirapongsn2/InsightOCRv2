@@ -65,13 +65,14 @@ export function SchemaEditor({ schemaId, onClose, onSaved, embedded = true }: Ed
 }
 
 function EditorContent({ embedded, onClose, onSaved }: Pick<EditorProps, "embedded" | "onClose" | "onSaved">) {
-  const { schemaId, schemaData, fields, isSaving } = useSchemaWizard()
+  const { schemaId, schemaData, fields, isSaving, referencePdf, isRemovingReference, fixedFieldCreationMode } = useSchemaWizard()
   const baseline = useRef(JSON.stringify({ schemaData, fields }))
   const [deleting, setDeleting] = useState(false)
   const [error, setError] = useState("")
   const close = () => {
-    if (isSaving || deleting) return
-    if (JSON.stringify({ schemaData, fields }) !== baseline.current && !confirm("Discard unsaved schema changes?")) return
+    if (isSaving || deleting || isRemovingReference) return
+    const hasChanges = fixedFieldCreationMode !== "idle" || JSON.stringify({ schemaData, fields }) !== baseline.current || (referencePdf.kind === "selected" && referencePdf.consent)
+    if (hasChanges && !confirm("Discard unsaved schema changes?")) return
     onClose()
   }
   const remove = async () => {
@@ -92,15 +93,15 @@ function EditorContent({ embedded, onClose, onSaved }: Pick<EditorProps, "embedd
     }
   }
   const content = <>
-    <fieldset disabled={isSaving || deleting} className="min-w-0">
+    <fieldset disabled={isSaving || deleting || isRemovingReference} className="min-w-0">
       <SchemaWizard embedded />
     </fieldset>
     {error && <p role="alert" className="px-5 text-sm text-red-700">{error}</p>}
     <div className="sticky bottom-0 flex justify-between gap-3 border-t bg-white px-5 py-3">
-      <Button variant="destructive" size="sm" disabled={isSaving || deleting} onClick={remove}>
+      <Button variant="destructive" size="sm" disabled={isSaving || deleting || isRemovingReference} onClick={remove}>
         {deleting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Trash2 className="mr-2 h-4 w-4" />}Delete
       </Button>
-      <Button variant="outline" size="sm" disabled={isSaving || deleting} onClick={close}>Cancel</Button>
+      <Button variant="outline" size="sm" disabled={isSaving || deleting || isRemovingReference} onClick={close}>Cancel</Button>
     </div>
   </>
   return embedded

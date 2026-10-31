@@ -133,7 +133,26 @@ export interface SchemaData {
   template_id?: string
 }
 
+export interface ReferencePdfInfo {
+  filename: string
+  size: number
+  uploaded_at: string
+}
+
+export type ReferencePdfState =
+  | { kind: "none" }
+  | { kind: "loading" }
+  | { kind: "error"; message: string }
+  | { kind: "stored"; file: File; info: ReferencePdfInfo }
+  | { kind: "selected"; file: File; consent: boolean }
+
+export type FixedFieldCreationMode = "idle" | "draw" | "search" | "coordinates"
+
 export interface SchemaWizardState {
+  fixedFieldCreationMode: FixedFieldCreationMode
+  referencePdfInfo: ReferencePdfInfo | null
+  isRemovingReference: boolean
+  referencePdf: ReferencePdfState
   schemaId?: string
   currentStep: WizardStep
   startingPoint: StartingPoint | null
@@ -228,6 +247,11 @@ export interface CreateSchemaResponse {
 
 // Wizard Context Actions
 export interface SchemaWizardActions {
+  setFixedFieldCreationMode: (mode: FixedFieldCreationMode) => void
+  selectReferencePdf: (file: File) => void
+  setReferenceConsent: (consent: boolean) => void
+  loadReferencePdf: () => Promise<void>
+  removeReferencePdf: () => Promise<void>
   setCurrentStep: (step: WizardStep) => void
   setStartingPoint: (point: StartingPoint) => void
   setManualEntry: (enabled: boolean) => void

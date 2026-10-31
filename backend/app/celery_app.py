@@ -52,6 +52,10 @@ celery_app.conf.update(
         "app.tasks.agent_tasks.*": {"queue": "workflows"},
     },
     beat_schedule={
+        "purge-deleted-schema-references": {
+            "task": "app.tasks.maintenance_tasks.purge_deleted_schema_references",
+            "schedule": 300.0,
+        },
         "dispatch-scheduled-workflows": {
             "task": "app.tasks.workflow_tasks.dispatch_scheduled_workflows",
             "schedule": 30.0,  # seconds — checks cron-due workflows

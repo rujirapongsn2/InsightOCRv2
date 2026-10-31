@@ -33,9 +33,29 @@ class DocumentSchema(Base):
     creator = relationship("User")
     
     current_version = Column(Integer, nullable=True)
+    reference_pdf = Column(JSON, nullable=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+
+class SchemaReferenceDeletion(Base):
+    """Durable storage cleanup, independent of the deleted schema."""
+
+    __tablename__ = "schema_reference_deletions"
+
+    storage_path = Column(String, primary_key=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class SchemaReferenceUpload(Base):
+    """An upload intent survives process death and schema deletion until cleanup."""
+
+    __tablename__ = "schema_reference_uploads"
+
+    storage_path = Column(String, primary_key=True)
+    schema_id = Column(UUID(as_uuid=True), nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=False, index=True)
 
 
 class SchemaVersion(Base):

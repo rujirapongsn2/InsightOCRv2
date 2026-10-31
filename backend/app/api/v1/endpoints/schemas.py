@@ -4,7 +4,7 @@ import tempfile
 import json
 import re
 from typing import List, Any, Literal
-from urllib.parse import urlparse, urlencode
+from urllib.parse import urlparse, urlencode, quote
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query, Response, status
 from pydantic import BaseModel, Field, ValidationError, model_validator
@@ -15,10 +15,11 @@ from starlette.concurrency import run_in_threadpool
 import requests
 from app.api import deps
 from app.db.session import SessionLocal
-from app.models.schema import DocumentSchema, SchemaSample, SchemaVersion
+from app.models.schema import DocumentSchema, SchemaSample, SchemaVersion, SchemaReferenceDeletion, SchemaReferenceUpload
 from app.models.document import Document
 from app.models.job import Job
 from app.models.setting import Setting
+from app.models.activity_log import ActivityLog
 from app.schemas.schema import DocumentSchema as DocumentSchemaSchema
 from app.schemas.schema import DocumentSchemaCreate, DocumentSchemaUpdate, SchemaField, _validate_field_names
 from app.models.user import User
@@ -407,12 +408,199 @@ def _parse_id(value: str, what: str) -> UUID:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"{what} not found") from exc
 
 
-def _get_managed_schema(db: Session, schema_id: str, current_user: User) -> DocumentSchema:
-    schema = db.query(DocumentSchema).filter(DocumentSchema.id == _parse_id(schema_id, "Schema")).first()
+def _get_managed_schema(db: Session, schema_id: str, current_user: User, *, lock: bool = False) -> DocumentSchema:
+    query = db.query(DocumentSchema).filter(DocumentSchema.id == _parse_id(schema_id, "Schema"))
+    if lock:
+        query = query.populate_existing().with_for_update()
+    schema = query.first()
     if not schema:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schema not found")
     _ensure_can_manage(schema, current_user)
     return schema
+
+
+class ReferencePdfMetadata(BaseModel):
+    filename: str
+    size: int
+    uploaded_at: str
+
+
+def _delete_reference_pdf_file(db: Session, storage: Any, path: str) -> None:
+    try:
+        storage.delete_file(path)
+        db.query(SchemaReferenceDeletion).filter_by(storage_path=path).delete()
+        db.query(SchemaReferenceUpload).filter_by(storage_path=path).delete()
+        db.commit()
+    except Exception:
+        db.rollback()
+        try:
+            if db.get(SchemaReferenceDeletion, path) is None:
+                db.add(SchemaReferenceDeletion(storage_path=path))
+                db.commit()
+        except Exception:
+            db.rollback()
+            logger.exception("Could not record reference PDF cleanup for %s", path)
+        # The durable deletion row remains for the maintenance worker.
+        logger.exception("Could not clean up schema reference PDF %s", path)
+
+
+@router.get("/{schema_id}/reference-pdf", response_model=ReferencePdfMetadata)
+def get_schema_reference_pdf(
+    schema_id: str,
+    response: Response,
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_active_user),
+) -> Any:
+    schema = _get_managed_schema(db, schema_id, current_user)
+    if not schema.reference_pdf:
+        raise HTTPException(status_code=404, detail="Reference PDF not found")
+    response.headers["Cache-Control"] = "private, no-store"
+    return ReferencePdfMetadata(**schema.reference_pdf)
+
+
+@router.get("/{schema_id}/reference-pdf/file")
+def get_schema_reference_pdf_file(
+    schema_id: str,
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_active_user),
+) -> Response:
+    from app.services.storage import get_storage_service
+
+    # Keep replacement/removal from deleting the object while it is read.
+    schema = _get_managed_schema(db, schema_id, current_user, lock=True)
+    reference = schema.reference_pdf
+    if not reference:
+        raise HTTPException(status_code=404, detail="Reference PDF not found")
+    storage = get_storage_service()
+    if not storage.exists(reference["storage_path"]):
+        raise HTTPException(status_code=404, detail="Reference PDF not found")
+    with storage.get_local_path(reference["storage_path"]) as path:
+        with open(path, "rb") as source:
+            data = source.read()
+    filename = quote(reference["filename"], safe="")
+    return Response(data, media_type="application/pdf", headers={
+        "Cache-Control": "private, no-store",
+        "X-Content-Type-Options": "nosniff",
+        "Content-Disposition": f"inline; filename=\"reference.pdf\"; filename*=UTF-8''{filename}",
+    })
+
+
+@router.put("/{schema_id}/reference-pdf", response_model=ReferencePdfMetadata)
+def put_schema_reference_pdf(
+    schema_id: str,
+    file: UploadFile = File(...),
+    consent: bool = Form(False),
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_active_user),
+) -> Any:
+    from datetime import datetime, timedelta, timezone
+    from io import BytesIO
+    from uuid import uuid4
+    from pypdf import PdfReader
+    from app.services.storage import get_storage_service
+
+    schema = _get_managed_schema(db, schema_id, current_user)
+    if not consent:
+        raise HTTPException(status_code=422, detail="Confirm that the reference PDF may be stored")
+    filename = (file.filename or "").replace("\\", "/").rsplit("/", 1)[-1]
+    filename = "".join(char for char in filename if ord(char) >= 32 and ord(char) != 127)
+    if not filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=415, detail="A PDF file is required")
+    max_bytes = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
+    data = file.file.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        raise HTTPException(
+            status_code=413, detail=f"File is too large. Maximum is {settings.MAX_UPLOAD_SIZE_MB} MB",
+        )
+    if not data.startswith(b"%PDF-"):
+        raise HTTPException(status_code=422, detail="Invalid PDF file")
+    try:
+        reader = PdfReader(BytesIO(data), strict=True)
+        if reader.is_encrypted or not len(reader.pages):
+            raise ValueError("A readable, unencrypted PDF with at least one page is required")
+        for page in reader.pages:
+            _ = page.mediabox
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail="Invalid or unreadable PDF file") from exc
+
+    storage = get_storage_service()
+    path = f"schema-references/{schema.id}/{uuid4().hex}.pdf"
+    metadata = ReferencePdfMetadata(
+        filename=filename, size=len(data), uploaded_at=datetime.now(timezone.utc).isoformat(),
+    )
+    # Commit the intent before touching storage; process death cannot orphan the key.
+    db.add(SchemaReferenceUpload(
+        storage_path=path, schema_id=schema.id,
+        expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+    ))
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    try:
+        # Cleanup skips this row while an upload is active, even beyond its deadline.
+        intent = db.query(SchemaReferenceUpload).filter_by(storage_path=path).with_for_update().first()
+        if intent is None:
+            raise HTTPException(status_code=409, detail="The upload expired. Select the PDF and try again.")
+        storage.upload_file(BytesIO(data), path, content_type="application/pdf")
+        # Reload after locking so concurrent replacements clean up the latest object.
+        schema = _get_managed_schema(db, schema_id, current_user, lock=True)
+        previous = schema.reference_pdf
+        if previous:
+            db.add(SchemaReferenceDeletion(storage_path=previous["storage_path"]))
+        schema.reference_pdf = {**metadata.model_dump(), "storage_path": path}
+        db.delete(intent)
+        db.add(ActivityLog(
+            user_id=current_user.id, action=Actions.UPDATE_SCHEMA,
+            resource_type="schema", resource_id=schema.id,
+            details={"reference_pdf_action": "uploaded", "consent": True, "size": len(data)},
+        ))
+        db.commit()
+    except Exception:
+        db.rollback()
+        try:
+            # A lost commit acknowledgement may mean the PDF is already published.
+            # Only an outstanding intent proves that it is safe to remove this key.
+            intent = db.query(SchemaReferenceUpload).filter_by(storage_path=path).with_for_update().first()
+            if intent is not None:
+                _delete_reference_pdf_file(db, storage, path)
+        except Exception:
+            db.rollback()
+            logger.exception("Reference PDF upload cleanup deferred for %s", path)
+        raise
+    if previous:
+        _delete_reference_pdf_file(db, storage, previous["storage_path"])
+    return metadata
+
+
+@router.delete("/{schema_id}/reference-pdf", status_code=status.HTTP_204_NO_CONTENT)
+def delete_schema_reference_pdf(
+    schema_id: str,
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_active_user),
+) -> Response:
+    from app.services.storage import get_storage_service
+
+    schema = _get_managed_schema(db, schema_id, current_user, lock=True)
+    previous = schema.reference_pdf
+    if not previous:
+        raise HTTPException(status_code=404, detail="Reference PDF not found")
+    storage = get_storage_service()
+    try:
+        db.add(SchemaReferenceDeletion(storage_path=previous["storage_path"]))
+        schema.reference_pdf = None
+        db.add(ActivityLog(
+            user_id=current_user.id, action=Actions.UPDATE_SCHEMA,
+            resource_type="schema", resource_id=schema.id,
+            details={"reference_pdf_action": "deleted"},
+        ))
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    _delete_reference_pdf_file(db, storage, previous["storage_path"])
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 def _sample_summary(row: SchemaSample, field_names: set[str] | None = None) -> dict[str, Any]:
@@ -1256,11 +1444,7 @@ def delete_schema(
     Admin: any schema
     Manager: only schemas created by self
     """
-    schema = db.query(DocumentSchema).filter(DocumentSchema.id == schema_id).first()
-    if not schema:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schema not found")
-
-    _ensure_can_manage(schema, current_user)
+    schema = _get_managed_schema(db, schema_id, current_user)
 
     # Log activity before deletion
     log_activity(
@@ -1273,6 +1457,10 @@ def delete_schema(
     )
 
     # Clear references before deletion to avoid FK constraint failures.
+    schema = _get_managed_schema(db, schema_id, current_user, lock=True)
+    reference_pdf = schema.reference_pdf
+    if reference_pdf:
+        db.add(SchemaReferenceDeletion(storage_path=reference_pdf["storage_path"]))
     db.query(Document).filter(Document.schema_id == schema.id).update(
         {Document.schema_id: None},
         synchronize_session=False,
@@ -1297,4 +1485,10 @@ def delete_schema(
     if sample_paths:
         from app.tasks.maintenance_tasks import delete_schema_sample_files
         delete_schema_sample_files(sample_paths)
+    if reference_pdf:
+        from app.services.storage import get_storage_service
+        try:
+            _delete_reference_pdf_file(db, get_storage_service(), reference_pdf["storage_path"])
+        except Exception:
+            logger.exception("Could not initialize storage for schema reference PDF cleanup")
     return schema
