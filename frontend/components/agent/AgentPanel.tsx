@@ -5,7 +5,7 @@ import { X, Plus, Trash2, Bot, ChevronDown, AlertTriangle, Loader2, Brain, Libra
 import { getApiBaseUrl } from "@/lib/api"
 import AgentMessage from "./AgentMessage"
 import AgentToolCalls from "./AgentToolCalls"
-import ConfirmationDialog from "./ConfirmationDialog"
+import ConfirmationDialog, { type PendingAction } from "./ConfirmationDialog"
 import ThinkingIndicator from "./ThinkingIndicator"
 import SkillLibrary from "./SkillLibrary"
 import ChatInput from "@/components/chat/ChatInput"
@@ -53,13 +53,6 @@ interface AgentEvent {
     stopped?: string
     tool_call_id?: string
     tool_name?: string
-}
-
-interface PendingAction {
-    pending_action_id: string
-    tool_name: string
-    description: string
-    arguments: any
 }
 
 interface AgentRun {

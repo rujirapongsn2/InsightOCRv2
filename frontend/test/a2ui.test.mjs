@@ -13,7 +13,7 @@ const { renderToStaticMarkup } = require("react-dom/server")
 const root = fileURLToPath(new URL("..", import.meta.url))
 const cache = new Map()
 
-// Transpile frontend modules on demand, resolving the "@/" alias like Next does.
+// Transpile frontend modules on demand, resolving "@/" like Next does and relative imports.
 function load(file) {
   if (cache.has(file)) return cache.get(file)
   const mod = { exports: {} }
@@ -22,8 +22,9 @@ function load(file) {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
   })
   const localRequire = (id) => {
-    if (!id.startsWith("@/")) return require(id)
-    const base = path.join(root, id.slice(2))
+    const relative = id.startsWith("./") || id.startsWith("../")
+    if (!id.startsWith("@/") && !relative) return require(id)
+    const base = relative ? path.resolve(path.dirname(file), id) : path.join(root, id.slice(2))
     const resolved = [".ts", ".tsx"].map((ext) => base + ext).find(existsSync)
     return load(resolved)
   }
@@ -108,4 +109,28 @@ test("button actions resolve bindings into an A2UI action message", () => {
   assert.deepEqual(JSON.parse(message.split("```a2ui-action\n")[1].split("\n```")[0]), JSON.parse(JSON.stringify(action)))
   assert.equal(a2ui.visibleUserText(message), "อนุมัติเอกสาร 2 รายการที่เลือก")
   assert.equal(a2ui.visibleUserText("hello ```a2ui-action``` text"), "hello ```a2ui-action``` text")
+})
+
+test("the confirmation names the documents it will change", () => {
+  const ConfirmationDialog = load(path.join(root, "components/agent/ConfirmationDialog.tsx")).default
+  const action = {
+    pending_action_id: "p1", tool_name: "bulk_approve", description: "อนุมัติเอกสารที่รอตรวจ 2 รายการ",
+    arguments: { doc_ids: ["d1", "d2"] },
+  }
+  const confirm = (props) => renderToStaticMarkup(createElement(ConfirmationDialog, {
+    action: { ...action, ...props }, onConfirm: () => {}, onReject: () => {} }))
+
+  const named = confirm({ documents: [
+    { id: "d1", filename: "invoice-01.pdf", status: "extraction_completed" },
+    { id: "d2", filename: "receipt-07.pdf", status: "reviewed" },
+  ] })
+  assert.match(named, /เอกสาร 2 รายการ/)
+  assert.match(named, /invoice-01\.pdf<\/span><span[^>]*>รอตรวจ</)
+  assert.match(named, /receipt-07\.pdf<\/span><span[^>]*>อนุมัติแล้ว</)
+  assert.match(named, /<details/)
+
+  const plain = confirm({})
+  assert.match(plain, /อนุมัติเอกสารที่รอตรวจ 2 รายการ/)
+  assert.match(plain, /bulk_approve/)
+  assert.doesNotMatch(plain, /<ul/)
 })
