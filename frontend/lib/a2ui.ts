@@ -38,6 +38,9 @@ export interface TableColumn {
     label: string
     type: ColumnType
     align: (typeof ALIGNS)[number]
+    unit?: string
+    /** How a delta column formats its change; a number column is formatted by its type. */
+    format?: NumberFormat
 }
 
 export interface ChartSeries {
@@ -214,7 +217,10 @@ function parseColumn(raw: unknown): TableColumn | null {
     if (!type) return null
     const numeric = type === "number" || type === "currency" || type === "percent" || type === "delta"
     const align = oneOf(raw.align, ALIGNS, numeric ? "right" : "left")
-    return align ? { key: raw.key, label: raw.label, type, align } : null
+    const unit = optionalString(raw.unit)
+    const format = raw.format === undefined ? undefined : NUMBER_FORMATS.find(f => f === raw.format)
+    if (!align || unit === null || (raw.format !== undefined && !format)) return null
+    return { key: raw.key, label: raw.label, type, align, ...(unit ? { unit } : {}), ...(format ? { format } : {}) }
 }
 
 const COMPONENT_PARSERS: { [K in ComponentType]: (raw: Raw, id: string) => ComponentOf<K> | null } = {

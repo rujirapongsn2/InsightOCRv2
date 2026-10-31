@@ -228,15 +228,22 @@ def _check_data_table(comp: dict) -> list[str]:
     keys: list[str] = []
     for index, column in enumerate(columns):
         where = f'"columns"[{index}]'
-        if not isinstance(column, dict) or set(column) - {"key", "label", "type", "align"}:
-            errors.append(f'{where} must be {{"key", "label", "type", "align"?}}')
+        if not isinstance(column, dict) or set(column) - {"key", "label", "type", "align", "format", "unit"}:
+            errors.append(f'{where} must be {{"key", "label", "type", "align"?, "format"?, "unit"?}}')
             continue
         keys.append(str(column.get("key")))
+        column_type = column.get("type")
         errors.extend(_problems(
             _key_problem(column.get("key"), f"{where}.key"),
             _string_problem(column.get("label"), f"{where}.label", MAX_LABEL_CHARS),
-            _enum_problem(column.get("type"), f"{where}.type", COLUMN_TYPES),
+            _enum_problem(column_type, f"{where}.type", COLUMN_TYPES),
             _enum_problem(column.get("align"), f"{where}.align", COLUMN_ALIGNS, required=False),
+            _enum_problem(column.get("format"), f"{where}.format", NUMBER_FORMATS, required=False),
+            _string_problem(column.get("unit"), f"{where}.unit", MAX_UNIT_CHARS, required=False),
+            f'{where}.format is only for "delta" columns; a number column\'s type already sets its format'
+            if "format" in column and column_type != "delta" else None,
+            f'{where}.unit is only for number, currency, percent and delta columns'
+            if "unit" in column and column_type not in (*NUMERIC_COLUMN_TYPES, "delta") else None,
         ))
         if column.get("key") == "document_id":
             errors.append(f'{where}: "document_id" is not a column; put it on each row and the table '

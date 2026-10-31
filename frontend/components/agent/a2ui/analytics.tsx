@@ -118,12 +118,12 @@ function Cell({ column, value }: { column: TableColumn; value: unknown }) {
         case "number":
         case "currency":
         case "percent":
-            return isFiniteNumber(value) ? <>{formatNumber(value, column.type)}</> : <Dash />
+            return isFiniteNumber(value) ? <>{formatNumber(value, column.type, column.unit)}</> : <Dash />
         case "date":
             return <>{formatDate(value) ?? <Dash />}</>
         case "delta": {
             const delta = parseDelta(value)
-            return delta ? <DeltaText delta={delta} /> : <Dash />
+            return delta ? <DeltaText delta={delta} format={column.format} unit={column.unit} /> : <Dash />
         }
         case "risk":
             return RISK_LEVELS.includes(value as RiskLevel) ? <RiskBadge level={value as RiskLevel} /> : <Dash />

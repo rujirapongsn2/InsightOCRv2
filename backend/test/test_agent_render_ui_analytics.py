@@ -145,6 +145,15 @@ def test_table_and_chart_render_and_cited_ids_are_canonical(db):
     assert chart["components"] == {"Chart": 1}
 
 
+def test_number_and_delta_columns_take_a_unit_and_delta_columns_a_format(db):
+    columns = [TABLE_COLUMNS[0], {**TABLE_COLUMNS[1], "unit": "บาท"}, *TABLE_COLUMNS[2:4],
+               {**TABLE_COLUMNS[4], "format": "currency", "unit": "บาท"}, TABLE_COLUMNS[5]]
+    result = _render(db, *_table([_row()], columns))
+    assert result["ok"] is True, result
+    rendered = result["a2ui"][1]["updateComponents"]["components"][1]["columns"]
+    assert rendered[4] == {**TABLE_COLUMNS[4], "format": "currency", "unit": "บาท"}
+
+
 def test_risk_badge_alone_is_valid(db):
     result = _render(db, [_root("badge"), {"id": "badge", "component": "RiskBadge", "level": "critical"}], {})
     assert result["ok"] is True, result
@@ -180,6 +189,12 @@ def test_risk_badge_alone_is_valid(db):
      '"columns"[6].type must be one of'),
     (lambda: _table([_row()], [{"key": f"c{i}", "label": "c", "type": "text"} for i in range(13)]),
      '"columns" must be an array of 1 to 12 columns'),
+    (lambda: _table([_row()], TABLE_COLUMNS[:4] + [{**TABLE_COLUMNS[4], "format": "money"}, TABLE_COLUMNS[5]]),
+     "\"columns\"[4].format must be one of ['number', 'currency', 'percent']"),
+    (lambda: _table([_row()], [{**TABLE_COLUMNS[0], "unit": "บาท"}] + TABLE_COLUMNS[1:]),
+     '"columns"[0].unit is only for number, currency, percent and delta columns'),
+    (lambda: _table([_row()], [TABLE_COLUMNS[0], {**TABLE_COLUMNS[1], "format": "percent"}] + TABLE_COLUMNS[2:]),
+     '"columns"[1].format is only for "delta" columns'),
     (lambda: _chart([{"vendor": "A", **{f"s{i}": 1 for i in range(9)}}],
                     [{"key": f"s{i}", "label": f"s{i}"} for i in range(9)]),
      '"series" must be an array of 1 to 8 series'),

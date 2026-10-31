@@ -264,6 +264,22 @@ test("a DataTable formats Thai numbers, dates, deltas and risk cells", () => {
   assert.match(html, /max-h-80 overflow-auto/)
 })
 
+test("DataTable number and delta cells carry the column's unit and format", () => {
+  const columns = [
+    { key: "amount", label: "ยอด", type: "currency", unit: "บาท" },
+    { key: "change", label: "เปลี่ยนแปลง", type: "delta", format: "currency", unit: "บาท" },
+    { key: "rate", label: "อัตรา", type: "delta", format: "percent" },
+  ]
+  const html = render(analytic([column("t"), { id: "t", component: "DataTable", rows: { path: "/rows" }, columns }], { rows: [
+    { amount: 1500, change: { value: 250, direction: "up", sentiment: "bad" }, rate: { value: -2.5, direction: "down", sentiment: "good" } },
+  ] }))
+  assert.match(html, />1,500\.00 บาท<\/td>/)
+  assert.match(html, />\+250\.00 บาท<\/span>/)
+  assert.match(html, />-2\.5%<\/span>/)
+  assert.equal(analytic([column("t"), { id: "t", component: "DataTable", rows: { path: "/rows" },
+    columns: [{ ...columns[1], format: "money" }] }], { rows: [] }), null)
+})
+
 const chartComponent = (type, series) => [column("c"), { id: "c", component: "Chart", type, title: "ยอดตามผู้ขาย",
   x: "label", series, data: { path: "/points" }, format: "currency", unit: "บาท" }]
 const twoSeries = [{ key: "y2025", label: "2568" }, { key: "y2026", label: "2569" }]
