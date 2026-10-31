@@ -11,8 +11,56 @@ export type Dynamic<T> = T | Binding
 export type ActionEventName = "approve_documents" | "reject_documents" | "ask_agent"
 type ActionContext = Record<string, unknown>
 
+export const NUMBER_FORMATS = ["number", "currency", "percent"] as const
+export const COLUMN_TYPES = ["text", "number", "currency", "percent", "date", "delta", "risk"] as const
+export const RISK_LEVELS = ["critical", "high", "medium", "low"] as const
+const DIRECTIONS = ["up", "down", "flat"] as const
+const SENTIMENTS = ["good", "bad", "neutral"] as const
+const ALIGNS = ["left", "center", "right"] as const
+export const MAX_CHART_SERIES = 8
+
+export type NumberFormat = (typeof NUMBER_FORMATS)[number]
+export type ColumnType = (typeof COLUMN_TYPES)[number]
+export type RiskLevel = (typeof RISK_LEVELS)[number]
+export type Direction = (typeof DIRECTIONS)[number]
+export type Sentiment = (typeof SENTIMENTS)[number]
+
+/** A change: direction is which way the number moved, sentiment whether that is good for the user. */
+export interface Delta {
+    value: number
+    direction: Direction
+    sentiment: Sentiment
+    label?: string
+}
+
+export interface TableColumn {
+    key: string
+    label: string
+    type: ColumnType
+    align: (typeof ALIGNS)[number]
+}
+
+export interface ChartSeries {
+    key: string
+    label: string
+}
+
+export interface RiskItem {
+    title: string
+    level: RiskLevel
+    category?: string
+    description: string
+    quote?: string
+    /** Set by the server after looking for the quote in the document's text. */
+    quote_verified?: boolean
+    document_id?: string
+    page?: number
+    recommendation?: string
+}
+
 export type A2uiComponent =
     | { id: string; component: "Column"; children: string[] }
+    | { id: string; component: "Row"; children: string[] }
     | { id: string; component: "Text"; text: Dynamic<string>; variant: "body" | "caption" | "heading" }
     | { id: string; component: "DocumentList"; documents: Binding; selectable: boolean; selection?: string }
     | {
@@ -22,6 +70,33 @@ export type A2uiComponent =
         variant: "primary" | "secondary"
         action: { event: { name: ActionEventName; context: ActionContext } }
     }
+    | {
+        id: string
+        component: "Metric"
+        label: string
+        value: Dynamic<number>
+        unit?: string
+        format: NumberFormat
+        delta?: Delta
+    }
+    | { id: string; component: "DataTable"; columns: TableColumn[]; rows: Binding; caption?: string }
+    | {
+        id: string
+        component: "Chart"
+        type: "bar" | "line"
+        title?: string
+        x: string
+        series: ChartSeries[]
+        data: Binding
+        unit?: string
+        format: NumberFormat
+    }
+    | { id: string; component: "RiskList"; items: Binding; title?: string }
+    | { id: string; component: "RiskBadge"; level: RiskLevel }
+
+/** Components that show numbers the agent computed; a surface with any of them says so. */
+export const COMPUTED_COMPONENTS: readonly ComponentType[] = ["Metric", "DataTable", "Chart"]
+export const COMPUTED_NOTE = "ตัวเลขในแผงนี้ AI คำนวณจากข้อมูลที่ดึงจากเอกสาร ควรตรวจทานก่อนนำไปใช้"
 
 export type ComponentType = A2uiComponent["component"]
 export type ComponentOf<K extends ComponentType> = Extract<A2uiComponent, { component: K }>
@@ -111,11 +186,73 @@ export function resolveValue<T>(value: Dynamic<T>, data: DataModel): unknown {
 const oneOf = <T extends string>(value: unknown, allowed: readonly T[], fallback: T): T | null =>
     value === undefined ? fallback : allowed.includes(value as T) ? (value as T) : null
 
+export const isFiniteNumber = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value)
+const optionalString = (value: unknown): string | undefined | null =>
+    value === undefined ? undefined : typeof value === "string" ? value : null
+const stringChildren = (value: unknown): string[] | null =>
+    Array.isArray(value) && value.every(c => typeof c === "string") ? value : null
+
+export function parseDelta(value: unknown): Delta | null {
+    if (!isRecord(value) || !isFiniteNumber(value.value)) return null
+    const direction = DIRECTIONS.find(d => d === value.direction)
+    const sentiment = SENTIMENTS.find(s => s === value.sentiment)
+    const label = optionalString(value.label)
+    if (!direction || !sentiment || label === null) return null
+    return { value: value.value, direction, sentiment, ...(label ? { label } : {}) }
+}
+
+function parseColumn(raw: unknown): TableColumn | null {
+    if (!isRecord(raw) || typeof raw.key !== "string" || typeof raw.label !== "string") return null
+    const type = COLUMN_TYPES.find(t => t === raw.type)
+    if (!type) return null
+    const numeric = type === "number" || type === "currency" || type === "percent" || type === "delta"
+    const align = oneOf(raw.align, ALIGNS, numeric ? "right" : "left")
+    return align ? { key: raw.key, label: raw.label, type, align } : null
+}
+
 const COMPONENT_PARSERS: { [K in ComponentType]: (raw: Raw, id: string) => ComponentOf<K> | null } = {
     Column: (raw, id) => {
-        const children = raw.children
-        if (!Array.isArray(children) || !children.every(c => typeof c === "string")) return null
-        return { id, component: "Column", children: children as string[] }
+        const children = stringChildren(raw.children)
+        return children && { id, component: "Column", children }
+    },
+    Row: (raw, id) => {
+        const children = stringChildren(raw.children)
+        return children && { id, component: "Row", children }
+    },
+    Metric: (raw, id) => {
+        const format = oneOf(raw.format, NUMBER_FORMATS, "number")
+        const unit = optionalString(raw.unit)
+        const delta = raw.delta === undefined ? undefined : parseDelta(raw.delta)
+        const value = raw.value
+        if (typeof raw.label !== "string" || !format || unit === null || delta === null) return null
+        if (!isFiniteNumber(value) && !isBinding(value)) return null
+        return { id, component: "Metric", label: raw.label, value, unit, format, delta }
+    },
+    DataTable: (raw, id) => {
+        const columns = Array.isArray(raw.columns) ? raw.columns.map(parseColumn) : []
+        const caption = optionalString(raw.caption)
+        if (columns.length === 0 || columns.some(c => c === null) || !isBinding(raw.rows) || caption === null) return null
+        return { id, component: "DataTable", columns: columns as TableColumn[], rows: raw.rows, caption }
+    },
+    Chart: (raw, id) => {
+        const type = raw.type === "bar" || raw.type === "line" ? raw.type : null
+        const format = oneOf(raw.format, NUMBER_FORMATS, "number")
+        const title = optionalString(raw.title)
+        const unit = optionalString(raw.unit)
+        const series = Array.isArray(raw.series) && raw.series.length > 0 && raw.series.length <= MAX_CHART_SERIES
+            && raw.series.every(s => isRecord(s) && typeof s.key === "string" && typeof s.label === "string")
+            ? raw.series.map(s => ({ key: s.key, label: s.label }) as ChartSeries) : null
+        if (!type || !format || title === null || unit === null || !series) return null
+        if (typeof raw.x !== "string" || !isBinding(raw.data)) return null
+        return { id, component: "Chart", type, title, x: raw.x, series, data: raw.data, unit, format }
+    },
+    RiskList: (raw, id) => {
+        const title = optionalString(raw.title)
+        return isBinding(raw.items) && title !== null ? { id, component: "RiskList", items: raw.items, title } : null
+    },
+    RiskBadge: (raw, id) => {
+        const level = RISK_LEVELS.find(l => l === raw.level)
+        return level ? { id, component: "RiskBadge", level } : null
     },
     Text: (raw, id) => {
         const variant = oneOf(raw.variant, ["body", "caption", "heading"] as const, "body")
@@ -154,7 +291,7 @@ function isTree(components: Record<string, A2uiComponent>): boolean {
         const node = components[id]
         if (!node || visited.has(id)) return false
         visited.add(id)
-        return node.component !== "Column" || node.children.every(walk)
+        return !("children" in node) || node.children.every(walk)
     }
     return walk("root")
 }
@@ -197,6 +334,55 @@ export function documentRows(value: unknown): DocumentRow[] {
     if (!Array.isArray(value)) return []
     return value.filter((row): row is DocumentRow =>
         isRecord(row) && typeof row.document_id === "string" && typeof row.filename === "string" && typeof row.status === "string")
+}
+
+export function tableRows(value: unknown): Raw[] {
+    return Array.isArray(value) ? value.filter(isRecord) : []
+}
+
+export interface ChartPoint {
+    label: string
+    /** One value per series, in series order; null where the series has no value. */
+    values: (number | null)[]
+}
+
+export function chartPoints(value: unknown, x: string, series: readonly ChartSeries[]): ChartPoint[] {
+    return tableRows(value)
+        .filter(point => typeof point[x] === "string" || isFiniteNumber(point[x]))
+        .map(point => ({
+            label: String(point[x]),
+            values: series.map(s => (isFiniteNumber(point[s.key]) ? point[s.key] as number : null)),
+        }))
+}
+
+function parseRiskItem(raw: unknown): RiskItem | null {
+    if (!isRecord(raw) || typeof raw.title !== "string" || typeof raw.description !== "string") return null
+    const level = RISK_LEVELS.find(l => l === raw.level)
+    if (!level) return null
+    const text = (key: string) => (typeof raw[key] === "string" && raw[key] ? { [key]: raw[key] as string } : {})
+    return {
+        title: raw.title,
+        level,
+        description: raw.description,
+        ...text("category"),
+        ...text("quote"),
+        ...text("document_id"),
+        ...text("recommendation"),
+        ...(typeof raw.quote_verified === "boolean" ? { quote_verified: raw.quote_verified } : {}),
+        ...(Number.isInteger(raw.page) && (raw.page as number) > 0 ? { page: raw.page as number } : {}),
+    }
+}
+
+/** Risk items, most severe first; the server's order is kept within a level. */
+export function riskItems(value: unknown): RiskItem[] {
+    const items = Array.isArray(value) ? value.map(parseRiskItem).filter((item): item is RiskItem => item !== null) : []
+    return items.sort((a, b) => RISK_LEVELS.indexOf(a.level) - RISK_LEVELS.indexOf(b.level))
+}
+
+export function riskCounts(items: readonly RiskItem[]): Record<RiskLevel, number> {
+    const counts = { critical: 0, high: 0, medium: 0, low: 0 }
+    for (const item of items) counts[item.level] += 1
+    return counts
 }
 
 export function selectedIds(data: DataModel, path: string | undefined): string[] {

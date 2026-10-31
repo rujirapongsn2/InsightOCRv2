@@ -1,9 +1,11 @@
 "use client"
 
 import { Component, useState, type ReactNode } from "react"
-import { Eye } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import { Chart, DataTable, Metric, OpenDocumentButton, RiskBadge, RiskList } from "@/components/agent/a2ui/analytics"
 import {
+    COMPUTED_COMPONENTS,
+    COMPUTED_NOTE,
     actionMessage,
     buildAction,
     documentRows,
@@ -91,16 +93,7 @@ function DocumentList({ component, ctx }: { component: ComponentOf<"DocumentList
                             </div>
                             {row.note && <p className="mt-0.5 text-xs text-slate-gray">{row.note}</p>}
                         </div>
-                        {ctx.onOpenDocument && (
-                            <button
-                                type="button"
-                                onClick={() => ctx.onOpenDocument?.(row.document_id)}
-                                className="inline-flex shrink-0 items-center gap-1 text-xs font-medium text-softnix-blue hover:text-softnix-deep"
-                            >
-                                <Eye className="h-3.5 w-3.5" />
-                                เปิดดู
-                            </button>
-                        )}
+                        {ctx.onOpenDocument && <OpenDocumentButton documentId={row.document_id} onOpen={ctx.onOpenDocument} />}
                     </li>
                 ))}
             </ul>
@@ -114,6 +107,16 @@ const CATALOG: { [K in ComponentType]: (component: ComponentOf<K>, ctx: RenderCo
             {component.children.map(id => <div key={id}>{ctx.render(id)}</div>)}
         </div>
     ),
+    Row: (component, ctx) => (
+        <div className="flex flex-wrap gap-2">
+            {component.children.map(id => <div key={id} className="min-w-[9rem] flex-1">{ctx.render(id)}</div>)}
+        </div>
+    ),
+    Metric: (component, ctx) => <Metric component={component} data={ctx.data} />,
+    DataTable: (component, ctx) => <DataTable component={component} data={ctx.data} onOpenDocument={ctx.onOpenDocument} />,
+    Chart: (component, ctx) => <Chart component={component} data={ctx.data} />,
+    RiskList: (component, ctx) => <RiskList component={component} data={ctx.data} onOpenDocument={ctx.onOpenDocument} />,
+    RiskBadge: component => <RiskBadge level={component.level} />,
     Text: (component, ctx) => {
         const text = resolveValue(component.text, ctx.data)
         return <p className={TEXT_CLASS[component.variant]}>{typeof text === "string" ? text : ""}</p>
@@ -165,6 +168,9 @@ function SurfaceBody({ surface, actionsDisabled = false, notes = [], onAction, o
     return (
         <div className="mx-3 rounded-lg border border-hairline bg-white p-3" data-surface-id={surface.surfaceId}>
             {ctx.render("root")}
+            {Object.values(surface.components).some(c => COMPUTED_COMPONENTS.includes(c.component)) && (
+                <p className="mt-2 text-xs text-viz-muted">{COMPUTED_NOTE}</p>
+            )}
             {notes.map(note => <p key={note} className="mt-2 text-xs text-slate-gray">{note}</p>)}
         </div>
     )
