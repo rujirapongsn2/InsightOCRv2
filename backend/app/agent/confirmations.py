@@ -8,7 +8,7 @@ def requires_explicit_confirmation(tool_name: str) -> bool:
 
 def requires_confirmation(tool_name: str, args: dict) -> bool:
     DESTRUCTIVE_TOOLS = {
-        "approve_document", "reject_document", "bulk_approve",
+        "approve_document", "reject_document", "bulk_approve", "bulk_reject",
         "update_document_field", "delete_file", "forget_memory",
         "create_skill", "delete_skill", "send_to_workflow",
         "save_workflow",  # final commit of an AI-designed workflow
@@ -25,8 +25,13 @@ def requires_confirmation(tool_name: str, args: dict) -> bool:
 def describe_action(tool_name: str, args: dict) -> str:
     if tool_name == "approve_document":
         return f"อนุมัติเอกสาร {args.get('doc_id')}"
-    if tool_name == "bulk_approve":
-        return f"อนุมัติเอกสารหลายชิ้นใน Job (criteria: {args})"
+    if tool_name in ("bulk_approve", "bulk_reject"):
+        # The loop freezes args["doc_ids"] to the eligible documents before asking.
+        verb = "อนุมัติ" if tool_name == "bulk_approve" else "ปฏิเสธ"
+        doc_ids = args.get("doc_ids")
+        count = f"{len(doc_ids)} รายการ" if isinstance(doc_ids, list) else "ทั้งหมด"
+        threshold = f" (ความมั่นใจ ≥ {args['min_confidence']})" if args.get("min_confidence") else ""
+        return f"{verb}เอกสารที่รอตรวจ {count}{threshold}"
     if tool_name == "reject_document":
         return f"ปฏิเสธเอกสาร {args.get('doc_id')}"
     if tool_name == "update_document_field":

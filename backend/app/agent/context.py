@@ -56,8 +56,19 @@ def _looks_like_prior_file_claim(content: str | None) -> bool:
     return has_file_ref and has_claim
 
 
+def _without_surface(result):
+    """A render_ui result without its A2UI messages: the user sees the surface, the model only the summary."""
+    if isinstance(result, dict) and "a2ui" in result:
+        return {key: value for key, value in result.items() if key != "a2ui"}
+    if isinstance(result, list):
+        return [{**item, "result": _without_surface(item["result"])} if isinstance(item, dict) and "result" in item
+                else item for item in result]
+    return result
+
+
 def tool_content_for_llm(result) -> str:
     """Serialize a tool result for the LLM, truncating oversized payloads."""
+    result = _without_surface(result)
     content = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False, default=str)
     if len(content) > TOOL_RESULT_MAX_CHARS:
         omitted = len(content) - TOOL_RESULT_MAX_CHARS
@@ -458,6 +469,8 @@ result = _save_file('/tmp/output.pdf')
 - Use skill tools when a reusable procedure is relevant; load full procedures with `execute_skill`.
 - Use `web_search` only for external context such as public product/vendor/regulatory information. Cite URLs when relying on web results.
 - Use integration tools only after checking available integrations.
+- When presenting a set of documents the user may act on (for example documents awaiting approval or with problems), call `render_ui` with a selectable DocumentList and action buttons, and still give a short text answer. The panel only displays; approvals and rejections still go through `bulk_approve` / `bulk_reject` (pass `doc_ids`), `approve_document`, or `reject_document`.
+- A user message with an `a2ui-action` code block is a button click on a panel you rendered. Act on `context.document_ids` with one call: `approve_documents` → `bulk_approve` with those `doc_ids`; `reject_documents` → `bulk_reject` with those `doc_ids`; `ask_agent` → answer the question in `context`. The user confirms the whole set once; report any `not_approved_doc_ids` / `not_rejected_doc_ids` from the result.
 
 ## Safety and Governance
 - Destructive or externally visible actions require confirmation; the system gates these tools.

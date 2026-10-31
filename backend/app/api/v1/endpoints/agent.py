@@ -169,6 +169,18 @@ def _agent_run_payload(db: Session, run: AgentRun) -> dict:
             if run.created_at is not None else AgentPendingAction.run_id.is_(None),
         ))
         pending = query.order_by(AgentPendingAction.created_at.desc()).first()
+    pending_payload = None
+    if pending:
+        pending_payload = {
+            "pending_action_id": str(pending.id),
+            "tool_name": pending.tool_name,
+            "description": pending.description or pending.tool_name,
+            "arguments": pending.tool_arguments,
+        }
+        # Frozen when the action was created, from this job's rows; never the model's arguments.
+        documents = (pending.result or {}).get("confirmation_documents")
+        if documents is not None:
+            pending_payload["documents"] = documents
     return {
         "id": str(run.id),
         "conversation_id": str(run.conversation_id),
@@ -177,15 +189,7 @@ def _agent_run_payload(db: Session, run: AgentRun) -> dict:
         "created_at": run.created_at.isoformat() if run.created_at else None,
         "started_at": run.started_at.isoformat() if run.started_at else None,
         "finished_at": run.finished_at.isoformat() if run.finished_at else None,
-        "pending_action": (
-            {
-                "pending_action_id": str(pending.id),
-                "tool_name": pending.tool_name,
-                "description": pending.description or pending.tool_name,
-                "arguments": pending.tool_arguments,
-            }
-            if pending else None
-        ),
+        "pending_action": pending_payload,
     }
 
 

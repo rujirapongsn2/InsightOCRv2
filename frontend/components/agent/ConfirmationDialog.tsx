@@ -2,12 +2,21 @@
 
 import { AlertTriangle, Check, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import { documentStatusLabel } from "@/lib/a2ui"
 
-interface PendingAction {
+/** A document the action will change, as the server froze it when asking. */
+export interface ConfirmationDocument {
+    id: string
+    filename: string
+    status: string
+}
+
+export interface PendingAction {
     pending_action_id: string
     tool_name: string
     description: string
-    arguments: any
+    arguments: unknown
+    documents?: ConfirmationDocument[]
 }
 
 interface ConfirmationDialogProps {
@@ -27,6 +36,21 @@ export default function ConfirmationDialog({ action, onConfirm, onReject }: Conf
                     <code className="text-xs text-amber-600 font-mono mt-1 block">{action.tool_name}</code>
                 </div>
             </div>
+            {action.documents && action.documents.length > 0 && (
+                <div className="mb-3">
+                    <p className="mb-1 text-xs font-medium text-amber-800">เอกสาร {action.documents.length} รายการ</p>
+                    <ul className="max-h-48 divide-y divide-amber-100 overflow-y-auto rounded border border-amber-200 bg-white">
+                        {action.documents.map(doc => (
+                            <li key={doc.id} className="flex items-center justify-between gap-2 px-2 py-1.5 text-xs">
+                                <span className="truncate text-ink-navy" title={doc.filename}>{doc.filename}</span>
+                                <span className="shrink-0 rounded-full border border-hairline px-2 py-0.5 text-slate-gray">
+                                    {documentStatusLabel(doc.status)}
+                                </span>
+                            </li>
+                        ))}
+                    </ul>
+                </div>
+            )}
             <details className="mb-3">
                 <summary className="text-xs text-amber-600 cursor-pointer">Show arguments</summary>
                 <pre className="text-xs bg-white rounded p-2 mt-1 overflow-auto">{JSON.stringify(action.arguments, null, 2)}</pre>

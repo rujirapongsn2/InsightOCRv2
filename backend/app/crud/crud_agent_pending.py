@@ -6,8 +6,11 @@ from app.models.agent_pending_action import AgentPendingAction
 
 
 class CRUDAgentPending:
-    def create(self, db: Session, *, conversation_id: UUID, user_id: UUID, tool_name: str, tool_arguments: dict, description: Optional[str] = None, kind: str = "confirmation", expires_minutes: int = 5, run_id: Optional[UUID] = None) -> AgentPendingAction:
-        action = AgentPendingAction(conversation_id=conversation_id, user_id=user_id, run_id=run_id, tool_name=tool_name, tool_arguments=tool_arguments, description=description, status="pending", kind=kind, expires_at=datetime.now(timezone.utc) + timedelta(minutes=expires_minutes))
+    def create(self, db: Session, *, conversation_id: UUID, user_id: UUID, tool_name: str, tool_arguments: dict, description: Optional[str] = None, kind: str = "confirmation", expires_minutes: int = 5, run_id: Optional[UUID] = None, documents: Optional[list[dict]] = None) -> AgentPendingAction:
+        # `result` is empty until a confirmation is answered, so it carries the
+        # documents the user is shown, frozen when the action is created.
+        result = {"confirmation_documents": documents} if documents is not None else None
+        action = AgentPendingAction(conversation_id=conversation_id, user_id=user_id, run_id=run_id, tool_name=tool_name, tool_arguments=tool_arguments, description=description, status="pending", kind=kind, result=result, expires_at=datetime.now(timezone.utc) + timedelta(minutes=expires_minutes))
         db.add(action)
         db.commit()
         db.refresh(action)

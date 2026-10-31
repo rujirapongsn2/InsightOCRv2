@@ -1475,3 +1475,54 @@ Date: 2026-06-30
 - Manual check: open job2 -> starbuck.pdf. Expect badge "ข้อมูลไม่ครบ" (not
   "OCR degraded"), banner "ไม่พบ buyer — …", and no duplicate "รอตรวจ" chip
   beside "ยืนยันถูกต้อง" on `line_items`.
+
+## Agent generative UI (A2UI prototype)
+
+- The Jobs agent has a `render_ui` tool. It returns A2UI v0.9 messages
+  (`createSurface`, `updateComponents`, `updateDataModel`) for the catalog
+  `https://insightdoc.app/a2ui/catalogs/jobs/v1` (Column, Text, DocumentList,
+  Button). The chat renders a successful result inline instead of a tool card.
+  A result that does not parse stays a normal tool call.
+- Filenames and statuses in a surface come from the job's documents. Ids from
+  another job are dropped and reported. One malformed id rejects the whole
+  call (render_ui, `bulk_approve`, `bulk_reject`) with a corrective error.
+- render_ui data may hold only what components bind to. Pointers must lead
+  through objects only (no `/groups/0/docs`), a selection may not sit inside
+  the documents array, bound Text is a string of at most 2000 characters, and
+  the data object is capped at 100000 characters.
+- The model sees only a render_ui summary (`ok`, `surface_id`,
+  `document_count`, dropped ids). The stored tool result keeps `a2ui` for the
+  chat. A render_ui failure that the model fixes later in the run does not
+  count as a run failure.
+- Confirmations freeze their targets when they are created. `bulk_approve`
+  and `bulk_reject` are rewritten to the exact eligible `doc_ids` (this job,
+  `extraction_completed`, `min_confidence` applied). Execution changes at most
+  that set and reports anything no longer waiting in
+  `not_approved_doc_ids` / `not_rejected_doc_ids`. The confirmation's document
+  list is the frozen snapshot, stored in the pending action's `result` column
+  (no migration). If nothing is eligible, the agent gets the error and the user
+  is not asked.
+- Manual check: open a job with at least 3 documents in `extraction_completed`,
+  open the AI Agent tab and ask "หาเอกสารที่ยังไม่อนุมัติ". Expect a short text
+  answer and a selectable list with filename, status "รอตรวจ" and an optional
+  note. "เปิดดู" opens that document's preview.
+- With nothing selected, the approve button is disabled. Select 2 and click it.
+  The chat shows "อนุมัติเอกสาร 2 รายการที่เลือก" without the JSON block. While
+  a run is queued or running, the surface buttons are disabled. After the
+  click the surface shows "ส่งคำสั่งแล้ว" and its buttons stay disabled, also
+  after a page reload.
+- Expect one confirmation: "อนุมัติเอกสารที่รอตรวจ 2 รายการ", the 2 filenames
+  with Thai status labels, and the raw arguments under "Show arguments".
+  Confirm, then check that only those 2 documents became reviewed. Reject
+  instead and check that nothing changed.
+- Select 2 and click a reject button. Expect one `bulk_reject` confirmation for
+  both documents, not one per document.
+- Freeze check: ask "อนุมัติเอกสารที่รอตรวจทั้งหมด". While the confirmation is
+  open, upload or finish extracting another document. Confirm. Only the
+  documents listed in the dialog become reviewed.
+- Ask for a second panel. The older panel's buttons become disabled with
+  "แผงนี้ไม่ใช่แผงล่าสุด สถานะเอกสารอาจไม่เป็นปัจจุบัน".
+- Automated: `cd backend && SECRET_KEY=test python -m pytest test/test_agent_render_ui.py
+  test/test_agent_document_confirm.py test/test_agent_tools_reliability.py`
+  (Python 3.11) and `cd frontend && node --test test/a2ui.test.mjs`.
+- Not yet checked against a live model or in a browser.

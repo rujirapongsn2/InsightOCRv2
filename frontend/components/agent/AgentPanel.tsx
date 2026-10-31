@@ -3,9 +3,10 @@
 import { useState, useEffect, useRef, useCallback, type KeyboardEvent, type ReactNode } from "react"
 import { X, Plus, Trash2, Bot, ChevronDown, AlertTriangle, Loader2, Brain, Library, Sparkles, ListChecks, Check, Circle, ShieldCheck, ShieldAlert, FileText, GitCompare, CheckCircle2, Send, ArrowUpRight } from "lucide-react"
 import { getApiBaseUrl } from "@/lib/api"
+import { answeredSurfaceIds, latestSurfaceId, type SurfaceConversation } from "@/lib/a2ui"
 import AgentMessage from "./AgentMessage"
 import AgentToolCalls from "./AgentToolCalls"
-import ConfirmationDialog from "./ConfirmationDialog"
+import ConfirmationDialog, { type PendingAction } from "./ConfirmationDialog"
 import ThinkingIndicator from "./ThinkingIndicator"
 import SkillLibrary from "./SkillLibrary"
 import ChatInput from "@/components/chat/ChatInput"
@@ -55,13 +56,6 @@ interface AgentEvent {
     tool_name?: string
 }
 
-interface PendingAction {
-    pending_action_id: string
-    tool_name: string
-    description: string
-    arguments: any
-}
-
 interface AgentRun {
     id: string
     conversation_id: string
@@ -94,9 +88,11 @@ interface AgentPanelProps {
     jobId: string
     onClose?: () => void
     mode?: "overlay" | "inline"
+    /** Opens a document's review preview, for the "เปิดดู" link on agent surfaces. */
+    onOpenDocument?: (documentId: string) => void
 }
 
-export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPanelProps) {
+export default function AgentPanel({ jobId, onClose, mode = "overlay", onOpenDocument }: AgentPanelProps) {
     const isInline = mode === "inline"
     const [conversations, setConversations] = useState<Conversation[]>([])
     const [activeConversation, setActiveConversation] = useState<string | null>(null)
@@ -350,7 +346,7 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
             conversationId = conv.id
         }
         const userMsg = resolveOutgoingMessage(rawInput)
-        setInputValue("")
+        if (override === undefined) setInputValue("")
         setStreaming(true)
         setStreamText("")
         setEvents([])
@@ -421,6 +417,20 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
         }
     }
 
+    const surfaceConversation: SurfaceConversation = {
+        latestSurfaceId: latestSurfaceId([
+            ...messages.filter(msg => msg.role === "tool").map(msg => msg.tool_result),
+            ...events.filter(evt => evt.type === "tool_result").map(evt => evt.result),
+        ]),
+        answered: answeredSurfaceIds(messages.filter(msg => msg.role === "user").map(msg => msg.content || "")),
+        runActive: streaming || (activeRun !== null && ["queued", "running"].includes(activeRun.status)),
+    }
+    const surfaceProps = {
+        onSurfaceAction: (message: string) => { void sendMessage(message) },
+        surfaceConversation,
+        onOpenDocument,
+    }
+
     const parseToolArguments = (value: any) => {
         if (typeof value !== "string") return value || {}
         try {
@@ -481,6 +491,7 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
                     calls={calls}
                     results={persistedToolResultsMap}
                     conversationId={activeConversation || undefined}
+                    {...surfaceProps}
                 />
             )
         }
@@ -510,6 +521,7 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
                     calls={pendingCalls}
                     results={persistedToolResultsMap}
                     conversationId={activeConversation || undefined}
+                    {...surfaceProps}
                 />,
             )
             pendingCalls = []
@@ -894,6 +906,7 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay" }: AgentPa
                         results={toolResultsMap}
                         conversationId={activeConversation || undefined}
                         autoConfirmedIds={autoConfirmedIds}
+                        {...surfaceProps}
                     />
                 )}
                 {streaming && !streamText && events.filter(e => e.type === "tool_call").length === 0 && (
