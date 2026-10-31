@@ -124,6 +124,45 @@
                "Liberation Mono", "Courier New", monospace;
 }
 
+/* ─── Agent analytics (A2UI charts, deltas, risk badges) ──────────────────
+   Series slots are a fixed order validated with the dataviz palette checker
+   (adjacent CVD and normal-vision separation pass on #ffffff). Slots 3–5 are
+   below 3:1 on white, so charts always carry a legend or labels plus a table
+   view. Status text pairs are at least 4.7:1.
+   The app is light-only (layout sets data-theme="light"). Dark steps that
+   pass the same checks on #1f2023, for when the app gets a dark theme:
+   series #3987e5 #d95926 #199e70 #c98500 #d55181 #008300 #9085e9 #e66767,
+   good #57d6a3, bad #f98f87, neutral/muted #8f9199, grid #2c2c2a. */
+:root {
+  --viz-1: #1868db; --viz-2: #eb6834; --viz-3: #1baf7a; --viz-4: #eda100;
+  --viz-5: #e87ba4; --viz-6: #008300; --viz-7: #6250d6; --viz-8: #e34948;
+  --viz-surface: #ffffff;
+  --viz-grid: #e1e0d9;
+  --viz-muted: #6b6e76;
+  --viz-good: #216e4e;
+  --viz-bad: #ae2e24;
+  --viz-neutral: #6b6e76;
+  --viz-critical-bg: #ffd5d2; --viz-critical-fg: #93251d;
+  --viz-high-bg: #fedec8;     --viz-high-fg: #9e4c00;
+  --viz-medium-bg: #fce4a6;   --viz-medium-fg: #7f5f01;
+  --viz-low-bg: #f0f1f2;      --viz-low-fg: #505258;
+}
+
+@theme inline {
+  --color-viz-1: var(--viz-1); --color-viz-2: var(--viz-2); --color-viz-3: var(--viz-3); --color-viz-4: var(--viz-4);
+  --color-viz-5: var(--viz-5); --color-viz-6: var(--viz-6); --color-viz-7: var(--viz-7); --color-viz-8: var(--viz-8);
+  --color-viz-surface: var(--viz-surface);
+  --color-viz-grid: var(--viz-grid);
+  --color-viz-muted: var(--viz-muted);
+  --color-viz-good: var(--viz-good);
+  --color-viz-bad: var(--viz-bad);
+  --color-viz-neutral: var(--viz-neutral);
+  --color-viz-critical-bg: var(--viz-critical-bg); --color-viz-critical-fg: var(--viz-critical-fg);
+  --color-viz-high-bg: var(--viz-high-bg);         --color-viz-high-fg: var(--viz-high-fg);
+  --color-viz-medium-bg: var(--viz-medium-bg);     --color-viz-medium-fg: var(--viz-medium-fg);
+  --color-viz-low-bg: var(--viz-low-bg);           --color-viz-low-fg: var(--viz-low-fg);
+}
+
 @theme inline {
   --color-background:       var(--background);
   --color-foreground:       var(--foreground);

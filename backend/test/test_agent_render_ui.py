@@ -171,7 +171,7 @@ def test_model_supplied_filename_is_rejected(db):
 
 
 @pytest.mark.parametrize(("overrides", "expected"), [
-    ({"title": {"id": "title", "component": "Chart", "series": []}}, "unknown type 'Chart'"),
+    ({"title": {"id": "title", "component": "Map", "series": []}}, "unknown type 'Map'"),
     ({"root": None, "box": {"id": "box", "component": "Column", "children": ["title", "list", "approve"]}},
      'id "root"'),
     ({"root": {"id": "root", "component": "Column", "children": ["title", "ghost"]}},

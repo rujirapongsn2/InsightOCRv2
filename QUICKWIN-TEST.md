@@ -1526,3 +1526,64 @@ Date: 2026-06-30
   test/test_agent_document_confirm.py test/test_agent_tools_reliability.py`
   (Python 3.11) and `cd frontend && node --test test/a2ui.test.mjs`.
 - Not yet checked against a live model or in a browser.
+
+### Analytics components (same catalog id, additive)
+
+- New components: `Row` (tiles side by side, wraps on narrow widths),
+  `Metric` (number with an optional delta), `DataTable`, `Chart` (bar or
+  line, inline SVG), `RiskList` and `RiskBadge`.
+- A delta has a direction (▲ ▼ ▬) and a sentiment (good, bad, neutral). Color
+  follows the sentiment only, so "cost up" shows ▲ in red with "(แย่ลง)". The
+  direction is also read out as text for screen readers. The value sign must
+  match the direction: `up` needs a value of 0 or more, `down` 0 or less,
+  and `flat` exactly 0. Anything else is a corrective error.
+- DataTable columns take an optional `unit` (number, currency, percent and
+  delta columns) and `format` (delta columns only, number|currency|percent).
+  A delta column with `format: "currency", unit: "บาท"` shows "+25,000.00 บาท".
+- Server bounds: numbers must be finite, enums are enforced, strings are
+  capped, at most 500 rows x 12 columns, 8 series x 200 points, 50 risks.
+  Data keys that no component binds to are rejected. The 100000-character
+  data cap is unchanged.
+- Any `document_id` in table rows or risk items must be a document of the
+  job; otherwise the whole surface is rejected with a corrective error.
+- No binding may overlap a DocumentList `documents` pointer (the same path or
+  one nested in it), because the system replaces those rows. Bind the table
+  or text to a separate key such as `/rows`.
+- Each risk `quote` is checked against the document's OCR text with the same
+  normalization as `search_documents`: whitespace, case, and Thai versus
+  Arabic digits are ignored, so "ชำระภายใน 30 วัน" matches OCR text
+  "ชำระภายใน ๓๐ วัน". OCR text is read only for documents that a quote
+  cites. The server stores
+  `quote_verified`. A model that sends `quote_verified` itself, or a quote
+  without `document_id`, gets a corrective error. The model sees component
+  counts, risk counts per level, `quotes` and `unverified_quotes`.
+- A surface shows "ตัวเลขในแผงนี้ AI คำนวณจากข้อมูลที่ดึงจากเอกสาร
+  ควรตรวจทานก่อนนำไปใช้" only when a component reachable from root shows a
+  computed number: a Metric, a Chart, or a DataTable with a number,
+  currency, percent or delta column. A text-only table does not show it.
+- Manual check, numbers: ask "สรุปยอดรวมของเอกสารใน job นี้ เทียบกับเดือนก่อน".
+  Expect metric tiles with ▲/▼, a signed amount and "(แย่ลง)" / "(ดีขึ้น)",
+  plus the computed-numbers note.
+- Manual check, table and charts: ask for a comparison by vendor, a bar
+  chart by vendor or category, and a monthly trend. Numbers use Thai
+  grouping (1,234,567.89), dates use the Thai calendar (30 พ.ย. 2569), long
+  tables scroll inside the panel, and "ดูข้อมูลเป็นตาราง" opens the values
+  behind each chart. Bars show their value at the right; a chart with
+  several series has a legend. A line chart labels at most 5 x positions,
+  always the first and last, and adjacent labels never sit closer than one
+  step (6 months label ม.ค., มี.ค., มิ.ย.). Value ticks are compact (300K)
+  with "%" on percent charts; any other unit appears once above the axis.
+- Manual check, risks: upload a contract with OCR text and ask
+  "วิเคราะห์ความเสี่ยงของสัญญานี้". Expect counts per level (วิกฤต / สูง /
+  ปานกลาง / ต่ำ), items ordered from วิกฤต down, a quote with "พบในเอกสาร"
+  for verified quotes and "ไม่พบข้อความนี้ในเอกสาร ควรตรวจสอบ" for the rest,
+  and "เปิดดู" opening the cited document. The text answer mentions any
+  unverified quotes.
+- Phone width: at about 360px the tiles wrap, the table scrolls sideways
+  inside its box, and the page itself does not scroll sideways.
+- The app is light-only (`data-theme="light"`), so the panel stays light
+  when the OS is in dark mode.
+- Automated: add `test/test_agent_render_ui_analytics.py` to the pytest
+  command above. The frontend tests are in `test/a2ui.test.mjs`.
+- Rendered with headless Chrome from static markup at 360px and 860px.
+  Not yet checked in the running app or against a live model.

@@ -6,36 +6,22 @@ from typing import Any
 
 from datetime import datetime, timezone
 import json
-import re
-import unicodedata
 
 from app.agent.tools.registry import ToolDef, tool_registry
 from app.models.document import Document
 from app.utils.activity_logger import log_activity
-
-
-_THAI_DIGIT_TRANSLATION = str.maketrans("๐๑๒๓๔๕๖๗๘๙", "0123456789")
-
-
-def normalize_search_text(value: object) -> str:
-    """Normalize Thai/Arabic digits and whitespace for document search."""
-    text = unicodedata.normalize("NFKC", str(value or "")).translate(_THAI_DIGIT_TRANSLATION)
-    return re.sub(r"\s+", " ", text.casefold()).strip()
-
-
-def _compact_search_text(value: object) -> str:
-    return re.sub(r"\s+", "", normalize_search_text(value))
+from app.utils.search_text import compact_search_text, normalize_search_text
 
 
 def _search_snippets(text: str | None, normalized_query: str, limit: int = 3) -> list[str]:
     if not text or not normalized_query:
         return []
-    compact_query = _compact_search_text(normalized_query)
+    compact_query = compact_search_text(normalized_query)
     snippets: list[str] = []
     normalized_chars = []
     positions = []
     for position, char in enumerate(str(text)):
-        for normalized_char in _compact_search_text(char):
+        for normalized_char in compact_search_text(char):
             normalized_chars.append(normalized_char)
             positions.append(position)
     compact_text = "".join(normalized_chars)
@@ -114,22 +100,22 @@ async def _get_document_detail_handler(args: dict, context) -> dict:
 
 async def _search_documents_handler(args: dict, context) -> dict:
     query = normalize_search_text(args.get("query", ""))
-    compact_query = _compact_search_text(query)
+    compact_query = compact_search_text(query)
     docs = context.db.query(Document).filter(Document.job_id == context.job_id).all()
     results = []
     for d in docs:
         score = 0
         matched_sources: list[str] = []
         snippets = _search_snippets(d.ocr_text, query)
-        filename_match = bool(compact_query and compact_query in _compact_search_text(d.filename))
+        filename_match = bool(compact_query and compact_query in compact_search_text(d.filename))
         extracted_match = bool(
             compact_query
             and d.extracted_data
-            and compact_query in _compact_search_text(d.extracted_data)
+            and compact_query in compact_search_text(d.extracted_data)
         )
         reviewed_match = bool(
             compact_query and isinstance(d.reviewed_data, (dict, list, str))
-            and compact_query in _compact_search_text(d.reviewed_data)
+            and compact_query in compact_search_text(d.reviewed_data)
         )
         ocr_match = bool(snippets)
         if filename_match:
