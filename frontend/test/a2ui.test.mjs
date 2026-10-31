@@ -1,7 +1,9 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { existsSync, readFileSync } from "node:fs"
+import { spawn } from "node:child_process"
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
 import { createRequire } from "node:module"
+import os from "node:os"
 import { fileURLToPath } from "node:url"
 import path from "node:path"
 import vm from "node:vm"
@@ -223,44 +225,109 @@ test("a document list shows database rows and its buttons need a selection", () 
   assert.doesNotMatch(empty, /เปิดดู/)
   assert.match(render(panel("show_documents"), { onOpenDocument: () => {} }), /เปิดดู/)
 
+  // A click is a structured request; the server writes the text the chat shows.
   const surface = selecting([first.document_id, second.document_id])
-  const action = a2ui.buildAction(surface, surface.components.approve, surface.dataModel, "2026-10-31T00:00:00.000Z")
-  assert.deepEqual(clone(action), {
-    name: "approve_documents", surfaceId: "jobs-show-documents", sourceComponentId: "approve",
-    timestamp: "2026-10-31T00:00:00.000Z", context: { document_ids: [first.document_id, second.document_id] },
+  assert.deepEqual(clone(a2ui.buildAction(surface, surface.components.approve, surface.dataModel)), {
+    surface_id: "jobs-show-documents", name: "approve_documents", source_component_id: "approve",
+    document_ids: [first.document_id, second.document_id],
   })
-  const message = a2ui.actionMessage(action, "อนุมัติที่เลือก")
-  assert.ok(message.startsWith("อนุมัติเอกสาร 2 รายการที่เลือก\n\n```a2ui-action\n"))
-  assert.equal(a2ui.visibleUserText(message), "อนุมัติเอกสาร 2 รายการที่เลือก")
-  assert.deepEqual([...a2ui.answeredSurfaceIds([message, "x\n\n```a2ui-action\nnot json\n```"])], ["jobs-show-documents"])
 })
 
-test("only the newest unanswered surface keeps working buttons", () => {
-  const withId = (id) => {
-    const result = clone(fixture("show_documents").result)
+// ── Server-side surface state ───────────────────────────────────────────────
+
+const GENERATED_AT = "2026-10-31T07:05:00+00:00"
+const state = (status, actionable = true) => ({ status, actionable, generatedAt: GENERATED_AT })
+
+test("panel buttons work only while the server keeps the panel active and no run is busy", () => {
+  const availability = (value, runActive = false) => clone(a2ui.surfaceAvailability(value, runActive))
+  assert.deepEqual(availability(state("active")), { actionable: true, notes: [], generatedAt: GENERATED_AT })
+  assert.deepEqual(availability(state("active"), true), { actionable: false, notes: [], generatedAt: GENERATED_AT })
+  assert.deepEqual(availability(state("answered")).notes, [a2ui.SURFACE_NOTES.answered])
+  assert.deepEqual(availability(state("superseded")).notes, [a2ui.SURFACE_NOTES.superseded])
+  assert.equal(availability(state("answered")).actionable || availability(state("superseded")).actionable, false)
+  assert.deepEqual(availability(undefined), { actionable: false, notes: [], generatedAt: null })
+  for (const status of ["active", "answered", "superseded"]) {
+    assert.deepEqual(availability(state(status, false)).notes, [], `analytics panel, ${status}`)
+  }
+})
+
+test("surface states are parsed from the API and malformed entries are dropped", () => {
+  const parsed = a2ui.parseSurfaceStates({
+    "jobs-a": { status: "superseded", actionable: true, generated_at: GENERATED_AT },
+    "jobs-b": { status: "stale", actionable: true, generated_at: GENERATED_AT },
+    "jobs-c": { status: "active", actionable: "yes", generated_at: GENERATED_AT },
+  })
+  assert.deepEqual(clone(parsed), { "jobs-a": state("superseded") })
+  assert.deepEqual(clone(a2ui.parseSurfaceStates(null)), {})
+})
+
+test("each panel shows when its data was computed, in the Buddhist era", () => {
+  assert.equal(format.formatGeneratedAt(GENERATED_AT, "Asia/Bangkok"), "ข้อมูล ณ 31 ต.ค. 2569 14:05")
+  assert.equal(format.formatGeneratedAt("2026-01-01T16:59:00Z", "Asia/Bangkok"), "ข้อมูล ณ 1 ม.ค. 2569 23:59")
+})
+
+test("the chat renders each panel from the server's state, not from which panel came last", () => {
+  const withId = (tool, id) => {
+    const result = clone(fixture(tool).result)
     for (const message of result.a2ui) Object.values(message).find((v) => typeof v === "object").surfaceId = id
-    result.a2ui[2].updateDataModel.value.selected = [result.a2ui[2].updateDataModel.value.documents[0].document_id]
+    if (tool === "show_documents") {
+      result.a2ui[2].updateDataModel.value.selected = [result.a2ui[2].updateDataModel.value.documents[0].document_id]
+    }
     return result
   }
-  assert.equal(a2ui.latestSurfaceId([withId("jobs-old"), { ok: true, rows: [] }, withId("jobs-new"), { ok: false }]), "jobs-new")
-  const idle = { latestSurfaceId: "jobs-new", answered: new Set(["jobs-old"]), runActive: false }
-  const availability = (id, conversation) => clone(a2ui.surfaceAvailability(id, conversation))
-  assert.deepEqual(availability("jobs-new", idle), { actionable: true, notes: [] })
-  assert.deepEqual(availability("jobs-old", idle),
-    { actionable: false, notes: [a2ui.SURFACE_NOTES.answered, a2ui.SURFACE_NOTES.outdated] })
-  assert.equal(availability("jobs-new", { ...idle, runActive: true }).actionable, false)
-
   const AgentToolCalls = load(path.join(root, "components/agent/AgentToolCalls.tsx")).default
   const html = renderToStaticMarkup(createElement(AgentToolCalls, {
-    calls: [{ id: "c1", name: "show_documents", arguments: {} }, { id: "c2", name: "show_documents", arguments: {} }],
-    results: { c1: withId("jobs-old"), c2: withId("jobs-new") },
+    calls: [{ id: "c1", name: "show_documents", arguments: {} }, { id: "c2", name: "show_documents", arguments: {} },
+      { id: "c3", name: "show_metrics", arguments: {} }],
+    results: { c1: withId("show_documents", "jobs-old"), c2: withId("show_documents", "jobs-new"),
+      c3: withId("show_metrics", "jobs-metrics") },
     onSurfaceAction: () => {},
-    surfaceConversation: { ...idle, answered: new Set() },
+    // The metrics panel came last, yet the server keeps the newer document list active.
+    surfaceConversation: { runActive: false, states: {
+      "jobs-old": state("superseded"), "jobs-new": state("active"), "jobs-metrics": state("active", false) } },
   }))
-  const [older, newer] = html.split('data-surface-id="jobs-new"')
+  const [older, rest] = html.split('data-surface-id="jobs-new"')
+  const [newer, metrics] = rest.split('data-surface-id="jobs-metrics"')
   assert.match(older, /<button[^>]*disabled=""[^>]*>อนุมัติที่เลือก<\/button>/)
-  assert.match(older, /สถานะเอกสารอาจไม่เป็นปัจจุบัน/)
+  assert.match(older, /ไม่ใช่แผงล่าสุด/)
   assert.doesNotMatch(newer, /disabled=""[^>]*>อนุมัติที่เลือก/)
+  assert.doesNotMatch(newer, /ไม่ใช่แผงล่าสุด|ส่งคำสั่งแล้ว/)
+  assert.doesNotMatch(metrics, /ไม่ใช่แผงล่าสุด|ส่งคำสั่งแล้ว/)
+  assert.equal(html.match(/ข้อมูล ณ /g).length, 3)
+})
+
+// ── Confirmation and history ────────────────────────────────────────────────
+
+const conversation = load(path.join(root, "lib/agentConversation.ts"))
+const request = (status) => ({ pending_action_id: "p1", status, tool_name: "bulk_approve",
+  description: "อนุมัติเอกสารที่รอตรวจ 2 รายการ", arguments: { doc_ids: ["d1", "d2"] } })
+
+test("the confirmation follows the polled request: shown while pending, timed out when expired, gone once answered", () => {
+  const ConfirmationDialog = load(path.join(root, "components/agent/ConfirmationDialog.tsx")).default
+  const dialog = (status) => {
+    const shown = conversation.shownConfirmation(request(status))
+    return shown && renderToStaticMarkup(createElement(ConfirmationDialog, { action: shown, onConfirm: () => {}, onReject: () => {} }))
+  }
+  assert.match(dialog("pending"), /Confirm/)
+  assert.match(dialog("pending"), /Reject/)
+  assert.match(dialog("expired"), /หมดเวลา/)
+  assert.doesNotMatch(dialog("expired"), /Confirm|Reject/)
+  assert.equal(dialog("confirmed"), null)
+  assert.equal(dialog("rejected"), null)
+  assert.equal(conversation.shownConfirmation(null), null)
+})
+
+test("a reloaded newest page keeps the earlier pages the user loaded", () => {
+  const ids = (list) => clone(list.map((m) => m.id))
+  const m = (id) => ({ id })
+  const loaded = [m("a"), m("b"), m("c"), m("d")]
+  const kept = conversation.mergeNewestPage(loaded, false, [m("c"), m("d"), m("e")], true)
+  assert.deepEqual(ids(kept.messages), ["a", "b", "c", "d", "e"])
+  assert.equal(kept.hasMore, false)
+  const apart = conversation.mergeNewestPage(loaded, false, [m("x"), m("y")], true)
+  assert.deepEqual(ids(apart.messages), ["x", "y"])
+  assert.equal(apart.hasMore, true)
+  assert.deepEqual(ids(conversation.mergeNewestPage(loaded, true, [], false).messages), [])
 })
 
 // ── Boundary ────────────────────────────────────────────────────────────────
@@ -285,7 +352,7 @@ test("an older v1 panel in history falls back to the ordinary tool-call entry", 
   const html = renderToStaticMarkup(createElement(AgentToolCalls, {
     calls: [{ id: "c1", name: "render_ui", arguments: {} }],
     results: { c1: V1_RESULT },
-    surfaceConversation: { latestSurfaceId: null, answered: new Set(), runActive: false },
+    surfaceConversation: { states: {}, runActive: false },
   }))
   assert.doesNotMatch(html, /data-surface-id/)
   assert.match(html, />render_ui</)
@@ -309,11 +376,89 @@ test("a panel outside the v2 catalog is not rendered", () => {
 test("the confirmation names the documents it will change", () => {
   const ConfirmationDialog = load(path.join(root, "components/agent/ConfirmationDialog.tsx")).default
   const named = renderToStaticMarkup(createElement(ConfirmationDialog, {
-    action: { pending_action_id: "p1", tool_name: "bulk_approve", description: "อนุมัติเอกสารที่รอตรวจ 2 รายการ",
+    action: { pending_action_id: "p1", status: "pending", tool_name: "bulk_approve", description: "อนุมัติเอกสารที่รอตรวจ 2 รายการ",
       arguments: { doc_ids: ["d1", "d2"] }, documents: [
         { id: "d1", filename: "invoice-01.pdf", status: "extraction_completed" },
         { id: "d2", filename: "receipt-07.pdf", status: "reviewed" }] },
     onConfirm: () => {}, onReject: () => {} }))
   assert.match(named, /invoice-01\.pdf<\/span><span[^>]*>รอตรวจ</)
   assert.match(named, /receipt-07\.pdf<\/span><span[^>]*>อนุมัติแล้ว</)
+})
+
+// ── Layout boundary ─────────────────────────────────────────────────────────
+
+const CHROME = process.env.CHROME_PATH || "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+const SURFACE_ROOT = "relative mx-3 min-w-0 overflow-x-clip"
+
+/** Drive headless Chrome over the DevTools protocol; its window cannot be narrower than 500px, an emulated viewport can. */
+async function withChrome(run) {
+  const profile = mkdtempSync(path.join(os.tmpdir(), "a2ui-chrome-"))
+  const chrome = spawn(CHROME, ["--headless=new", "--disable-gpu", "--remote-debugging-port=0", `--user-data-dir=${profile}`,
+    "about:blank"], { stdio: "ignore" })
+  try {
+    const portFile = path.join(profile, "DevToolsActivePort")
+    for (let tries = 0; !existsSync(portFile) || !readFileSync(portFile, "utf8").includes("\n"); tries++) {
+      if (tries > 100) throw new Error("Chrome did not start")
+      await new Promise((resolve) => setTimeout(resolve, 100))
+    }
+    const port = readFileSync(portFile, "utf8").split("\n")[0]
+    const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()
+    const socket = new WebSocket(targets.find((target) => target.type === "page").webSocketDebuggerUrl)
+    await new Promise((resolve, reject) => { socket.onopen = resolve; socket.onerror = reject })
+    const waiting = new Map()
+    const events = new Map()
+    socket.onmessage = ({ data }) => {
+      const message = JSON.parse(data)
+      if (waiting.has(message.id)) waiting.get(message.id)(message.result)
+      if (events.has(message.method)) events.get(message.method)(message.params)
+    }
+    let nextId = 0
+    const send = (method, params = {}) => new Promise((resolve) => {
+      const id = ++nextId
+      waiting.set(id, resolve)
+      socket.send(JSON.stringify({ id, method, params }))
+    })
+    const once = (method) => new Promise((resolve) => events.set(method, resolve))
+    try {
+      return await run({ send, once })
+    } finally {
+      socket.close()
+    }
+  } finally {
+    chrome.kill()
+  }
+}
+
+/** document.documentElement's scrollWidth and clientWidth with markup in a chat-like column, at a 360px viewport. */
+async function pageWidths(markup) {
+  const body = `<div class="flex h-screen flex-col"><div class="flex-1 overflow-y-auto py-4 space-y-3">${markup}</div></div>`
+  const { compile } = require("@tailwindcss/node")
+  const candidates = [...new Set([...body.matchAll(/class="([^"]*)"/g)].flatMap((m) => m[1].split(/\s+/)))]
+  const compiler = await compile(readFileSync(path.join(root, "app/globals.css"), "utf8"),
+    { base: path.join(root, "app"), onDependency: () => {} })
+  const file = path.join(mkdtempSync(path.join(os.tmpdir(), "a2ui-layout-")), "page.html")
+  writeFileSync(file, `<!doctype html><html lang="th"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><style>${compiler.build(candidates)}</style></head>
+<body style="margin:0">${body}</body></html>`)
+  return withChrome(async ({ send, once }) => {
+    await send("Emulation.setDeviceMetricsOverride", { width: 360, height: 800, deviceScaleFactor: 1, mobile: false })
+    await send("Page.enable")
+    const loaded = once("Page.loadEventFired")
+    await send("Page.navigate", { url: `file://${file}` })
+    await loaded
+    const { result } = await send("Runtime.evaluate", { returnByValue: true,
+      expression: "({ scroll: document.documentElement.scrollWidth, client: document.documentElement.clientWidth })" })
+    return result.value
+  })
+}
+
+test("no panel widens a 360px page; the surface root is the boundary", { skip: !existsSync(CHROME) && "Chrome not found" }, async () => {
+  const markup = TOOLS.map((tool) => render(panel(tool), { onOpenDocument: () => {}, generatedAt: GENERATED_AT })).join("")
+  assert.ok(markup.includes(`class="${SURFACE_ROOT} `), "the surface root carries the containment classes")
+  const contained = await pageWidths(markup)
+  assert.equal(contained.client, 360)
+  assert.ok(contained.scroll <= contained.client, `page is ${contained.scroll}px wide at 360px`)
+  // The same panels without the root containment do widen the page: the check sees the defect it guards.
+  const uncontained = await pageWidths(markup.replaceAll(SURFACE_ROOT, "mx-3"))
+  assert.ok(uncontained.scroll > uncontained.client, `without containment the page stays ${uncontained.scroll}px`)
 })

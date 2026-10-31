@@ -570,7 +570,7 @@ tool_registry.register(ToolDef(
     parameters_schema={"type": "object", "properties": {
         "min_confidence": {"type": "number", "minimum": 0, "maximum": 1},
         "doc_ids": {"type": "array", "items": {"type": "string"}, "maxItems": 200,
-                    "description": "Approve only these documents, e.g. the ids from an a2ui-action"},
+                    "description": "Approve only these documents, e.g. the document_ids of a [ui_action]"},
     }, "required": []},
     handler=_bulk_approve_handler,
     requires_confirmation=True,
@@ -579,7 +579,7 @@ tool_registry.register(ToolDef(
 tool_registry.register(ToolDef(
     name="bulk_reject", category="document",
     description="Reject the given documents of the job that are waiting for review (extraction_completed), "
-                "e.g. the ids from an a2ui-action. Documents already approved or rejected are left unchanged and "
+                "e.g. the document_ids of a [ui_action]. Documents already approved or rejected are left unchanged and "
                 "reported; use reject_document with reverse_previous_decision to change an earlier decision.",
     parameters_schema={"type": "object", "properties": {
         "doc_ids": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 200,

@@ -8,7 +8,7 @@ import {
     type ChatToolCallStatus,
 } from "@astryxdesign/core/Chat"
 import { downloadAgentFile, normalizeAgentFilePath } from "@/lib/agent-download"
-import { surfaceAvailability, surfaceFromToolResult, type SurfaceConversation } from "@/lib/a2ui"
+import { surfaceAvailability, surfaceFromToolResult, type SurfaceConversation, type UiActionRequest } from "@/lib/a2ui"
 import A2uiSurface from "./a2ui/A2uiSurface"
 
 type JsonRecord = Record<string, unknown>
@@ -26,9 +26,9 @@ interface AgentToolCallsProps {
     results?: Record<string, unknown>
     conversationId?: string
     autoConfirmedIds?: Set<string>
-    /** Sends a surface button click to the agent as a user message. */
-    onSurfaceAction?: (message: string) => void
-    /** Decides which surface keeps working buttons; without it every surface is read-only. */
+    /** Sends a surface button click to the server. */
+    onSurfaceAction?: (action: UiActionRequest) => void
+    /** The server's state of each panel; without it every surface is read-only. */
     surfaceConversation?: SurfaceConversation
     onOpenDocument?: (documentId: string) => void
 }
@@ -245,9 +245,8 @@ export default function AgentToolCalls({
             {listed.length > 0 && toolList(listed)}
             {entries.map(({ item, surface }, index) => {
                 if (!surface) return null
-                const availability = surfaceConversation
-                    ? surfaceAvailability(surface.surfaceId, surfaceConversation)
-                    : { actionable: false, notes: [] }
+                const availability = surfaceAvailability(
+                    surfaceConversation?.states[surface.surfaceId], surfaceConversation?.runActive ?? false)
                 return (
                     <A2uiSurface
                         key={item.key ?? index}
@@ -255,6 +254,7 @@ export default function AgentToolCalls({
                         fallback={toolList([item])}
                         actionsDisabled={!availability.actionable}
                         notes={availability.notes}
+                        generatedAt={availability.generatedAt}
                         onAction={onSurfaceAction}
                         onOpenDocument={onOpenDocument}
                     />

@@ -80,3 +80,11 @@ export function describeChange(change: Change, measure: Measure): ChangeView {
         sentiment: SENTIMENT_WORD[change.sentiment],
     }
 }
+
+/** When a panel's data was computed: "ข้อมูล ณ 31 ต.ค. 2569 14:05", in the viewer's time zone unless one is given. */
+export function formatGeneratedAt(iso: string, timeZone?: string): string {
+    const format = new Intl.DateTimeFormat("th-TH", {
+        day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit", hourCycle: "h23", timeZone,
+    })
+    return `ข้อมูล ณ ${format.format(new Date(iso))}`
+}

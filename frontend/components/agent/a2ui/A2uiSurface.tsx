@@ -3,8 +3,8 @@
 import { Component, useState, type ReactNode } from "react"
 import { Button } from "@/components/ui/button"
 import { Chart, DataTable, Metric, OpenDocumentButton, RiskList, Sources } from "@/components/agent/a2ui/analytics"
+import { formatGeneratedAt } from "@/lib/a2uiFormat"
 import {
-    actionMessage,
     buildAction,
     documentStatusLabel,
     hasEmptyBinding,
@@ -15,6 +15,7 @@ import {
     type ComponentType,
     type DataModel,
     type Surface,
+    type UiActionRequest,
 } from "@/lib/a2ui"
 
 export interface A2uiSurfaceProps {
@@ -24,8 +25,10 @@ export interface A2uiSurfaceProps {
     actionsDisabled?: boolean
     /** Short lines under the surface saying why its buttons are off. */
     notes?: string[]
-    /** Receives the user message a button click sends to the agent. */
-    onAction?: (message: string) => void
+    /** When the server computed the panel's data (ISO); shown as "ข้อมูล ณ ...". */
+    generatedAt?: string | null
+    /** Receives the click; the server checks it against the panel. */
+    onAction?: (action: UiActionRequest) => void
     onOpenDocument?: (documentId: string) => void
 }
 
@@ -34,7 +37,7 @@ interface RenderContext {
     data: DataModel
     setData: (path: string, value: unknown) => void
     actionsDisabled: boolean
-    onAction?: (message: string) => void
+    onAction?: (action: UiActionRequest) => void
     onOpenDocument?: (documentId: string) => void
     render: (id: string) => ReactNode
 }
@@ -126,8 +129,7 @@ const CATALOG: { [K in ComponentType]: (component: ComponentOf<K>, ctx: RenderCo
                 size="sm"
                 variant={component.variant === "primary" ? "default" : "outline"}
                 disabled={disabled}
-                onClick={() => ctx.onAction?.(actionMessage(
-                    buildAction(ctx.surface, component, ctx.data, new Date().toISOString()), component.label))}
+                onClick={() => ctx.onAction?.(buildAction(ctx.surface, component, ctx.data))}
             >
                 {component.label}
             </Button>
@@ -147,7 +149,7 @@ class SurfaceBoundary extends Component<{ fallback: ReactNode; children: ReactNo
     }
 }
 
-function SurfaceBody({ surface, actionsDisabled = false, notes = [], onAction, onOpenDocument }: Omit<A2uiSurfaceProps, "fallback">) {
+function SurfaceBody({ surface, actionsDisabled = false, notes = [], generatedAt, onAction, onOpenDocument }: Omit<A2uiSurfaceProps, "fallback">) {
     const [data, setDataModel] = useState<DataModel>(surface.dataModel)
     const ctx: RenderContext = {
         surface,
@@ -162,9 +164,14 @@ function SurfaceBody({ surface, actionsDisabled = false, notes = [], onAction, o
             return render(component, ctx)
         },
     }
+    // The root is the layout boundary: the containing block of every positioned
+    // descendant, clipping whatever overflows sideways, so no component can widen
+    // the chat. Wide content scrolls inside its own wrapper.
     return (
-        <div className="mx-3 rounded-lg border border-hairline bg-white p-3" data-surface-id={surface.surfaceId}>
+        <div className="relative mx-3 min-w-0 overflow-x-clip rounded-lg border border-hairline bg-white p-3"
+            data-surface-id={surface.surfaceId}>
             {ctx.render("root")}
+            {generatedAt && <p className="mt-2 text-xs text-slate-gray">{formatGeneratedAt(generatedAt)}</p>}
             {notes.map(note => <p key={note} className="mt-2 text-xs text-slate-gray">{note}</p>)}
         </div>
     )

@@ -7,7 +7,6 @@
 
 export const A2UI_VERSION = "v0.9"
 export const JOBS_CATALOG_ID = "https://insightdoc.app/a2ui/catalogs/jobs/v2"
-export const ACTION_FENCE = "a2ui-action"
 
 export const RISK_LEVELS = ["critical", "high", "medium", "low"] as const
 export const MAX_CHART_SERIES = 8
@@ -133,12 +132,12 @@ export interface Surface {
     dataModel: DataModel
 }
 
-export interface A2uiAction {
+/** A button click as the browser sends it; the server checks it against the panel it recorded. */
+export interface UiActionRequest {
+    surface_id: string
     name: ActionEventName
-    surfaceId: string
-    sourceComponentId: string
-    timestamp: string
-    context: ActionContext
+    source_component_id: string
+    document_ids: string[]
 }
 
 type Raw = Record<string, unknown>
@@ -462,34 +461,14 @@ export function hasEmptyBinding(context: ActionContext, data: DataModel): boolea
     })
 }
 
-export function buildAction(surface: Surface, button: ComponentOf<"Button">, data: DataModel, timestamp: string): A2uiAction {
+export function buildAction(surface: Surface, button: ComponentOf<"Button">, data: DataModel): UiActionRequest {
+    const ids = resolveContext(button.action.event.context, data).document_ids
     return {
+        surface_id: surface.surfaceId,
         name: button.action.event.name,
-        surfaceId: surface.surfaceId,
-        sourceComponentId: button.id,
-        timestamp,
-        context: resolveContext(button.action.event.context, data),
+        source_component_id: button.id,
+        document_ids: Array.isArray(ids) ? ids.filter(isString) : [],
     }
-}
-
-function describeAction(action: A2uiAction, label: string): string {
-    const list = Object.values(action.context).find(Array.isArray)
-    if (!list) return label
-    return action.name === "approve_documents"
-        ? `อนุมัติเอกสาร ${list.length} รายการที่เลือก`
-        : `ปฏิเสธเอกสาร ${list.length} รายการที่เลือก`
-}
-
-/** The user message a button click sends: a readable line, then the action for the agent. */
-export function actionMessage(action: A2uiAction, label: string): string {
-    return `${describeAction(action, label)}\n\n\`\`\`${ACTION_FENCE}\n${JSON.stringify(action)}\n\`\`\``
-}
-
-const ACTION_BLOCK_RE = new RegExp("\\n*```" + ACTION_FENCE + "\\n([\\s\\S]*?)\\n```\\s*$")
-
-/** The readable part of a user message, without its a2ui-action block. */
-export function visibleUserText(content: string): string {
-    return content.replace(ACTION_BLOCK_RE, "")
 }
 
 export const DOCUMENT_STATUS_LABEL: Record<string, string> = {
@@ -507,49 +486,57 @@ export function documentStatusLabel(status: string): string {
     return DOCUMENT_STATUS_LABEL[status] ?? status.replace(/_/g, " ")
 }
 
-/** The surfaces whose buttons the user already clicked, read from the a2ui-action blocks of their messages. */
-export function answeredSurfaceIds(userMessages: readonly string[]): Set<string> {
-    const ids = new Set<string>()
-    for (const content of userMessages) {
-        const block = ACTION_BLOCK_RE.exec(content)?.[1]
-        if (!block) continue
-        try {
-            const action: unknown = JSON.parse(block)
-            if (isRecord(action) && isString(action.surfaceId)) ids.add(action.surfaceId)
-        } catch {
-            // Not an action this panel sent; it answers nothing.
-        }
-    }
-    return ids
+// ── Server-side surface state ───────────────────────────────────────────────
+
+const SURFACE_STATUSES = ["active", "answered", "superseded"] as const
+export type SurfaceStatus = (typeof SURFACE_STATUSES)[number]
+
+/** What the server decided about a panel; the browser only renders it. */
+export interface SurfaceState {
+    status: SurfaceStatus
+    /** The panel offers buttons; only such a panel is ever answered or superseded. */
+    actionable: boolean
+    /** When the panel's data was computed (ISO). */
+    generatedAt: string
 }
 
-/** The newest panel among tool results given in conversation order. */
-export function latestSurfaceId(results: readonly unknown[]): string | null {
-    for (let index = results.length - 1; index >= 0; index--) {
-        const surface = surfaceFromToolResult(results[index])
-        if (surface) return surface.surfaceId
+/** The conversation's "surfaces" map from the API; entries that do not parse are left out. */
+export function parseSurfaceStates(raw: unknown): Record<string, SurfaceState> {
+    const states: Record<string, SurfaceState> = {}
+    if (!isRecord(raw)) return states
+    for (const [surfaceId, value] of Object.entries(raw)) {
+        if (!isRecord(value)) continue
+        const status = oneOf(value.status, SURFACE_STATUSES)
+        if (status && typeof value.actionable === "boolean" && isString(value.generated_at)) {
+            states[surfaceId] = { status, actionable: value.actionable, generatedAt: value.generated_at }
+        }
     }
-    return null
+    return states
 }
 
 export interface SurfaceConversation {
-    latestSurfaceId: string | null
-    answered: ReadonlySet<string>
+    states: Readonly<Record<string, SurfaceState>>
     /** A run is queued or running; a click now would start a second one. */
     runActive: boolean
 }
 
 export const SURFACE_NOTES = {
     answered: "ส่งคำสั่งแล้ว",
-    outdated: "แผงนี้ไม่ใช่แผงล่าสุด สถานะเอกสารอาจไม่เป็นปัจจุบัน",
+    superseded: "แผงนี้ไม่ใช่แผงล่าสุด สถานะเอกสารอาจไม่เป็นปัจจุบัน",
 } as const
 
-/** Only the newest surface stays actionable, until it is answered, and never while a run is active. */
-export function surfaceAvailability(surfaceId: string, conversation: SurfaceConversation): { actionable: boolean; notes: string[] } {
-    const answered = conversation.answered.has(surfaceId)
-    const outdated = surfaceId !== conversation.latestSurfaceId
-    const notes: string[] = []
-    if (answered) notes.push(SURFACE_NOTES.answered)
-    if (outdated) notes.push(SURFACE_NOTES.outdated)
-    return { actionable: !answered && !outdated && !conversation.runActive, notes }
+export interface SurfaceAvailability {
+    actionable: boolean
+    notes: string[]
+    generatedAt: string | null
+}
+
+/**
+ * Buttons work only on a panel the server keeps active, and never while a run is active.
+ * A panel without buttons is never stale-for-action, so it never gets a note.
+ */
+export function surfaceAvailability(state: SurfaceState | undefined, runActive: boolean): SurfaceAvailability {
+    if (!state) return { actionable: false, notes: [], generatedAt: null }
+    const notes = state.actionable && state.status !== "active" ? [SURFACE_NOTES[state.status]] : []
+    return { actionable: state.actionable && state.status === "active" && !runActive, notes, generatedAt: state.generatedAt }
 }
