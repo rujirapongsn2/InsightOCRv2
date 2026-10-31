@@ -348,16 +348,60 @@ async def _reject_document_handler(args: dict, context) -> dict:
     return result
 
 
-async def _bulk_approve_handler(args: dict, context) -> dict:
-    q = context.db.query(Document).filter(Document.job_id == context.job_id, Document.status == "extraction_completed")
+def _parse_doc_ids(raw) -> list | None:
+    """UUIDs for a list of ids; None when no list was given, [] when any id is malformed."""
+    import uuid as _uuid
+
+    if raw is None:
+        return None
+    try:
+        return [_uuid.UUID(str(item)) for item in raw]
+    except (ValueError, TypeError):
+        return []
+
+
+def _bulk_approve_targets(db, job_id, args: dict) -> list:
+    """The documents bulk_approve would approve now; the confirmation lists the same set."""
+    q = db.query(Document).filter(Document.job_id == job_id, Document.status == "extraction_completed")
     if args.get("min_confidence"):
         q = q.filter(Document.extraction_confidence >= args["min_confidence"])
-    docs = q.all()
+    doc_ids = _parse_doc_ids(args.get("doc_ids"))
+    if doc_ids is not None:
+        q = q.filter(Document.id.in_(doc_ids))
+    return q.order_by(Document.filename).all()
+
+
+def _single_target(db, job_id, args: dict) -> list:
+    ids = _parse_doc_ids([args.get("doc_id")])
+    return db.query(Document).filter(Document.job_id == job_id, Document.id.in_(ids)).all() if ids else []
+
+
+# Tools whose confirmation lists the affected documents by name.
+CONFIRMATION_TARGETS = {
+    "approve_document": _single_target,
+    "reject_document": _single_target,
+    "bulk_approve": _bulk_approve_targets,
+}
+
+
+def confirmation_documents(db, job_id, tool_name: str, args: dict) -> list[dict] | None:
+    """Filename and status, read from this job's rows, of the documents an action affects."""
+    targets = CONFIRMATION_TARGETS.get(tool_name)
+    if targets is None or job_id is None:
+        return None
+    return [{"id": str(d.id), "filename": d.filename, "status": d.status} for d in targets(db, job_id, args or {})]
+
+
+async def _bulk_approve_handler(args: dict, context) -> dict:
+    if args.get("doc_ids") and not _parse_doc_ids(args["doc_ids"]):
+        return {"ok": False, "error": f"doc_ids must be document ids from list_documents: {args['doc_ids']}"}
+    docs = _bulk_approve_targets(context.db, context.job_id, args)
     if not docs:
         # "Approved 0 documents" used to be reported as a verified success.
         return {"ok": False, "nothing_to_approve": True, "approved_count": 0,
                 "error": "No documents are waiting for review" + (
-                    f" with confidence ≥ {args['min_confidence']}" if args.get("min_confidence") else "") + "; nothing was approved."}
+                    f" with confidence ≥ {args['min_confidence']}" if args.get("min_confidence") else "") + (
+                    " among the given doc_ids" if args.get("doc_ids") is not None else "") + "; nothing was approved."}
     target_ids = [d.id for d in docs]
     for d in docs:
         d.status = "reviewed"
@@ -382,7 +426,14 @@ async def _bulk_approve_handler(args: dict, context) -> dict:
             "expected": len(target_ids),
             "actual": persisted,
         }
-    return {"ok": True, "verified": True, "approved_count": persisted}
+    result = {"ok": True, "verified": True, "approved_count": persisted}
+    if args.get("doc_ids") is not None:
+        approved = {str(i) for i in target_ids}
+        skipped = [str(i) for i in _parse_doc_ids(args["doc_ids"]) if str(i) not in approved]
+        if skipped:
+            result["not_approved_doc_ids"] = skipped
+            result["note"] = "Not approved: not in this job or not waiting for review."
+    return result
 
 
 # ── Tool Registrations ──
@@ -454,8 +505,12 @@ tool_registry.register(ToolDef(
 
 tool_registry.register(ToolDef(
     name="bulk_approve", category="document",
-    description="Approve all extraction_completed documents in the job, optionally filtered by min confidence.",
-    parameters_schema={"type": "object", "properties": {"min_confidence": {"type": "number", "minimum": 0, "maximum": 1}}, "required": []},
+    description="Approve the job's extraction_completed documents: all of them, or only doc_ids when given, optionally filtered by min confidence.",
+    parameters_schema={"type": "object", "properties": {
+        "min_confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "doc_ids": {"type": "array", "items": {"type": "string"}, "maxItems": 200,
+                    "description": "Approve only these documents, e.g. the ids from an a2ui-action"},
+    }, "required": []},
     handler=_bulk_approve_handler,
     requires_confirmation=True,
 ))

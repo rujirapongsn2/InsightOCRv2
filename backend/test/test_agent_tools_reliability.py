@@ -25,6 +25,7 @@ def _jsonb_on_sqlite(element, compiler, **kw):
     return "JSON"
 
 
+from app.models.agent_conversation import AgentConversation
 from app.models.agent_pending_action import AgentPendingAction
 from app.models.agent_run import AgentRun
 from app.models.document import Document
@@ -34,7 +35,8 @@ from app.models.schema import DocumentSchema
 @pytest.fixture
 def db():
     engine = create_engine("sqlite://")
-    tables = [AgentPendingAction.__table__, AgentRun.__table__, Document.__table__, DocumentSchema.__table__]
+    tables = [AgentConversation.__table__, AgentPendingAction.__table__, AgentRun.__table__, Document.__table__,
+              DocumentSchema.__table__]
     AgentRun.metadata.create_all(engine, tables=tables)
     session = sessionmaker(bind=engine)()
     yield session

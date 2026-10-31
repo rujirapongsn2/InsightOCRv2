@@ -25,6 +25,8 @@ def requires_confirmation(tool_name: str, args: dict) -> bool:
 def describe_action(tool_name: str, args: dict) -> str:
     if tool_name == "approve_document":
         return f"อนุมัติเอกสาร {args.get('doc_id')}"
+    if tool_name == "bulk_approve" and isinstance(args.get("doc_ids"), list):
+        return f"อนุมัติเอกสาร {len(args['doc_ids'])} รายการที่เลือก"
     if tool_name == "bulk_approve":
         return f"อนุมัติเอกสารหลายชิ้นใน Job (criteria: {args})"
     if tool_name == "reject_document":
