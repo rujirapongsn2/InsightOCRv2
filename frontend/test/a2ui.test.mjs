@@ -330,6 +330,10 @@ test("a RiskList counts levels, sorts by severity and marks quote verification",
 test("analytics components with bad props fall back like any unknown component", () => {
   const badTiles = tiles.map((c) => (c.id === "cost" ? { ...c, delta: { value: 1, direction: "sideways", sentiment: "bad" } } : c))
   assert.equal(analytic(badTiles, { cost: 1 }), null)
+  const driftingFlat = tiles.map((c) => (c.id === "cost" ? { ...c, delta: { value: 0.4, direction: "flat", sentiment: "neutral" } } : c))
+  assert.equal(analytic(driftingFlat, { cost: 1 }), null)
+  const flat = tiles.map((c) => (c.id === "cost" ? { ...c, delta: { value: 0, direction: "flat", sentiment: "neutral" } } : c))
+  assert.match(render(analytic(flat, { cost: 1 })), /<span aria-hidden="true">▬<\/span><span class="sr-only">คงที่<\/span>/)
   assert.equal(analytic([column("b"), { id: "b", component: "RiskBadge", level: "severe" }], {}), null)
   assert.equal(analytic(chartComponent("pie", twoSeries), { points: [] }), null)
   const nine = Array.from({ length: 9 }, (_, i) => ({ key: `s${i}`, label: `s${i}` }))

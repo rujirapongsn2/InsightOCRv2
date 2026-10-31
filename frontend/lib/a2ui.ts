@@ -192,12 +192,19 @@ const optionalString = (value: unknown): string | undefined | null =>
 const stringChildren = (value: unknown): string[] | null =>
     Array.isArray(value) && value.every(c => typeof c === "string") ? value : null
 
+/** The values each direction allows, as the server checks them: "flat" is exactly no change. */
+const DIRECTION_ALLOWS: Record<Direction, (value: number) => boolean> = {
+    up: value => value >= 0,
+    down: value => value <= 0,
+    flat: value => value === 0,
+}
+
 export function parseDelta(value: unknown): Delta | null {
     if (!isRecord(value) || !isFiniteNumber(value.value)) return null
     const direction = DIRECTIONS.find(d => d === value.direction)
     const sentiment = SENTIMENTS.find(s => s === value.sentiment)
     const label = optionalString(value.label)
-    if (!direction || !sentiment || label === null) return null
+    if (!direction || !sentiment || label === null || !DIRECTION_ALLOWS[direction](value.value)) return null
     return { value: value.value, direction, sentiment, ...(label ? { label } : {}) }
 }
 

@@ -197,9 +197,11 @@ def _delta_problems(delta: Any, where: str) -> list[str]:
         _enum_problem(delta.get("sentiment"), f"{where}.sentiment", SENTIMENTS),
         _string_problem(delta.get("label"), f"{where}.label", MAX_LABEL_CHARS, required=False),
     )
-    if _is_number(value) and ((direction == "up" and value < 0) or (direction == "down" and value > 0)):
+    # "flat" means no change at all: a rounded-away change is still up or down, so flat needs exactly 0.
+    if _is_number(value) and ((direction == "up" and value < 0) or (direction == "down" and value > 0)
+                              or (direction == "flat" and value != 0)):
         errors.append(f'{where}: direction "{direction}" contradicts value {value}; '
-                      'use a value >= 0 for "up" and <= 0 for "down"')
+                      'use a value >= 0 for "up", <= 0 for "down", and exactly 0 for "flat"')
     return errors
 
 

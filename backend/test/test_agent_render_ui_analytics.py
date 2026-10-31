@@ -159,6 +159,11 @@ def test_risk_badge_alone_is_valid(db):
     (lambda: (METRICS[:2] + [{**METRICS[2], "delta": {"value": 5, "direction": "down", "sentiment": "good"}}, METRICS[3]],
               {"total": 1}),
      'direction "down" contradicts value 5'),
+    (lambda: (METRICS[:2] + [{**METRICS[2], "delta": {"value": 0.4, "direction": "flat", "sentiment": "neutral"}},
+                             METRICS[3]], {"total": 1}),
+     'direction "flat" contradicts value 0.4; use a value >= 0 for "up", <= 0 for "down", and exactly 0 for "flat"'),
+    (lambda: _table([_row(change={"value": -0.01, "direction": "flat", "sentiment": "neutral"})]),
+     'data "/rows/0/change": direction "flat" contradicts value -0.01'),
     (lambda: (METRICS, {"total": float("nan")}), 'data "/total" is shown by a Metric and must be a finite number'),
     (lambda: (METRICS, {"total": "1,200"}), 'data "/total" is shown by a Metric and must be a finite number'),
     (lambda: (METRICS[:3] + [{**METRICS[3], "value": float("inf")}], {"total": 1}),
@@ -196,6 +201,12 @@ def test_risk_badge_alone_is_valid(db):
 def test_invalid_analytics_are_corrective_errors(db, build, expected):
     components, data = build()
     _fails(_render(db, components, data), expected)
+
+
+def test_flat_delta_with_zero_change_is_valid(db):
+    flat = {"value": 0, "direction": "flat", "sentiment": "neutral"}
+    assert _render(db, METRICS[:2] + [{**METRICS[2], "delta": flat}, METRICS[3]], {"total": 1})["ok"] is True
+    assert _render(db, *_table([_row(change=flat)]))["ok"] is True
 
 
 def test_analytics_data_holds_only_what_components_bind_to(db):
