@@ -10,8 +10,8 @@ Data (idempotent; a second run changes nothing):
 - A conversation title cut from such a message gets the readable line.
 - Every catalog-v2 panel in a tool result gets an agent_surfaces row. A panel
   is "answered" when a click names it; otherwise a panel with buttons that has
-  a newer panel after it in its conversation is "superseded"; otherwise it is
-  "active".
+  a newer panel with buttons after it in its conversation is "superseded";
+  otherwise it is "active".
 """
 from __future__ import annotations
 
@@ -133,16 +133,17 @@ def surface_rows(panels: list[tuple[Any, datetime, str, Any]], answered: set[str
     """Rows for agent_surfaces from (conversation_id, created_at, tool_name, tool_result), oldest first.
 
     The same rule the server applies going forward: a click answers its panel;
-    a newer panel in the conversation supersedes a panel with buttons.
+    a newer panel with buttons in the conversation supersedes an older one.
     """
     rows: list[dict] = []
     for conversation_id, created_at, tool_name, result in panels:
         surface = panel_surface(result)
         if surface is None:
             continue
-        for older in rows:
-            if older["conversation_id"] == conversation_id and older["status"] == "active" and older["actions"]:
-                older["status"] = "superseded"
+        if surface["actions"]:
+            for older in rows:
+                if older["conversation_id"] == conversation_id and older["status"] == "active" and older["actions"]:
+                    older["status"] = "superseded"
         rows.append({**surface, "conversation_id": conversation_id, "tool_name": tool_name, "created_at": created_at,
                      "status": "active"})
     for row in rows:

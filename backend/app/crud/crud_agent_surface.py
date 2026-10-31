@@ -10,11 +10,12 @@ from app.models.agent_surface import AgentSurface
 class CRUDAgentSurface:
     def register(self, db: Session, *, conversation_id: UUID, surface_id: str, tool_name: str,
                  actions: list[dict], document_ids: list[str]) -> AgentSurface:
-        """Record a new panel. It supersedes every panel of the conversation whose buttons still worked."""
-        for older in (db.query(AgentSurface)
-                      .filter(AgentSurface.conversation_id == conversation_id, AgentSurface.status == "active")):
-            if older.actions:
-                older.status = "superseded"
+        """Record a new panel. A panel with buttons supersedes every older panel whose buttons still worked."""
+        if actions:
+            for older in (db.query(AgentSurface)
+                          .filter(AgentSurface.conversation_id == conversation_id, AgentSurface.status == "active")):
+                if older.actions:
+                    older.status = "superseded"
         surface = AgentSurface(surface_id=surface_id, conversation_id=conversation_id, tool_name=tool_name,
                                actions=actions, document_ids=document_ids, status="active",
                                created_at=datetime.now(timezone.utc))

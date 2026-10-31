@@ -138,15 +138,15 @@ def _refused(api, db, conversation_id, surface_id, ids, **kwargs):
 
 # ── Surface status ─────────────────────────────────────────────────────────
 
-def test_a_new_panel_supersedes_panels_with_buttons_only(db):
+def test_only_a_new_panel_with_buttons_supersedes_panels_with_buttons(db):
     conversation = _conversation(db)
     ids = _docs(db, "a.pdf", "b.pdf")
     listing = _documents_panel(db, conversation, ids)
     metrics = _metrics_panel(db, conversation, ids)
-    assert (_status(db, listing), _status(db, metrics)) == ("superseded", "active")
+    assert (_status(db, listing), _status(db, metrics)) == ("active", "active")
 
     newer = _documents_panel(db, conversation, ids)
-    assert (_status(db, metrics), _status(db, newer)) == ("active", "active")
+    assert (_status(db, listing), _status(db, metrics), _status(db, newer)) == ("superseded", "active", "active")
     other = _conversation(db)
     _documents_panel(db, other, ids)
     assert _status(db, newer) == "active"  # another conversation's panel changes nothing here
@@ -313,7 +313,7 @@ def test_legacy_action_parses_the_text_encoding_and_ignores_ordinary_text():
 
 
 def _seed_legacy(db):
-    """A phase-A conversation: two document panels, a click on the second, a metrics panel last."""
+    """A phase-A conversation: two document panels, a click on the second, a third document panel, metrics last."""
     conversation = _conversation(db)
     fixture = json.loads((FIXTURES / "show_documents.json").read_text())["result"]
     t0 = datetime(2026, 10, 30, 9, 0, tzinfo=timezone.utc)
@@ -330,6 +330,7 @@ def _seed_legacy(db):
                         created_at=t0 + timedelta(minutes=2)))
     db.add(AgentMessage(id=uuid.uuid4(), conversation_id=conversation, role="user", content="สรุปยอดรวม",
                         created_at=t0 + timedelta(minutes=3)))
+    panel("jobs-pending", 3.5)
     metrics = json.loads((FIXTURES / "show_metrics.json").read_text())["result"]
     panel("jobs-metrics", 4, "show_metrics", {**metrics, "panel_id": "x"})
     db.add(AgentRun(id=uuid.uuid4(), conversation_id=conversation, user_id=USER.id, user_message=content,
@@ -364,7 +365,8 @@ def test_migration_converts_legacy_clicks_fixes_titles_and_backfills_statuses(en
     assert db.get(AgentConversation, conversation).title == "อนุมัติเอกสาร 2 รายการที่เลือก"
 
     statuses = {s.surface_id: s.status for s in db.query(AgentSurface)}
-    assert statuses == {"jobs-old": "superseded", "jobs-clicked": "answered", metrics_id: "active"}
+    assert statuses == {"jobs-old": "superseded", "jobs-clicked": "answered", "jobs-pending": "active",
+                        metrics_id: "active"}
     clicked = db.get(AgentSurface, "jobs-clicked")
     assert [a["name"] for a in clicked.actions] == ["approve_documents", "reject_documents"]
     assert clicked.document_ids and db.get(AgentSurface, metrics_id).document_ids == []
