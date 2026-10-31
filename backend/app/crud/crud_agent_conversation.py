@@ -1,5 +1,6 @@
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from uuid import UUID
+from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 from app.models.agent_conversation import AgentConversation
 from app.models.agent_message import AgentMessage
@@ -43,18 +44,26 @@ class CRUDAgentConversation:
         messages = query.order_by(AgentMessage.created_at.desc()).limit(max_messages).all()
         return list(reversed(messages))
 
-    def get_messages(self, db: Session, conversation_id: UUID, limit: int = 50) -> List[AgentMessage]:
-        # Keep the newest messages in context while preserving chronological order.
-        # The previous ASC + LIMIT query returned the oldest messages, so long
-        # conversations lost recent user intent and tool results.
-        messages = (
-            db.query(AgentMessage)
-            .filter(AgentMessage.conversation_id == conversation_id)
-            .order_by(AgentMessage.created_at.desc())
-            .limit(limit)
-            .all()
-        )
-        return list(reversed(messages))
+    def get_message_page(self, db: Session, conversation_id: UUID, limit: int = 50,
+                         before: Optional[UUID] = None) -> Tuple[List[AgentMessage], bool]:
+        """Up to ``limit`` messages, oldest first: the newest ones, or those older than message ``before``.
+
+        Returns the page and whether older messages remain. Ordered by
+        (created_at, id) so a page boundary never skips or repeats a message.
+        """
+        query = db.query(AgentMessage).filter(AgentMessage.conversation_id == conversation_id)
+        if before is not None:
+            cursor = (db.query(AgentMessage.created_at, AgentMessage.id)
+                      .filter(AgentMessage.id == before, AgentMessage.conversation_id == conversation_id)
+                      .first())
+            if cursor is None:
+                return [], False
+            query = query.filter(or_(
+                AgentMessage.created_at < cursor.created_at,
+                and_(AgentMessage.created_at == cursor.created_at, AgentMessage.id < cursor.id),
+            ))
+        rows = query.order_by(AgentMessage.created_at.desc(), AgentMessage.id.desc()).limit(limit + 1).all()
+        return list(reversed(rows[:limit])), len(rows) > limit
 
     def delete(self, db: Session, conversation_id: UUID) -> bool:
         conv = self.get(db, conversation_id)

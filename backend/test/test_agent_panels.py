@@ -36,10 +36,12 @@ from app.agent.a2ui import CATALOG_ID, PANEL_TOOLS, ShowTable, compare, quote_fo
 from app.agent.context import tool_content_for_llm  # noqa: E402
 from app.agent.tools import ui_tools  # noqa: E402
 from app.agent.tools.registry import tool_registry  # noqa: E402
+from app.models.agent_surface import AgentSurface  # noqa: E402
 from app.models.document import Document  # noqa: E402
 
 JOB = uuid.UUID("6f1c2d3e-0000-4000-8000-000000000001")
 OTHER_JOB = uuid.UUID("6f1c2d3e-0000-4000-8000-000000000002")
+CONVERSATION = uuid.UUID("6f1c2d3e-0000-4000-8000-0000000000c1")
 FIXTURES = Path(__file__).resolve().parents[2] / "frontend" / "test" / "fixtures" / "a2ui"
 CONTRACT_TEXT = ("สัญญาจ้างบริการทำความสะอาด ข้อ 5 การชำระเงิน ผู้ว่าจ้างจะชำระค่าจ้างภายใน ๓๐ วัน นับจากวันที่ได้รับ"
                  "ใบแจ้งหนี้\nข้อ 7 ค่าปรับ หากผู้รับจ้างส่งมอบงานล่าช้า ผู้รับจ้างต้องชำระค่าปรับ  ในอัตราร้อยละ 0.5\n"
@@ -49,7 +51,7 @@ CONTRACT_TEXT = ("สัญญาจ้างบริการทำควา�
 @pytest.fixture
 def db():
     engine = create_engine("sqlite://")
-    Document.metadata.create_all(engine, tables=[Document.__table__])
+    Document.metadata.create_all(engine, tables=[Document.__table__, AgentSurface.__table__])
     session = sessionmaker(bind=engine)()
     yield session
     session.close()
@@ -65,7 +67,7 @@ def _doc(db, filename, *, job_id=JOB, ocr_text=None, status="extraction_complete
 
 
 def _call(db, tool, args):
-    context = SimpleNamespace(db=db, job_id=JOB, user_id=uuid.uuid4())
+    context = SimpleNamespace(db=db, job_id=JOB, user_id=uuid.uuid4(), conversation_id=CONVERSATION)
     return asyncio.run(tool_registry.execute(tool, args, context))
 
 

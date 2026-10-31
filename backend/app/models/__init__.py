@@ -16,5 +16,6 @@ from .agent_memory import AgentMemory
 from .agent_skill import AgentSkill
 from .agent_pending_action import AgentPendingAction
 from .agent_run import AgentRun
+from .agent_surface import AgentSurface
 from .api_access_token import APIAccessToken
 from .workflow import Workflow, WorkflowRun, WorkflowNodeRun

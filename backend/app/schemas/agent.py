@@ -1,7 +1,9 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from typing import Optional
 from datetime import datetime
 from uuid import UUID
+
+from app.agent.ui_actions import UiActionName
 
 
 class AgentConversationCreate(BaseModel):
@@ -12,6 +14,16 @@ class AgentConversationCreate(BaseModel):
 
 class AgentMessageCreate(BaseModel):
     content: str = Field(..., min_length=1, max_length=10000)
+
+
+class AgentUiActionCreate(BaseModel):
+    """A click on a panel button; the server checks it against the panel it recorded."""
+    model_config = ConfigDict(extra="forbid")
+
+    surface_id: str = Field(..., min_length=1, max_length=64)
+    name: UiActionName
+    source_component_id: str = Field(..., min_length=1, max_length=64)
+    document_ids: list[str] = Field(..., min_length=1, max_length=200)
 
 
 class ConfirmActionRequest(BaseModel):

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -14,6 +14,7 @@ from app.crud.crud_agent_conversation import agent_conversation as crud_conv
 from app.crud.crud_agent_memory import agent_memory as crud_memory
 from app.crud.crud_agent_pending import agent_pending as crud_pending
 from app.crud.crud_agent_run import agent_run as crud_run
+from app.crud.crud_agent_surface import agent_surface as crud_surface
 from app.crud.crud_agent_skill import agent_skill as crud_skill
 from app.crud.crud_integration import integration as crud_integration
 from app.models.job import Job
@@ -26,6 +27,7 @@ from app.schemas.agent import (
     AgentConversationCreate,
     AgentConversationResponse,
     AgentMessageCreate,
+    AgentUiActionCreate,
     AgentSkillCreate,
     AgentSkillUpdate,
     AgentSkillResponse,
@@ -37,6 +39,7 @@ from app.services.storage import get_storage_service
 from app.agent.tools.registry import tool_registry
 from app.agent.tools.skill_tools import _normalize_allowed_tools, _strict_skill_metadata
 from app.agent.confirmations import requires_explicit_confirmation
+from app.agent import ui_actions
 
 router = APIRouter()
 
@@ -294,12 +297,26 @@ async def list_agent_memories(
     }
 
 
+def _message_payload(m) -> dict:
+    return {"id": str(m.id), "role": m.role, "kind": m.kind or "text", "content": m.content,
+            "ui_action": m.ui_action, "tool_calls": m.tool_calls, "tool_call_id": m.tool_call_id,
+            "tool_name": m.tool_name, "tool_result": m.tool_result, "iteration": m.iteration,
+            "model_used": m.model_used, "created_at": m.created_at.isoformat()}
+
+
 @router.get("/conversations/{conversation_id}")
 async def get_agent_conversation(
     conversation_id: UUID,
+    before: UUID | None = None,
+    limit: int = Query(50, ge=1, le=200),
     db: Session = Depends(deps.get_db),
     current_user=Depends(deps.get_current_user),
 ):
+    """The newest page of messages, or the page older than message ``before``.
+
+    ``surfaces`` holds every panel of the conversation with its server-side
+    status, whichever page the client has loaded.
+    """
     # Serialize admission per conversation. The partial unique index is the
     # final guard, but the row lock lets us return a helpful conflict response.
     conv = (
@@ -312,20 +329,17 @@ async def get_agent_conversation(
         raise HTTPException(status_code=404)
     if conv.job_id is not None:
         _ensure_job_access(db, conv.job_id, current_user)
-    messages = crud_conv.get_messages(db, conversation_id)
+    messages, has_more = crud_conv.get_message_page(db, conversation_id, limit=limit, before=before)
     return {
         "conversation": {"id": str(conv.id), "kind": conv.kind, "job_id": str(conv.job_id) if conv.job_id else None, "title": conv.title, "max_iterations": conv.max_iterations, "created_at": conv.created_at.isoformat()},
-        "messages": [{"id": str(m.id), "role": m.role, "content": m.content, "tool_calls": m.tool_calls, "tool_call_id": m.tool_call_id, "tool_name": m.tool_name, "tool_result": m.tool_result, "iteration": m.iteration, "model_used": m.model_used, "created_at": m.created_at.isoformat()} for m in messages],
+        "messages": [_message_payload(m) for m in messages],
+        "has_more": has_more,
+        "surfaces": crud_surface.states(db, conversation_id),
     }
 
 
-@router.post("/conversations/{conversation_id}/messages")
-async def send_agent_message(
-    conversation_id: UUID,
-    data: AgentMessageCreate,
-    db: Session = Depends(deps.get_db),
-    current_user=Depends(deps.get_current_user),
-):
+def _idle_conversation(db: Session, conversation_id: UUID, current_user):
+    """The user's conversation, refused while a run is still working on it."""
     conv = crud_conv.get(db, conversation_id)
     if not conv or conv.user_id != current_user.id:
         raise HTTPException(status_code=404)
@@ -352,12 +366,18 @@ async def send_agent_message(
             status_code=409,
             detail="กำลังหยุดงานก่อนหน้า รอสักครู่แล้วส่งข้อความอีกครั้ง",
         )
+    return conv
 
+
+def _start_run(db: Session, conversation_id: UUID, current_user, user_message: str,
+               ui_action: dict | None = None) -> AgentRun:
+    """Queue a run; commits whatever the caller changed in the same transaction. 503 when the queue is down."""
     run = crud_run.create(
         db,
         conversation_id=conversation_id,
         user_id=current_user.id,
-        user_message=data.content,
+        user_message=user_message,
+        ui_action=ui_action,
     )
     try:
         from app.tasks.agent_tasks import run_agent_task
@@ -370,9 +390,46 @@ async def send_agent_message(
         run.status = "failed"
         run.error = "Agent queue is unavailable"
         db.commit()
+        if ui_action:
+            crud_surface.reopen(db, ui_action["surface_id"])
         raise HTTPException(status_code=503, detail="Agent queue is unavailable")
+    return run
 
+
+@router.post("/conversations/{conversation_id}/messages")
+async def send_agent_message(
+    conversation_id: UUID,
+    data: AgentMessageCreate,
+    db: Session = Depends(deps.get_db),
+    current_user=Depends(deps.get_current_user),
+):
+    _idle_conversation(db, conversation_id, current_user)
+    run = _start_run(db, conversation_id, current_user, data.content)
     return JSONResponse(status_code=202, content={"run": _agent_run_payload(db, run)})
+
+
+@router.post("/conversations/{conversation_id}/ui-actions")
+async def send_agent_ui_action(
+    conversation_id: UUID,
+    data: AgentUiActionCreate,
+    db: Session = Depends(deps.get_db),
+    current_user=Depends(deps.get_current_user),
+):
+    """A click on a panel button: checked against the panel, then answered by a run.
+
+    The panel must belong to this conversation and still be active, offer this
+    button, and show every named document. Accepting marks the panel answered.
+    """
+    _idle_conversation(db, conversation_id, current_user)
+    try:
+        action = ui_actions.accept(db, conversation_id, surface_id=data.surface_id, name=data.name,
+                                   source_component_id=data.source_component_id, document_ids=data.document_ids)
+    except ui_actions.UiActionRefused as refused:
+        db.rollback()
+        raise HTTPException(status_code=refused.status_code, detail=refused.reason)
+    display = ui_actions.display_text(action["name"], len(action["document_ids"]))
+    run = _start_run(db, conversation_id, current_user, display, ui_action=action)
+    return JSONResponse(status_code=202, content={"run": _agent_run_payload(db, run), "display_text": display})
 
 
 @router.get("/conversations/{conversation_id}/runs/active")

@@ -35,6 +35,7 @@ from app.agent.events import sse_event, SSEEventType
 from app.agent.confirmations import CONFIRMATION_TIMEOUT_S, declined_result, describe_action, requires_confirmation
 from app.agent.tools.document_tools import freeze_confirmation
 from app.agent.a2ui import PANEL_TOOLS
+from app.agent.ui_actions import llm_content
 from app.agent.tools.registry import tool_registry
 from app.agent.tools import document_tools, integration_tools, memory_tools, code_tools, skill_tools, filesystem_tools, web_search_tools, workflow_tools, ui_tools  # noqa: F401 — side-effect: registers tools
 from app.crud.crud_agent_message import agent_message as crud_msg
@@ -970,8 +971,9 @@ class AgentLoop:
         # allowlist blocks confirmation-gated tools in ToolRegistry instead.
         return False if self.autonomous else requires_confirmation(tool_name, tool_args)
 
-    async def run(self, user_message: str) -> AsyncGenerator[str, None]:
-        iterator = self._run_inner(user_message)
+    async def run(self, user_message: str, ui_action: dict | None = None) -> AsyncGenerator[str, None]:
+        """Answer one user turn. With ui_action (a checked panel click) user_message is its display text."""
+        iterator = self._run_inner(user_message, ui_action)
         deadline = asyncio.get_running_loop().time() + AGENT_MAX_RUNTIME_S
         try:
             while True:
@@ -996,8 +998,9 @@ class AgentLoop:
         finally:
             await iterator.aclose()
 
-    async def _run_inner(self, user_message: str) -> AsyncGenerator[str, None]:
-        crud_msg.add(self.db, conversation_id=self.conversation_id, role="user", content=user_message, iteration=0)
+    async def _run_inner(self, user_message: str, ui_action: dict | None = None) -> AsyncGenerator[str, None]:
+        crud_msg.add(self.db, conversation_id=self.conversation_id, role="user", content=user_message, iteration=0,
+                     kind="ui_action" if ui_action else "text", ui_action=ui_action)
         crud_conv.update_title(self.db, self.conversation_id, user_message[:60])
         self.context.clear_active_skill_tool_policy()
         if self.initial_allowed_tools is not None:
@@ -1016,7 +1019,7 @@ class AgentLoop:
             return
 
         if self.llm_config.get("provider") == "completion_messages":
-            async for event in self._run_completion_provider(user_message):
+            async for event in self._run_completion_provider(llm_content(ui_action) if ui_action else user_message):
                 yield event
             return
 

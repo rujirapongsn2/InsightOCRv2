@@ -15,8 +15,8 @@ def _sanitize_jsonb(value: Any) -> Any:
 
 
 class CRUDAgentMessage:
-    def add(self, db: Session, *, conversation_id: UUID, role: str, content: Optional[str] = None, tool_calls: Optional[list] = None, tool_call_id: Optional[str] = None, tool_name: Optional[str] = None, tool_result: Optional[dict] = None, iteration: Optional[int] = None, model_used: Optional[str] = None, tokens_in: Optional[int] = None, tokens_out: Optional[int] = None) -> AgentMessage:
-        msg = AgentMessage(conversation_id=conversation_id, role=role, content=content, tool_calls=_sanitize_jsonb(tool_calls), tool_call_id=tool_call_id, tool_name=tool_name, tool_result=_sanitize_jsonb(tool_result), iteration=iteration, model_used=model_used, tokens_in=tokens_in, tokens_out=tokens_out)
+    def add(self, db: Session, *, conversation_id: UUID, role: str, content: Optional[str] = None, kind: str = "text", ui_action: Optional[dict] = None, tool_calls: Optional[list] = None, tool_call_id: Optional[str] = None, tool_name: Optional[str] = None, tool_result: Optional[dict] = None, iteration: Optional[int] = None, model_used: Optional[str] = None, tokens_in: Optional[int] = None, tokens_out: Optional[int] = None) -> AgentMessage:
+        msg = AgentMessage(conversation_id=conversation_id, role=role, kind=kind, content=content, ui_action=ui_action, tool_calls=_sanitize_jsonb(tool_calls), tool_call_id=tool_call_id, tool_name=tool_name, tool_result=_sanitize_jsonb(tool_result), iteration=iteration, model_used=model_used, tokens_in=tokens_in, tokens_out=tokens_out)
         db.add(msg)
         db.commit()
         db.refresh(msg)

@@ -30,6 +30,7 @@ async def _consume_agent_run(
     loop: AgentLoop,
     user_message: str,
     run_id: str | None = None,
+    ui_action: dict | None = None,
 ) -> tuple[dict | None, str | None]:
     """Run the agent to completion while its persisted messages feed the UI.
 
@@ -39,7 +40,7 @@ async def _consume_agent_run(
     completed: dict | None = None
     error: str | None = None
     checked_at = asyncio.get_running_loop().time()
-    stream = loop.run(user_message)
+    stream = loop.run(user_message, ui_action)
     try:
         async for event in stream:
             now = asyncio.get_running_loop().time()
@@ -133,7 +134,7 @@ def run_agent_task(self, run_id: str) -> None:
             run_id=run.id,
         )
         try:
-            completed, error = asyncio.run(_consume_agent_run(loop, run.user_message, str(run.id)))
+            completed, error = asyncio.run(_consume_agent_run(loop, run.user_message, str(run.id), run.ui_action))
         finally:
             # Whatever the outcome, nothing this run asked for may stay waiting.
             db.rollback()

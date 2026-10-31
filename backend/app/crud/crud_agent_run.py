@@ -17,11 +17,13 @@ class CRUDAgentRun:
         conversation_id: UUID,
         user_id: UUID,
         user_message: str,
+        ui_action: Optional[dict] = None,
     ) -> AgentRun:
         run = AgentRun(
             conversation_id=conversation_id,
             user_id=user_id,
             user_message=user_message,
+            ui_action=ui_action,
             status="queued",
         )
         db.add(run)

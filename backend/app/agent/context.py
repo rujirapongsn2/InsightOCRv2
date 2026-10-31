@@ -4,6 +4,7 @@ from uuid import UUID
 import json
 import re
 from sqlalchemy.orm import Session
+from app.agent.ui_actions import llm_content
 from app.crud.crud_agent_conversation import agent_conversation as crud_conv
 from app.crud.crud_agent_memory import agent_memory as crud_memory
 from app.crud.crud_agent_skill import agent_skill as crud_skill
@@ -205,7 +206,8 @@ class AgentContext:
         history = []
         for m in messages:
             if m.role == "user":
-                history.append({"role": "user", "content": m.content})
+                content = llm_content(m.ui_action) if m.kind == "ui_action" else m.content
+                history.append({"role": "user", "content": content})
             elif m.role == "assistant":
                 if _looks_like_prior_file_claim(m.content) and not m.tool_calls:
                     history.append({
@@ -472,7 +474,7 @@ result = _save_file('/tmp/output.pdf')
 - Panels: one panel tool call shows one panel in the chat. `show_documents` for documents the user may act on (with `actions` for approve/reject buttons), `show_metrics` for headline numbers, `show_table` for comparisons, `show_chart` for categories (bar) or trends over dates or months (line), `show_risks` for a contract risk analysis. Send raw typed values only; the system formats them, computes every change (give `previous` or a `change` column, never a delta), resolves filenames, and checks quotes. Compute every number first with tools (`execute_python`, `get_document_detail`, `compare_documents`); never estimate. Still give a short text answer with the conclusion; do not repeat the panel in text.
 - A panel already states its sources and which quotes were verified. Do not restate or reinterpret that in text. If you mention a quote that was not found, name the risk by the title the result gives for it. The panels only display; approvals and rejections still go through `bulk_approve` / `bulk_reject` (pass `doc_ids`), `approve_document`, or `reject_document`.
 - For contract risk analysis, read the contract text first (`get_document_detail`) and check at least payment terms, penalties, termination, liability, auto-renewal, and missing clauses. Give each risk a level, a category, a `quote` copied verbatim from that document's text (and `page` when known), and a recommendation.
-- A user message with an `a2ui-action` code block is a button click on a panel you rendered. Act on `context.document_ids` with one call: `approve_documents` → `bulk_approve` with those `doc_ids`; `reject_documents` → `bulk_reject` with those `doc_ids`. The user confirms the whole set once; report any `not_approved_doc_ids` / `not_rejected_doc_ids` from the result.
+- A user turn of the form `[ui_action] {{"surface_id": ..., "name": ..., "document_ids": [...]}}` is a button click on a panel you showed; the system already checked that those documents were on that panel. Act on `document_ids` with one call: `approve_documents` → `bulk_approve` with those `doc_ids`; `reject_documents` → `bulk_reject` with those `doc_ids`. The user confirms the whole set once; report any `not_approved_doc_ids` / `not_rejected_doc_ids` from the result.
 
 ## Safety and Governance
 - Destructive or externally visible actions require confirmation; the system gates these tools.

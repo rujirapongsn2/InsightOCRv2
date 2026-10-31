@@ -366,10 +366,16 @@ class DocumentRef:
 
 @dataclass(frozen=True)
 class Panel:
-    """A composed surface: the A2UI messages for the chat and the summary for the model."""
+    """A composed surface: the A2UI messages for the chat and the summary for the model.
+
+    actions are the buttons ({component_id, name}) and document_ids the
+    documents a click may name; the server checks a click against both.
+    """
     components: list[dict]
     data: dict
     summary: dict
+    actions: tuple[dict, ...] = ()
+    document_ids: tuple[str, ...] = ()
 
 
 def _currency(kind: str, currency: str | None) -> dict:
@@ -410,7 +416,9 @@ def documents_panel(args: ShowDocuments, rows: list[dict]) -> Panel:
         body.append({"id": "actions", "component": "Row", "children": [b["id"] for b in buttons]})
     components = _framed(args.title, *body, sources=False) + buttons
     data = {"documents": rows, **({"selected": []} if selectable else {})}
-    return Panel(components, data, {"shown": [row["document_id"] for row in rows]})
+    shown = [row["document_id"] for row in rows]
+    actions = tuple({"component_id": b["id"], "name": b["action"]["event"]["name"]} for b in buttons)
+    return Panel(components, data, {"shown": shown}, actions, tuple(shown) if actions else ())
 
 
 def metrics_panel(args: ShowMetrics, sources: list[DocumentRef]) -> Panel:

@@ -3,7 +3,8 @@
 Arguments are parsed by the models in app.agent.a2ui; this module resolves
 document ids against the current job and composes the surface. The stored
 result keeps "a2ui" for the chat; tool_content_for_llm strips it, so the model
-sees only the itemised summary.
+sees only the itemised summary. Each panel is recorded as an AgentSurface,
+whose status the server keeps (app.crud.crud_agent_surface).
 """
 from __future__ import annotations
 
@@ -17,6 +18,7 @@ from app.agent.a2ui import (
 )
 from app.agent.tools.document_tools import DocIdError, parse_doc_ids
 from app.agent.tools.registry import ToolDef, tool_registry
+from app.crud.crud_agent_surface import agent_surface
 from app.models.document import Document
 
 
@@ -96,6 +98,8 @@ def _handler(name: str, model: type, show: Callable[[Any, Any], tuple[Panel, dic
             message = str(error)
             return {"ok": False, "error": message if message.startswith(name) else f"{name} was not shown: {message}"}
         panel_id = new_panel_id()
+        agent_surface.register(context.db, conversation_id=context.conversation_id, surface_id=panel_id,
+                               tool_name=name, actions=list(panel.actions), document_ids=list(panel.document_ids))
         return {"ok": True, "panel_id": panel_id, **panel.summary, **extra,
                 "a2ui": surface_messages(panel_id, panel)}
     return handle
@@ -110,8 +114,8 @@ _COMPUTED = ("Send raw values (numbers, ISO dates \"2026-01-31\", months \"2026-
 PANELS = [
     ("show_documents", ShowDocuments, _show_documents,
      "Show a list of this job's documents the user may act on, e.g. documents awaiting approval or with problems. "
-     "actions adds buttons for the selected documents; a click only sends a message, and approving or rejecting "
-     "still goes through bulk_approve / bulk_reject. Filenames and statuses are filled in by the system. "
+     "actions adds buttons for the selected documents; a click comes back as a [ui_action] user turn, and "
+     "approving or rejecting still goes through bulk_approve / bulk_reject. A newer panel disables older buttons. Filenames and statuses are filled in by the system. "
      "Ids that are not documents of this job are dropped and listed in the result."),
     ("show_metrics", ShowMetrics, _show_metrics,
      "Show 1-6 headline numbers as tiles. Give previous to compare with: the system computes the change, its "

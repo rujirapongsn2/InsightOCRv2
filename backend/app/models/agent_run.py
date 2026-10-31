@@ -1,7 +1,7 @@
 import uuid
 
 from sqlalchemy import Column, DateTime, ForeignKey, String, Text, func
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 
 from app.db.base_class import Base
 
@@ -24,6 +24,8 @@ class AgentRun(Base):
     )
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     user_message = Column(Text, nullable=False)
+    # Set when the run answers a panel click; user_message is then its display text.
+    ui_action = Column(JSONB, nullable=True)
     status = Column(String(20), nullable=False, default="queued", index=True)
     task_id = Column(String, nullable=True)
     error = Column(Text, nullable=True)
