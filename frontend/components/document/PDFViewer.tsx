@@ -1,15 +1,13 @@
 "use client"
 
 import { useState, useEffect, useMemo, useRef } from "react"
-import { Document, Page, pdfjs } from "react-pdf"
+import { Document, Page } from "react-pdf"
 import { ZoomIn, ZoomOut, RotateCw, ChevronLeft, ChevronRight, SearchX, LocateFixed } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { findTextBox, findWordBox, type Box, type Highlight, type PageWord, type TextItemLike } from "@/lib/evidence-search"
+import "@/lib/pdf-worker"
 import "react-pdf/dist/Page/AnnotationLayer.css"
 import "react-pdf/dist/Page/TextLayer.css"
-
-// Configure PDF.js worker — use CDN matching the exact pdfjs version from react-pdf
-pdfjs.GlobalWorkerOptions.workerSrc = `//unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`
 
 interface PDFViewerProps {
   fileUrl: string
