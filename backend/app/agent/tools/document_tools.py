@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import uuid
+from dataclasses import dataclass
 from typing import Any
 
 from datetime import datetime, timezone
@@ -348,67 +350,132 @@ async def _reject_document_handler(args: dict, context) -> dict:
     return result
 
 
-def _parse_doc_ids(raw) -> list | None:
-    """UUIDs for a list of ids; None when no list was given, [] when any id is malformed."""
-    import uuid as _uuid
+class DocIdError(ValueError):
+    """A list of document ids the model must correct. The message says how."""
 
-    if raw is None:
-        return None
-    try:
-        return [_uuid.UUID(str(item)) for item in raw]
-    except (ValueError, TypeError):
+
+def parse_doc_ids(raw: Any) -> list[uuid.UUID]:
+    """Document ids from a tool call, de-duplicated in order.
+
+    One policy for every tool that takes a list of ids (render_ui, bulk_approve,
+    bulk_reject): a single malformed id rejects the whole call, so the model fixes
+    it instead of acting on a silently shortened list. Well-formed ids outside the
+    job are not an error here; job_documents leaves them out and each tool reports them.
+    """
+    if not isinstance(raw, list):
+        raise DocIdError('doc_ids must be an array of document "id" values from list_documents')
+    ids: list[uuid.UUID] = []
+    bad: list[Any] = []
+    for item in raw:
+        try:
+            ids.append(uuid.UUID(str(item)))
+        except ValueError:
+            bad.append(item)
+    if bad:
+        raise DocIdError(f"these are not document ids: {bad[:5]}. Use the \"id\" values from list_documents "
+                         "and call again; nothing was done.")
+    return list(dict.fromkeys(ids))
+
+
+def job_documents(db, job_id, ids: list[uuid.UUID] | None, *, waiting_only: bool = False,
+                  min_confidence: float | None = None) -> list[Document]:
+    """This job's documents among ids (all of the job's when ids is None), ordered by filename."""
+    if ids is not None and not ids:
         return []
-
-
-def _bulk_approve_targets(db, job_id, args: dict) -> list:
-    """The documents bulk_approve would approve now; the confirmation lists the same set."""
-    q = db.query(Document).filter(Document.job_id == job_id, Document.status == "extraction_completed")
-    if args.get("min_confidence"):
-        q = q.filter(Document.extraction_confidence >= args["min_confidence"])
-    doc_ids = _parse_doc_ids(args.get("doc_ids"))
-    if doc_ids is not None:
-        q = q.filter(Document.id.in_(doc_ids))
+    q = db.query(Document).filter(Document.job_id == job_id)
+    if ids is not None:
+        q = q.filter(Document.id.in_(ids))
+    if waiting_only:
+        q = q.filter(Document.status == "extraction_completed")
+    if min_confidence:
+        q = q.filter(Document.extraction_confidence >= min_confidence)
     return q.order_by(Document.filename).all()
 
 
-def _single_target(db, job_id, args: dict) -> list:
-    ids = _parse_doc_ids([args.get("doc_id")])
-    return db.query(Document).filter(Document.job_id == job_id, Document.id.in_(ids)).all() if ids else []
-
-
-# Tools whose confirmation lists the affected documents by name.
-CONFIRMATION_TARGETS = {
-    "approve_document": _single_target,
-    "reject_document": _single_target,
-    "bulk_approve": _bulk_approve_targets,
+# Bulk review tools: the status and review_decision they set (as the review page does), and their verb forms.
+BULK_REVIEW = {
+    "bulk_approve": ("reviewed", "confirmed", "approve", "approved"),
+    "bulk_reject": ("rejected", "rejected", "reject", "rejected"),
 }
 
 
-def confirmation_documents(db, job_id, tool_name: str, args: dict) -> list[dict] | None:
-    """Filename and status, read from this job's rows, of the documents an action affects."""
+def _bulk_targets(db, job_id, args: dict) -> list[Document]:
+    """Documents a bulk review would change now: waiting for review, ≥ min_confidence, among doc_ids if given."""
+    ids = parse_doc_ids(args["doc_ids"]) if args.get("doc_ids") is not None else None
+    return job_documents(db, job_id, ids, waiting_only=True, min_confidence=args.get("min_confidence"))
+
+
+def _single_target(db, job_id, args: dict) -> list[Document]:
+    return job_documents(db, job_id, parse_doc_ids([args.get("doc_id")]))
+
+
+def _nothing_to_review(tool_name: str, args: dict) -> dict:
+    _, _, verb, done = BULK_REVIEW[tool_name]
+    # "Approved 0 documents" used to be reported as a verified success.
+    return {"ok": False, f"nothing_to_{verb}": True, f"{done}_count": 0,
+            "error": "No documents are waiting for review" + (
+                f" with confidence ≥ {args['min_confidence']}" if args.get("min_confidence") else "") + (
+                " among the given doc_ids" if args.get("doc_ids") is not None else "") + f"; nothing was {done}."}
+
+
+# Tools whose confirmation names the affected documents.
+CONFIRMATION_TARGETS = {
+    "approve_document": _single_target,
+    "reject_document": _single_target,
+    "bulk_approve": _bulk_targets,
+    "bulk_reject": _bulk_targets,
+}
+
+
+@dataclass(frozen=True)
+class FrozenConfirmation:
+    arguments: dict
+    # Filename and status of each target when the user was asked; None for actions without document targets.
+    documents: list[dict] | None
+    # Set when there is nothing to confirm; it is the tool result instead.
+    error: dict | None = None
+
+
+def freeze_confirmation(db, job_id, tool_name: str, args: dict) -> FrozenConfirmation:
+    """Pin the documents an action will touch at the moment the user is asked.
+
+    Bulk tools are rewritten to explicit doc_ids, so execution changes at most the
+    set the user saw. Execution re-checks job and status; a document that is no
+    longer eligible is reported as not changed, never replaced by another one.
+    """
     targets = CONFIRMATION_TARGETS.get(tool_name)
     if targets is None or job_id is None:
-        return None
-    return [{"id": str(d.id), "filename": d.filename, "status": d.status} for d in targets(db, job_id, args or {})]
-
-
-async def _bulk_approve_handler(args: dict, context) -> dict:
-    if args.get("doc_ids") and not _parse_doc_ids(args["doc_ids"]):
-        return {"ok": False, "error": f"doc_ids must be document ids from list_documents: {args['doc_ids']}"}
-    docs = _bulk_approve_targets(context.db, context.job_id, args)
+        return FrozenConfirmation(args, None)
+    try:
+        docs = targets(db, job_id, args)
+    except DocIdError as error:
+        return FrozenConfirmation(args, None, {"ok": False, "error": str(error)})
     if not docs:
-        # "Approved 0 documents" used to be reported as a verified success.
-        return {"ok": False, "nothing_to_approve": True, "approved_count": 0,
-                "error": "No documents are waiting for review" + (
-                    f" with confidence ≥ {args['min_confidence']}" if args.get("min_confidence") else "") + (
-                    " among the given doc_ids" if args.get("doc_ids") is not None else "") + "; nothing was approved."}
+        error = _nothing_to_review(tool_name, args) if tool_name in BULK_REVIEW else {"error": "Document not found"}
+        return FrozenConfirmation(args, [], error)
+    if tool_name in BULK_REVIEW:
+        args = {**args, "doc_ids": [str(d.id) for d in docs]}
+    return FrozenConfirmation(args, [{"id": str(d.id), "filename": d.filename, "status": d.status} for d in docs])
+
+
+async def _bulk_review(tool_name: str, args: dict, context) -> dict:
+    status, decision, _, done = BULK_REVIEW[tool_name]
+    if tool_name == "bulk_reject" and args.get("doc_ids") is None:
+        return {"ok": False, "error": "bulk_reject needs doc_ids, the documents the user chose to reject."}
+    try:
+        ids = parse_doc_ids(args["doc_ids"]) if args.get("doc_ids") is not None else None
+    except DocIdError as error:
+        return {"ok": False, "error": str(error)}
+    docs = job_documents(context.db, context.job_id, ids, waiting_only=True, min_confidence=args.get("min_confidence"))
+    if not docs:
+        return _nothing_to_review(tool_name, args)
     target_ids = [d.id for d in docs]
     for d in docs:
-        d.status = "reviewed"
-        d.review_decision = "confirmed"
+        d.status = status
+        d.review_decision = decision
         d.reviewed_at = datetime.now(timezone.utc)
         d.reviewed_by = context.user_id
-        if not d.reviewed_data:
+        if decision == "confirmed" and not d.reviewed_data:
             d.reviewed_data = dict(d.extracted_data or {})
     try:
         context.db.commit()
@@ -417,23 +484,31 @@ async def _bulk_approve_handler(args: dict, context) -> dict:
         return {"ok": False, "error": f"DB commit failed: {type(e).__name__}: {e}"}
     context.db.expire_all()
     persisted = context.db.query(Document).filter(
-        Document.id.in_(target_ids), Document.status == "reviewed"
+        Document.id.in_(target_ids), Document.status == status
     ).count()
     if persisted != len(target_ids):
         return {
             "ok": False,
-            "error": "Read-back mismatch: not all documents persisted as reviewed",
+            "error": f"Read-back mismatch: not all documents persisted as {status}",
             "expected": len(target_ids),
             "actual": persisted,
         }
-    result = {"ok": True, "verified": True, "approved_count": persisted}
-    if args.get("doc_ids") is not None:
-        approved = {str(i) for i in target_ids}
-        skipped = [str(i) for i in _parse_doc_ids(args["doc_ids"]) if str(i) not in approved]
+    result = {"ok": True, "verified": True, f"{done}_count": persisted}
+    if ids is not None:
+        changed = set(target_ids)
+        skipped = [str(i) for i in ids if i not in changed]
         if skipped:
-            result["not_approved_doc_ids"] = skipped
-            result["note"] = "Not approved: not in this job or not waiting for review."
+            result[f"not_{done}_doc_ids"] = skipped
+            result["note"] = f"Not {done}: not in this job or no longer waiting for review."
     return result
+
+
+async def _bulk_approve_handler(args: dict, context) -> dict:
+    return await _bulk_review("bulk_approve", args, context)
+
+
+async def _bulk_reject_handler(args: dict, context) -> dict:
+    return await _bulk_review("bulk_reject", args, context)
 
 
 # ── Tool Registrations ──
@@ -512,5 +587,18 @@ tool_registry.register(ToolDef(
                     "description": "Approve only these documents, e.g. the ids from an a2ui-action"},
     }, "required": []},
     handler=_bulk_approve_handler,
+    requires_confirmation=True,
+))
+
+tool_registry.register(ToolDef(
+    name="bulk_reject", category="document",
+    description="Reject the given documents of the job that are waiting for review (extraction_completed), "
+                "e.g. the ids from an a2ui-action. Documents already approved or rejected are left unchanged and "
+                "reported; use reject_document with reverse_previous_decision to change an earlier decision.",
+    parameters_schema={"type": "object", "properties": {
+        "doc_ids": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 200,
+                    "description": "Document ids from list_documents"},
+    }, "required": ["doc_ids"]},
+    handler=_bulk_reject_handler,
     requires_confirmation=True,
 ))

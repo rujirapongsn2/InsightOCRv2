@@ -86,13 +86,22 @@ def test_valid_surface_yields_v09_messages_with_database_rows(db):
 def test_foreign_job_and_unknown_ids_are_not_displayed(db):
     own = _doc(db, JOB, "own.pdf")
     foreign = _doc(db, OTHER_JOB, "secret-other-job.pdf")
+    unknown = str(uuid.uuid4())
     result = _render(db, _surface(), {"documents": [
-        {"document_id": own}, {"document_id": foreign}, {"document_id": "not-a-uuid"}]})
+        {"document_id": own.upper()}, {"document_id": foreign}, {"document_id": unknown}]})
 
     rows = result["a2ui"][2]["updateDataModel"]["value"]["documents"]
     assert [row["document_id"] for row in rows] == [own]
     assert "secret-other-job.pdf" not in str(result["a2ui"])
-    assert result["dropped_document_ids"] == [foreign, "not-a-uuid"]
+    assert result["dropped_document_ids"] == [foreign, unknown]
+    assert result["document_count"] == 1
+
+
+def test_one_malformed_id_rejects_the_whole_surface(db):
+    own = _doc(db, JOB, "own.pdf")
+    result = _render(db, _surface(), {"documents": [{"document_id": own}, {"document_id": "not-a-uuid"}]})
+    assert result["ok"] is False
+    assert "not-a-uuid" in result["error"] and "list_documents" in result["error"]
 
 
 def test_only_foreign_ids_is_a_corrective_error(db):
@@ -147,3 +156,5 @@ def test_render_ui_is_offered_to_the_jobs_agent_without_confirmation():
     names = {schema["function"]["name"] for schema in tool_registry.get_openai_schemas(allowed_names=None)}
     assert "render_ui" in names
     assert requires_confirmation("render_ui", {}) is False
+
+

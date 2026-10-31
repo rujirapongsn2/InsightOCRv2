@@ -33,6 +33,7 @@ from app.agent.context import (
 )
 from app.agent.events import sse_event, SSEEventType
 from app.agent.confirmations import requires_confirmation, describe_action
+from app.agent.tools.document_tools import freeze_confirmation
 from app.agent.tools.registry import tool_registry
 from app.agent.tools import document_tools, integration_tools, memory_tools, code_tools, skill_tools, filesystem_tools, web_search_tools, workflow_tools, ui_tools  # noqa: F401 — side-effect: registers tools
 from app.crud.crud_agent_message import agent_message as crud_msg
@@ -1244,32 +1245,39 @@ class AgentLoop:
                         elif tc.id in policy_blocked_call_ids:
                             result = await _blocked_skill_policy_result(tool_name)
                         elif self._tool_requires_confirmation(tool_name, tool_args):
-                            pending = crud_pending.create(
-                                self.db, conversation_id=self.conversation_id, user_id=self.user_id,
-                                tool_name=tool_name, tool_arguments=tool_args,
-                                description=describe_action(tool_name, tool_args), run_id=self.run_id,
-                            )
-                            yield sse_event(SSEEventType.CONFIRMATION_REQUIRED, {
-                                "pending_action_id": str(pending.id),
-                                "tool_call_id": tc.id,
-                                "tool_name": tool_name,
-                                "description": pending.description,
-                                "arguments": tool_args,
-                            })
-                            approved = await self._wait_for_confirmation(pending.id)
-                            if not approved:
-                                result = {"error": "User rejected action", "tool_name": tool_name}
-                                yield sse_event(SSEEventType.TOOL_REJECTED, {"id": tc.id, "name": tool_name})
+                            frozen = freeze_confirmation(self.db, self.job_id, tool_name, tool_args)
+                            tool_args = frozen.arguments
+                            if frozen.error:
+                                result = frozen.error
                             else:
-                                result = await tool_registry.execute(tool_name, tool_args, self.context)
-                                result = _verify_file_tool_result(self.context, tool_name, result)
-                                log_activity(
-                                    self.db, user_id=self.user_id,
-                                    action=f"agent_tool_{tool_name}",
-                                    resource_type="agent_conversation",
-                                    resource_id=self.conversation_id,
-                                    details={"tool_name": tool_name, "arguments": tool_args, "agent_initiated": True},
+                                pending = crud_pending.create(
+                                    self.db, conversation_id=self.conversation_id, user_id=self.user_id,
+                                    tool_name=tool_name, tool_arguments=tool_args,
+                                    description=describe_action(tool_name, tool_args), run_id=self.run_id,
+                                    documents=frozen.documents,
                                 )
+                                yield sse_event(SSEEventType.CONFIRMATION_REQUIRED, {
+                                    "pending_action_id": str(pending.id),
+                                    "tool_call_id": tc.id,
+                                    "tool_name": tool_name,
+                                    "description": pending.description,
+                                    "documents": frozen.documents,
+                                    "arguments": tool_args,
+                                })
+                                approved = await self._wait_for_confirmation(pending.id)
+                                if not approved:
+                                    result = {"error": "User rejected action", "tool_name": tool_name}
+                                    yield sse_event(SSEEventType.TOOL_REJECTED, {"id": tc.id, "name": tool_name})
+                                else:
+                                    result = await tool_registry.execute(tool_name, tool_args, self.context)
+                                    result = _verify_file_tool_result(self.context, tool_name, result)
+                                    log_activity(
+                                        self.db, user_id=self.user_id,
+                                        action=f"agent_tool_{tool_name}",
+                                        resource_type="agent_conversation",
+                                        resource_id=self.conversation_id,
+                                        details={"tool_name": tool_name, "arguments": tool_args, "agent_initiated": True},
+                                    )
                         else:
                             result = await tool_registry.execute(tool_name, tool_args, self.context)
                             result = _verify_file_tool_result(self.context, tool_name, result)
@@ -2502,32 +2510,39 @@ __TOOL_CATALOG__
             yield sse_event(SSEEventType.TOOL_CALL, {"id": call_id, "name": tool_name, "arguments": tool_args})
 
             if self._tool_requires_confirmation(tool_name, tool_args):
-                pending = crud_pending.create(
-                    self.db, conversation_id=self.conversation_id, user_id=self.user_id,
-                    tool_name=tool_name, tool_arguments=tool_args,
-                    description=describe_action(tool_name, tool_args), run_id=self.run_id,
-                )
-                yield sse_event(SSEEventType.CONFIRMATION_REQUIRED, {
-                    "pending_action_id": str(pending.id),
-                    "tool_call_id": call_id,
-                    "tool_name": tool_name,
-                    "description": pending.description,
-                    "arguments": tool_args,
-                })
-                approved = await self._wait_for_confirmation(pending.id)
-                if not approved:
-                    result = {"error": "User rejected action", "tool_name": tool_name}
-                    yield sse_event(SSEEventType.TOOL_REJECTED, {"id": call_id, "name": tool_name})
+                frozen = freeze_confirmation(self.db, self.job_id, tool_name, tool_args)
+                tool_args = frozen.arguments
+                if frozen.error:
+                    result = frozen.error
                 else:
-                    result = await tool_registry.execute(tool_name, tool_args, self.context)
-                    result = _verify_file_tool_result(self.context, tool_name, result)
-                    log_activity(
-                        self.db, user_id=self.user_id,
-                        action=f"agent_tool_{tool_name}",
-                        resource_type="agent_conversation",
-                        resource_id=self.conversation_id,
-                        details={"tool_name": tool_name, "arguments": tool_args, "agent_initiated": True},
+                    pending = crud_pending.create(
+                        self.db, conversation_id=self.conversation_id, user_id=self.user_id,
+                        tool_name=tool_name, tool_arguments=tool_args,
+                        description=describe_action(tool_name, tool_args), run_id=self.run_id,
+                        documents=frozen.documents,
                     )
+                    yield sse_event(SSEEventType.CONFIRMATION_REQUIRED, {
+                        "pending_action_id": str(pending.id),
+                        "tool_call_id": call_id,
+                        "tool_name": tool_name,
+                        "description": pending.description,
+                        "documents": frozen.documents,
+                        "arguments": tool_args,
+                    })
+                    approved = await self._wait_for_confirmation(pending.id)
+                    if not approved:
+                        result = {"error": "User rejected action", "tool_name": tool_name}
+                        yield sse_event(SSEEventType.TOOL_REJECTED, {"id": call_id, "name": tool_name})
+                    else:
+                        result = await tool_registry.execute(tool_name, tool_args, self.context)
+                        result = _verify_file_tool_result(self.context, tool_name, result)
+                        log_activity(
+                            self.db, user_id=self.user_id,
+                            action=f"agent_tool_{tool_name}",
+                            resource_type="agent_conversation",
+                            resource_id=self.conversation_id,
+                            details={"tool_name": tool_name, "arguments": tool_args, "agent_initiated": True},
+                        )
             else:
                 result = await tool_registry.execute(tool_name, tool_args, self.context)
                 result = _verify_file_tool_result(self.context, tool_name, result)

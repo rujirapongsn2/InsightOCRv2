@@ -35,7 +35,6 @@ from app.schemas.agent import (
 )
 from app.services.storage import get_storage_service
 from app.agent.tools.registry import tool_registry
-from app.agent.tools.document_tools import confirmation_documents
 from app.agent.tools.skill_tools import _normalize_allowed_tools, _strict_skill_metadata
 from app.agent.confirmations import requires_explicit_confirmation
 
@@ -178,9 +177,8 @@ def _agent_run_payload(db: Session, run: AgentRun) -> dict:
             "description": pending.description or pending.tool_name,
             "arguments": pending.tool_arguments,
         }
-        # Names come from this job's rows, never from the model's arguments.
-        job_id = db.query(AgentConversation.job_id).filter(AgentConversation.id == run.conversation_id).scalar()
-        documents = confirmation_documents(db, job_id, pending.tool_name, pending.tool_arguments or {})
+        # Frozen when the action was created, from this job's rows; never the model's arguments.
+        documents = (pending.result or {}).get("confirmation_documents")
         if documents is not None:
             pending_payload["documents"] = documents
     return {

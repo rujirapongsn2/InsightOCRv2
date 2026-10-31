@@ -260,9 +260,9 @@ def resolve_documents(surface: Surface, rows_by_id: dict[str, dict]) -> tuple[di
             if known is None:
                 dropped.append(doc_id)
                 continue
-            if doc_id in seen:
+            if known["document_id"] in seen:
                 continue
-            seen.add(doc_id)
+            seen.add(known["document_id"])
             resolved.append({**known, **({"note": row["note"]} if "note" in row else {})})
         if rows and not resolved:
             raise SurfaceError(f'none of the document ids at "{path}" belong to this job. '
