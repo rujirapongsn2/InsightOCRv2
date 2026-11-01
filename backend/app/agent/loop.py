@@ -1318,10 +1318,10 @@ class AgentLoop:
                         if tool_name == "create_skill" and isinstance(result, dict) and result.get("ok"):
                             created_skill_result = result
 
-                        yield sse_event(SSEEventType.TOOL_RESULT, {"id": tc.id, "name": tool_name, "result": result})
                         crud_msg.add(self.db, conversation_id=self.conversation_id, role="tool",
                                      tool_call_id=tc.id, tool_name=tool_name,
                                      tool_result=result, iteration=iteration)
+                        yield sse_event(SSEEventType.TOOL_RESULT, {"id": tc.id, "name": tool_name, "result": result})
                         messages.append({
                             "role": "tool", "tool_call_id": tc.id,
                             "content": tool_content_for_llm(result),
@@ -1401,10 +1401,10 @@ class AgentLoop:
                             result = _verify_file_tool_result(self.context, tool_name, result)
                         if tool_name == "create_skill" and isinstance(result, dict) and result.get("ok"):
                             created_skill_result = result
-                        yield sse_event(SSEEventType.TOOL_RESULT, {"id": tc.id, "name": tool_name, "result": result})
                         crud_msg.add(self.db, conversation_id=self.conversation_id, role="tool",
                                      tool_call_id=tc.id, tool_name=tool_name,
                                      tool_result=result, iteration=iteration)
+                        yield sse_event(SSEEventType.TOOL_RESULT, {"id": tc.id, "name": tool_name, "result": result})
                         messages.append({
                             "role": "tool", "tool_call_id": tc.id,
                             "content": tool_content_for_llm(result),
@@ -2101,9 +2101,9 @@ class AgentLoop:
                      model_used=self.llm_config.get("model", "default_ai_settings"))
         yield sse_event(SSEEventType.TOOL_CALL, {"id": call_id, "name": tool_name, "arguments": tool_args})
         result = await tool_registry.execute(tool_name, tool_args, self.context)
-        yield sse_event(SSEEventType.TOOL_RESULT, {"id": call_id, "name": tool_name, "result": result})
         crud_msg.add(self.db, conversation_id=self.conversation_id, role="tool",
                      tool_call_id=call_id, tool_name=tool_name, tool_result=result, iteration=iteration)
+        yield sse_event(SSEEventType.TOOL_RESULT, {"id": call_id, "name": tool_name, "result": result})
         self._last_context_result = {"tool": tool_name, "arguments": tool_args, "result": result}
 
     async def _builder_model_text(self, prompt: str, system_prompt: str, tool_results: list[dict]) -> str:
@@ -2167,18 +2167,18 @@ class AgentLoop:
         allowed = {s["function"]["name"] for s in tool_registry.get_openai_schemas(categories=["workflow", "web"])}
         if tool_name not in allowed:
             result = {"error": "This tool is not available in the workflow builder"}
-            yield sse_event(SSEEventType.TOOL_RESULT, {"id": call_id, "name": tool_name, "result": result})
             crud_msg.add(self.db, conversation_id=self.conversation_id, role="tool",
                          tool_call_id=call_id, tool_name=tool_name, tool_result=result, iteration=iteration)
+            yield sse_event(SSEEventType.TOOL_RESULT, {"id": call_id, "name": tool_name, "result": result})
             self._last_builder_result = result
             return
         if tool_name == "save_workflow":
             from app.agent.tools.workflow_tools import prepare_workflow_save
             prepared = await prepare_workflow_save(tool_args, self.context)
             if not prepared.get("ok"):
-                yield sse_event(SSEEventType.TOOL_RESULT, {"id": call_id, "name": tool_name, "result": prepared})
                 crud_msg.add(self.db, conversation_id=self.conversation_id, role="tool",
                              tool_call_id=call_id, tool_name=tool_name, tool_result=prepared, iteration=iteration)
+                yield sse_event(SSEEventType.TOOL_RESULT, {"id": call_id, "name": tool_name, "result": prepared})
                 self._last_builder_result = prepared
                 return
             tool_args = prepared["arguments"]
@@ -2219,9 +2219,9 @@ class AgentLoop:
                 result = await tool_registry.execute(tool_name, tool_args, self.context)
         else:
             result = await tool_registry.execute(tool_name, tool_args, self.context)
-        yield sse_event(SSEEventType.TOOL_RESULT, {"id": call_id, "name": tool_name, "result": result})
         crud_msg.add(self.db, conversation_id=self.conversation_id, role="tool",
                      tool_call_id=call_id, tool_name=tool_name, tool_result=result, iteration=iteration)
+        yield sse_event(SSEEventType.TOOL_RESULT, {"id": call_id, "name": tool_name, "result": result})
         self._last_builder_result = result
 
     async def _run_workflow_builder_native(self, user_message: str) -> AsyncGenerator[str, None]:
@@ -2586,10 +2586,10 @@ __TOOL_CATALOG__
                 result = await tool_registry.execute(tool_name, tool_args, self.context)
                 result = _verify_file_tool_result(self.context, tool_name, result)
 
-            yield sse_event(SSEEventType.TOOL_RESULT, {"id": call_id, "name": tool_name, "result": result})
             crud_msg.add(self.db, conversation_id=self.conversation_id, role="tool",
                          tool_call_id=call_id, tool_name=tool_name,
                          tool_result=result, iteration=iteration)
+            yield sse_event(SSEEventType.TOOL_RESULT, {"id": call_id, "name": tool_name, "result": result})
             tool_results.append({"tool": tool_name, "arguments": tool_args, "result": result})
             if tool_name == "create_skill" and isinstance(result, dict) and result.get("ok"):
                 final_text = _skill_creation_final_text(result)
