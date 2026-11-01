@@ -26,7 +26,9 @@ def _jsonb_on_sqlite(element, compiler, **kw):
 
 from app.agent import loop as loop_module  # noqa: E402
 from app.agent.confirmations import declined_result  # noqa: E402
-from app.api.v1.endpoints.agent import _agent_run_payload, confirm_pending_action  # noqa: E402
+from app.api.v1.endpoints.agent import (  # noqa: E402
+    _agent_run_payload, cancel_agent_run, confirm_pending_action,
+)
 from app.crud.crud_agent_pending import agent_pending  # noqa: E402
 from app.models.agent_conversation import AgentConversation  # noqa: E402
 from app.models.agent_pending_action import AgentPendingAction  # noqa: E402
@@ -132,3 +134,23 @@ def test_a_request_a_finished_run_left_waiting_expires(db, run):
     assert agent_pending.expire_for_run(db, run.id) == 1
     db.expire_all()
     assert agent_pending.get(db, pending.id).status == "expired"
+
+
+def test_stopping_a_run_expires_the_request_it_was_waiting_on(db, run):
+    pending = _ask(db, run)
+    body = asyncio.run(cancel_agent_run(run.conversation_id, run.id, db=db, current_user=SimpleNamespace(id=USER)))
+    db.expire_all()
+    assert body["run"]["status"] == "cancelled"
+    assert agent_pending.get(db, pending.id).status == "expired"
+    assert body["run"]["pending_action"]["status"] == "expired"
+
+
+def test_a_loop_that_notices_its_run_stopped_expires_the_request(db, run, monkeypatch):
+    pending = _ask(db, run)
+    loop = _waiting_loop(db, monkeypatch)
+    loop.run_id = run.id
+    monkeypatch.setattr(loop_module.AgentLoop, "_run_active", lambda self: False)
+    answer = asyncio.run(loop._wait_for_confirmation(pending.id, timeout_s=3))
+    db.expire_all()
+    assert answer == "expired" and agent_pending.get(db, pending.id).status == "expired"
+    assert declined_result("bulk_approve", answer)["expired"] is True

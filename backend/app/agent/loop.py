@@ -2612,10 +2612,11 @@ __TOOL_CATALOG__
         try:
             for _ in range(timeout_s):
                 if not self._run_active():
-                    # A stopped run must never carry out an action approved afterwards.
-                    crud_pending.resolve(self.db, pending_id, "rejected")
+                    # A stopped run must never carry out an action approved afterwards,
+                    # and the user never answered this request: it expires with the run.
+                    crud_pending.expire_for_run(self.db, self.run_id)
                     settled = True
-                    return "rejected"
+                    return "expired"
                 # End the read transaction before sleeping so the session does
                 # not sit idle-in-transaction on a pooled connection all night.
                 self.db.rollback()

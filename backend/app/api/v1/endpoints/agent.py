@@ -477,8 +477,8 @@ async def cancel_agent_run(
     """Stop an active run and free the conversation.
 
     A queued run's task is revoked; a running one stops at its next step (the
-    worker checks the run's status). Waiting approvals are rejected so they
-    cannot be confirmed later for a run that has ended.
+    worker checks the run's status). Waiting approvals expire (the user never
+    answered them) so they cannot be confirmed later for a run that has ended.
     """
     from datetime import datetime, timezone
     from app.celery_app import celery_app
@@ -500,11 +500,7 @@ async def cancel_agent_run(
         .update({"status": "cancelled", "error": "Stopped by the user"}, synchronize_session=False)
     )
     if stopped:
-        db.query(AgentPendingAction).filter(
-            AgentPendingAction.conversation_id == conversation_id,
-            AgentPendingAction.user_id == current_user.id,
-            AgentPendingAction.status == "pending",
-        ).update({"status": "rejected"}, synchronize_session=False)
+        crud_pending.expire_for_run(db, run.id)  # commits the stop with it
     db.commit()
     db.refresh(run)
     if stopped and run.task_id:
