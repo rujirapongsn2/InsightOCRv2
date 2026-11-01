@@ -5,6 +5,7 @@ in conftest.py), skipped when no server is reachable unless REQUIRE_POSTGRES=1.
 """
 import asyncio
 import importlib
+import json
 import pkgutil
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -38,6 +39,7 @@ from app.models.agent_conversation import AgentConversation  # noqa: E402
 from app.models.agent_message import AgentMessage  # noqa: E402
 from app.models.agent_pending_action import AgentPendingAction  # noqa: E402
 from app.models.agent_run import AgentRun  # noqa: E402
+from app.models.document import Document  # noqa: E402
 from app.models.job import Job  # noqa: E402
 from app.models.user import User  # noqa: E402
 from app.schemas.agent import ConfirmActionRequest  # noqa: E402
@@ -50,7 +52,8 @@ JOB = uuid.uuid4()
 def db(request):
     if request.param == "sqlite":
         engine = create_engine("sqlite://")
-        tables = [AgentConversation.__table__, AgentMessage.__table__, AgentPendingAction.__table__, AgentRun.__table__]
+        tables = [AgentConversation.__table__, AgentMessage.__table__, AgentPendingAction.__table__, AgentRun.__table__,
+                  Document.__table__]
         AgentRun.metadata.create_all(engine, tables=tables)
     else:
         engine = request.getfixturevalue("postgres_engine")
@@ -101,7 +104,7 @@ def test_an_unanswered_request_expires_and_is_not_a_rejection(db, run, monkeypat
     assert answer == "expired" and agent_pending.get(db, pending.id).status == "expired"
 
     result = declined_result("bulk_approve", answer)
-    assert result["expired"] is True and "expired" in result["error"] and "rejected" not in result["error"]
+    assert result["declined"] == "expired" and "expired" in result["error"] and "rejected" not in result["error"]
     assert declined_result("bulk_approve", "rejected")["error"] == "User rejected action"
 
 
@@ -168,7 +171,7 @@ def test_a_loop_that_notices_its_run_stopped_expires_the_request(db, run, monkey
     answer = asyncio.run(loop._wait_for_confirmation(pending.id, timeout_s=3))
     db.expire_all()
     assert answer == "expired" and agent_pending.get(db, pending.id).status == "expired"
-    assert declined_result("bulk_approve", answer)["expired"] is True
+    assert declined_result("bulk_approve", answer)["declined"] == "expired"
 
 
 def test_metrics_count_expired_requests_apart_from_rejections(db, run):
@@ -213,3 +216,44 @@ def test_the_poll_says_which_requests_only_the_user_may_confirm(db, run):
     assert ask("bulk_approve", 0) is False
     assert ask("create_skill", 1) is True
     assert ask("web_search", 2) is True
+
+
+@pytest.mark.parametrize("answer", ["rejected", "expired"])
+def test_a_declined_confirmation_is_an_answer_not_a_failed_run(db, run, monkeypatch, answer):
+    """UAT N5 and 10: the agent answered after Reject or expiry, yet the run was failed and the UI showed an error."""
+    doc = Document(id=uuid.uuid4(), job_id=JOB, filename="starbuck.pdf", file_path="x", status="extraction_completed")
+    db.add(doc)
+    db.commit()
+    asked = []
+
+    async def chat(_client, **kwargs):
+        asked.append(kwargs["messages"])
+        if len(asked) == 1:
+            call = SimpleNamespace(id="approve", type="function", function=SimpleNamespace(
+                name="approve_document", arguments=json.dumps({"doc_id": str(doc.id)})))
+            message = SimpleNamespace(content=None, tool_calls=[call])
+        else:
+            message = SimpleNamespace(content="ไม่ได้อนุมัติ starbuck.pdf", tool_calls=None)
+        return SimpleNamespace(choices=[SimpleNamespace(message=message, finish_reason="stop")], usage=None)
+
+    async def answered(self, pending_id, timeout_s=0):
+        agent_pending.resolve(self.db, pending_id, answer)
+        return answer
+
+    monkeypatch.setattr(loop_module, "_chat_with_retry", chat)
+    monkeypatch.setattr(loop_module, "build_system_prompt", lambda context, request: "sys")
+    monkeypatch.setattr(loop_module.AgentLoop, "_wait_for_confirmation", answered)
+    loop = loop_module.AgentLoop(db=db, conversation_id=run.conversation_id, user_id=USER, job_id=JOB,
+                                 llm_config={"apiKey": "k", "model": "m"}, skip_planning=True)
+
+    async def drain():
+        return [event async for event in loop.run("อนุมัติเอกสาร starbuck.pdf")]
+
+    events = [json.loads(event[6:]) for event in asyncio.run(drain()) if event.startswith("data: ")]
+    done = next(event for event in events if event["type"] == "done")
+    assert (done["success"], done["failed_steps"]) == (True, [])
+    assert not any(event["type"] == "error" for event in events)
+    # The model is not told a tool failed, so it does not retry the action the user declined.
+    assert not any("A tool just failed" in (m.get("content") or "") for m in asked[-1])
+    db.expire_all()
+    assert db.get(Document, doc.id).status == "extraction_completed"

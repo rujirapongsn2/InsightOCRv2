@@ -380,9 +380,11 @@ def _tool_failed(result: Any) -> bool:
     Several tools, including ``execute_python``, always include an ``error``
     field and set it to ``None`` on success. Checking only for key presence
     incorrectly turned successful calls into failures and caused the model to
-    retry until it hit the iteration cap.
+    retry until it hit the iteration cap. A confirmation the user rejected or
+    let expire (confirmations.declined_result) is their decision, not a failure:
+    it must not fail the run or prompt the model to try again.
     """
-    if not isinstance(result, dict):
+    if not isinstance(result, dict) or result.get("declined"):
         return False
     return bool(result.get("error")) or result.get("ok") is False
 
