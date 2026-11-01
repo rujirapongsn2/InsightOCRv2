@@ -1,4 +1,8 @@
-"""An unanswered confirmation expires: distinct from a rejection, for the model, the UI and the API."""
+"""An unanswered confirmation expires: distinct from a rejection, for the model, the UI and the API.
+
+Each test runs on SQLite and on a throwaway Postgres database (postgres_engine
+in conftest.py), skipped when no server is reachable unless REQUIRE_POSTGRES=1.
+"""
 import asyncio
 import importlib
 import pkgutil
@@ -34,24 +38,34 @@ from app.models.agent_conversation import AgentConversation  # noqa: E402
 from app.models.agent_message import AgentMessage  # noqa: E402
 from app.models.agent_pending_action import AgentPendingAction  # noqa: E402
 from app.models.agent_run import AgentRun  # noqa: E402
+from app.models.job import Job  # noqa: E402
+from app.models.user import User  # noqa: E402
 from app.schemas.agent import ConfirmActionRequest  # noqa: E402
 
 USER = uuid.uuid4()
+JOB = uuid.uuid4()
 
 
-@pytest.fixture
-def db():
-    engine = create_engine("sqlite://")
-    tables = [AgentConversation.__table__, AgentMessage.__table__, AgentPendingAction.__table__, AgentRun.__table__]
-    AgentRun.metadata.create_all(engine, tables=tables)
-    session = sessionmaker(bind=engine)()
+@pytest.fixture(params=["sqlite", "postgres"])
+def db(request):
+    if request.param == "sqlite":
+        engine = create_engine("sqlite://")
+        tables = [AgentConversation.__table__, AgentMessage.__table__, AgentPendingAction.__table__, AgentRun.__table__]
+        AgentRun.metadata.create_all(engine, tables=tables)
+    else:
+        engine = request.getfixturevalue("postgres_engine")
+    session = sessionmaker(bind=engine, autoflush=False)()
+    if request.param == "postgres":
+        session.add(User(id=USER, email="expiry@example.com", hashed_password="x"))
+        session.add(Job(id=JOB, user_id=USER, name="expiry"))
+        session.commit()
     yield session
     session.close()
 
 
 @pytest.fixture
 def run(db):
-    conversation = AgentConversation(id=uuid.uuid4(), job_id=uuid.uuid4(), user_id=USER)
+    conversation = AgentConversation(id=uuid.uuid4(), job_id=JOB, user_id=USER)
     run = AgentRun(id=uuid.uuid4(), conversation_id=conversation.id, user_id=USER, user_message="อนุมัติ",
                    status="running", created_at=datetime.now(timezone.utc))
     db.add_all([conversation, run])
