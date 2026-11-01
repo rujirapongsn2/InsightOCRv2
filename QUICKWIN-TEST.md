@@ -1519,13 +1519,23 @@ Date: 2026-06-30
   with a reason when the panel belongs to another conversation (404), was
   already answered or superseded (409), did not offer that button (422), or
   did not show one of the documents (422). An accepted click stores
-  `kind = "ui_action"` and the payload on the user message. The chat bubble
+  `kind = "ui_action"` and the payload on the user message. The server
+  records a click or a typed message in the same commit as the run that
+  answers it, so a reload while the run waits in the queue still shows it.
+  The worker does not record it again. The chat bubble
   and the conversation title show the server's text ("อนุมัติเอกสาร 2
   รายการที่เลือก"). The model reads `[ui_action] {"surface_id", "name",
-  "document_ids"}`, which is rendered from the payload.
+  "document_ids"}`, which is rendered from the payload. The loop uses the
+  same rendering for its request, the system prompt, the plan, the
+  reflection and the compact wrap-up (`ui_actions.user_turn`).
 - Panel status lives on the server, in `agent_surfaces`: `active`,
   `answered` or `superseded`. A new panel supersedes the earlier panels that
-  have buttons, and an accepted click answers its panel. Panels without
+  have buttons, and an accepted click answers its panel. The answer
+  follows the run that the click started (`agent_surfaces.answered_by_run_id`).
+  It stands while the run is queued or running, and afterwards only if the
+  user confirmed an action in that run. If the run failed or was stopped,
+  or its request was rejected or expired, the panel is `active` again. If
+  a newer panel with buttons appeared meanwhile, it is `superseded`. Panels without
   buttons (metrics, tables, charts, risks) stay `active` and never show the
   "ไม่ใช่แผงล่าสุด" note. `GET /agent/conversations/{id}` returns every
   panel's status and `generated_at` in `surfaces`, whichever page of
@@ -1539,7 +1549,12 @@ Date: 2026-06-30
   carries the run's latest request with its status. The dialog shows while
   the status is `pending`, shows "คำขอยืนยันหมดเวลา" once it is `expired`, and
   disappears once it is answered, without a reload. Confirming a request
-  that is no longer pending returns 409 with a reason.
+  that is no longer pending returns 409 with a reason. Stopping a run
+  also expires its waiting request. `GET /agent/metrics` reports
+  `confirmations.expired` apart from `rejected`. A request without a run
+  id is shown only for the run created before it and before the next run.
+  The poll's pending action carries `requires_explicit_confirmation`, and
+  auto-confirm skips every request where it is true.
 - The panel root is the layout boundary (`relative min-w-0 overflow-x-clip`).
   No component can widen the page. Wide tables and charts scroll inside
   their own wrapper.
@@ -1548,14 +1563,17 @@ Date: 2026-06-30
   It converts old text-encoded clicks (```` ```a2ui-action ```` blocks in
   user messages and runs) into `ui_action` rows and repairs the
   conversation titles that were cut from them. It also backfills a status
-  row for every catalog-v2 panel. Running it again changes nothing, and
+  row for every catalog-v2 panel, with no `answered_by_run_id`: a
+  converted click stays answered. Running it again changes nothing, and
   its downgrade restores the text encoding.
 - Panels from the v1 catalog in old conversations show as an ordinary tool
   call.
 - Manual check: ask "หาเอกสารที่ยังไม่อนุมัติ", select 2, click
   "อนุมัติที่เลือก", and confirm once. The bubble and the conversation list
   show "อนุมัติเอกสาร 2 รายการที่เลือก" with no code block, and the panel
-  says "ส่งคำสั่งแล้ว". Ask again and leave the confirmation unanswered for
+  says "ส่งคำสั่งแล้ว". Click "อนุมัติที่เลือก" on a new panel and reject the
+  confirmation. Once the run ends, the panel's buttons work again. Ask again
+  and leave the confirmation unanswered for
   5 minutes. The dialog changes to "คำขอยืนยันหมดเวลา", and the agent says
   the request expired. In a conversation with more than 50 messages, reload
   and use "โหลดข้อความก่อนหน้า". The first panel's status stays the same. Ask "สรุปยอดรวมเทียบเดือนก่อน", a
@@ -1579,5 +1597,10 @@ Date: 2026-06-30
 - Migration 0031 was run against a throwaway Postgres 16. The steps were:
   build the phase-A schema, stamp it at 0030, add a legacy click, upgrade,
   run the data step again, downgrade, and upgrade again. Every step gave
-  the expected rows.
+  the expected rows. After `answered_by_run_id` was added, the same steps
+  were run against a throwaway `postgres:15-alpine`. They also checked
+  that the column is empty for a converted click and that its foreign key
+  is `ON DELETE SET NULL`. `crud_agent_surface.states` was also run against
+  that database: a failed run reopens its panel, and a confirmed action
+  keeps the panel answered.
 - Not yet checked in the running app or against a live model.
