@@ -89,9 +89,9 @@ async def test_history_discards_orphan_and_incomplete_tool_batches():
         SimpleNamespace(role="tool", tool_call_id="orphan", tool_result={}),
         SimpleNamespace(role="assistant", content=None, tool_calls=[{"id": "a"}, {"id": "b"}]),
         SimpleNamespace(role="tool", tool_call_id="a", tool_result={}),
-        SimpleNamespace(role="user", content="continue"),
+        SimpleNamespace(role="user", kind="text", content="continue"),
     ]
-    with patch("app.agent.context.crud_conv.get_messages", return_value=messages):
+    with patch("app.agent.context.crud_conv.get_recent_turns", return_value=messages):
         assert await context([]).load_history() == [{"role": "user", "content": "continue"}]
 
 
@@ -99,7 +99,7 @@ async def test_history_discards_orphan_and_incomplete_tool_batches():
 async def test_runtime_limit_interrupts_silent_provider_and_closes_iterator():
     closed = []
 
-    async def stalled(_):
+    async def stalled(_message, _ui_action=None, _turn_recorded=False):
         try:
             await asyncio.sleep(10)
             yield "never"

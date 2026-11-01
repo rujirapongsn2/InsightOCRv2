@@ -292,20 +292,7 @@ def test_requests_left_by_a_run_are_expired_and_never_shown_to_the_next(db):
     assert _agent_run_payload(db, new_run)["pending_action"]["pending_action_id"] == str(own.id)
     assert agent_pending.expire_for_run(db, old_run.id) == 1
     db.expire_all()
-    assert agent_pending.get(db, late.id).status == "rejected" and agent_pending.get(db, own.id).status == "pending"
-
-
-def test_a_stopped_run_rejects_its_waiting_approval(monkeypatch):
-    from app.agent import loop as loop_module
-
-    loop = loop_module.AgentLoop.__new__(loop_module.AgentLoop)
-    loop.run_id = uuid.uuid4()
-    resolved = []
-    loop.db = SimpleNamespace(rollback=lambda: None, expire_all=lambda: None)
-    monkeypatch.setattr(loop_module.AgentLoop, "_run_active", lambda self: False)
-    monkeypatch.setattr(loop_module.crud_pending, "resolve", lambda db, pid, status: resolved.append(status) or True)
-    assert asyncio.run(loop._wait_for_confirmation(uuid.uuid4(), timeout_s=5)) is False
-    assert resolved == ["rejected"]
+    assert agent_pending.get(db, late.id).status == "expired" and agent_pending.get(db, own.id).status == "pending"
 
 
 # ── Group 3: honest results, no duplicates, safe errors, history ──────────────

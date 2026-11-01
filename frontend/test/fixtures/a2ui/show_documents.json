@@ -1,0 +1,151 @@
+{
+  "tool": "show_documents",
+  "arguments": {
+    "title": "เอกสารรออนุมัติ 3 รายการ",
+    "actions": [
+      "approve",
+      "reject"
+    ],
+    "documents": [
+      {
+        "document_id": "6ea645a2-e950-56ba-9ea1-37fb3a1959c6",
+        "note": "ยอดรวมสูงกว่าเดือนก่อน 12.5%"
+      },
+      {
+        "document_id": "47e08edf-2452-503c-85de-450d8a406d74"
+      },
+      {
+        "document_id": "d1423691-1c1f-56af-bee8-c48c6ac52ff9",
+        "note": "ไม่พบเลขประจำตัวผู้เสียภาษีผู้ขาย"
+      }
+    ]
+  },
+  "result": {
+    "ok": true,
+    "panel_id": "jobs-show-documents",
+    "shown": [
+      "6ea645a2-e950-56ba-9ea1-37fb3a1959c6",
+      "47e08edf-2452-503c-85de-450d8a406d74",
+      "d1423691-1c1f-56af-bee8-c48c6ac52ff9"
+    ],
+    "a2ui": [
+      {
+        "version": "v0.9",
+        "createSurface": {
+          "surfaceId": "jobs-show-documents",
+          "catalogId": "https://insightdoc.app/a2ui/catalogs/jobs/v2"
+        }
+      },
+      {
+        "version": "v0.9",
+        "updateComponents": {
+          "surfaceId": "jobs-show-documents",
+          "components": [
+            {
+              "id": "root",
+              "component": "Column",
+              "children": [
+                "title",
+                "list",
+                "actions"
+              ]
+            },
+            {
+              "id": "title",
+              "component": "Text",
+              "text": "เอกสารรออนุมัติ 3 รายการ",
+              "variant": "heading"
+            },
+            {
+              "id": "list",
+              "component": "DocumentList",
+              "documents": {
+                "path": "/documents"
+              },
+              "selectable": true,
+              "selection": "/selected"
+            },
+            {
+              "id": "actions",
+              "component": "Row",
+              "children": [
+                "approve",
+                "reject"
+              ]
+            },
+            {
+              "id": "approve",
+              "component": "Button",
+              "label": "อนุมัติที่เลือก",
+              "variant": "primary",
+              "action": {
+                "event": {
+                  "name": "approve_documents",
+                  "context": {
+                    "document_ids": {
+                      "path": "/selected"
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "id": "reject",
+              "component": "Button",
+              "label": "ปฏิเสธที่เลือก",
+              "variant": "secondary",
+              "action": {
+                "event": {
+                  "name": "reject_documents",
+                  "context": {
+                    "document_ids": {
+                      "path": "/selected"
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      {
+        "version": "v0.9",
+        "updateDataModel": {
+          "surfaceId": "jobs-show-documents",
+          "path": "/",
+          "value": {
+            "documents": [
+              {
+                "document_id": "6ea645a2-e950-56ba-9ea1-37fb3a1959c6",
+                "filename": "ใบแจ้งหนี้-บริษัทสยามคลีน-ม.ค.69.pdf",
+                "status": "extraction_completed",
+                "note": "ยอดรวมสูงกว่าเดือนก่อน 12.5%"
+              },
+              {
+                "document_id": "47e08edf-2452-503c-85de-450d8a406d74",
+                "filename": "ใบแจ้งหนี้-บริษัทสยามคลีน-ธ.ค.68.pdf",
+                "status": "extraction_completed"
+              },
+              {
+                "document_id": "d1423691-1c1f-56af-bee8-c48c6ac52ff9",
+                "filename": "ใบแจ้งหนี้-ออฟฟิศเมท-ม.ค.69.pdf",
+                "status": "extraction_completed",
+                "note": "ไม่พบเลขประจำตัวผู้เสียภาษีผู้ขาย"
+              }
+            ],
+            "selected": []
+          }
+        }
+      }
+    ]
+  },
+  "model_sees": {
+    "ok": true,
+    "panel_id": "jobs-show-documents",
+    "shown": [
+      "6ea645a2-e950-56ba-9ea1-37fb3a1959c6",
+      "47e08edf-2452-503c-85de-450d8a406d74",
+      "d1423691-1c1f-56af-bee8-c48c6ac52ff9"
+    ]
+  }
+}

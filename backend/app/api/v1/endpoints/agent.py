@@ -1,8 +1,8 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy import func
 from sqlalchemy.orm import Session
-from uuid import UUID
+from uuid import UUID, uuid4
 import os
 import re
 from urllib.parse import quote
@@ -14,6 +14,7 @@ from app.crud.crud_agent_conversation import agent_conversation as crud_conv
 from app.crud.crud_agent_memory import agent_memory as crud_memory
 from app.crud.crud_agent_pending import agent_pending as crud_pending
 from app.crud.crud_agent_run import agent_run as crud_run
+from app.crud.crud_agent_surface import agent_surface as crud_surface
 from app.crud.crud_agent_skill import agent_skill as crud_skill
 from app.crud.crud_integration import integration as crud_integration
 from app.models.job import Job
@@ -26,6 +27,7 @@ from app.schemas.agent import (
     AgentConversationCreate,
     AgentConversationResponse,
     AgentMessageCreate,
+    AgentUiActionCreate,
     AgentSkillCreate,
     AgentSkillUpdate,
     AgentSkillResponse,
@@ -37,6 +39,7 @@ from app.services.storage import get_storage_service
 from app.agent.tools.registry import tool_registry
 from app.agent.tools.skill_tools import _normalize_allowed_tools, _strict_skill_metadata
 from app.agent.confirmations import requires_explicit_confirmation
+from app.agent import ui_actions
 
 router = APIRouter()
 
@@ -150,32 +153,54 @@ def _build_agent_llm_config(db: Session, conv) -> dict:
     return _ai_settings_to_config(setting, "fallback_ai_settings")
 
 
-def _agent_run_payload(db: Session, run: AgentRun) -> dict:
-    """Return only UI-safe run state; messages remain the source of evidence."""
-    # Only a request this active run made: an older run's leftover request must
-    # never be shown (or auto-approved) as if the current run were waiting for it.
-    pending = None
-    if run.status in {"queued", "running"}:
-        query = db.query(AgentPendingAction).filter(
+def _run_pending_action(db: Session, run: AgentRun) -> AgentPendingAction | None:
+    """The latest request this run made, in whatever state it is now.
+
+    Only this run's: an older run's leftover request must never be shown (or
+    auto-approved) as if the current run were waiting for it.
+    """
+    from sqlalchemy import and_, or_
+    # Requests carry the run that made them. A row without one (older rows, and
+    # credential requests) belongs to the run whose time span holds it: from
+    # this run's creation until the next run of the conversation was created.
+    unattributed = [AgentPendingAction.run_id.is_(None)]
+    if run.created_at is not None:
+        unattributed.append(AgentPendingAction.created_at >= run.created_at)
+        next_run_at = (db.query(func.min(AgentRun.created_at))
+                       .filter(AgentRun.conversation_id == run.conversation_id, AgentRun.created_at > run.created_at)
+                       .scalar())
+        if next_run_at is not None:
+            unattributed.append(AgentPendingAction.created_at < next_run_at)
+    return (
+        db.query(AgentPendingAction)
+        .filter(
             AgentPendingAction.conversation_id == run.conversation_id,
             AgentPendingAction.user_id == run.user_id,
-            AgentPendingAction.status == "pending",
+            or_(AgentPendingAction.run_id == run.id, and_(*unattributed)),
         )
-        from sqlalchemy import or_
-        # Requests carry the run that made them; older rows without one fall back to time.
-        query = query.filter(or_(
-            AgentPendingAction.run_id == run.id,
-            AgentPendingAction.run_id.is_(None) & (AgentPendingAction.created_at >= run.created_at)
-            if run.created_at is not None else AgentPendingAction.run_id.is_(None),
-        ))
-        pending = query.order_by(AgentPendingAction.created_at.desc()).first()
+        .order_by(AgentPendingAction.created_at.desc())
+        .first()
+    )
+
+
+def _agent_run_payload(db: Session, run: AgentRun) -> dict:
+    """Return only UI-safe run state; messages remain the source of evidence.
+
+    pending_action carries its status (pending | confirmed | rejected | expired)
+    on every poll, so the UI shows the dialog only while the server still waits.
+    """
+    pending = _run_pending_action(db, run)
     pending_payload = None
     if pending:
         pending_payload = {
             "pending_action_id": str(pending.id),
+            "status": pending.status,
             "tool_name": pending.tool_name,
+            # Auto-confirm never answers these; only the user's own click does.
+            "requires_explicit_confirmation": requires_explicit_confirmation(pending.tool_name),
             "description": pending.description or pending.tool_name,
             "arguments": pending.tool_arguments,
+            "expires_at": pending.expires_at.isoformat() if pending.expires_at else None,
         }
         # Frozen when the action was created, from this job's rows; never the model's arguments.
         documents = (pending.result or {}).get("confirmation_documents")
@@ -280,12 +305,26 @@ async def list_agent_memories(
     }
 
 
+def _message_payload(m) -> dict:
+    return {"id": str(m.id), "role": m.role, "kind": m.kind or "text", "content": m.content,
+            "ui_action": m.ui_action, "tool_calls": m.tool_calls, "tool_call_id": m.tool_call_id,
+            "tool_name": m.tool_name, "tool_result": m.tool_result, "iteration": m.iteration,
+            "model_used": m.model_used, "created_at": m.created_at.isoformat()}
+
+
 @router.get("/conversations/{conversation_id}")
 async def get_agent_conversation(
     conversation_id: UUID,
+    before: UUID | None = None,
+    limit: int = Query(50, ge=1, le=200),
     db: Session = Depends(deps.get_db),
     current_user=Depends(deps.get_current_user),
 ):
+    """The newest page of messages, or the page older than message ``before``.
+
+    ``surfaces`` holds every panel of the conversation with its server-side
+    status, whichever page the client has loaded.
+    """
     # Serialize admission per conversation. The partial unique index is the
     # final guard, but the row lock lets us return a helpful conflict response.
     conv = (
@@ -298,20 +337,17 @@ async def get_agent_conversation(
         raise HTTPException(status_code=404)
     if conv.job_id is not None:
         _ensure_job_access(db, conv.job_id, current_user)
-    messages = crud_conv.get_messages(db, conversation_id)
+    messages, has_more = crud_conv.get_message_page(db, conversation_id, limit=limit, before=before)
     return {
         "conversation": {"id": str(conv.id), "kind": conv.kind, "job_id": str(conv.job_id) if conv.job_id else None, "title": conv.title, "max_iterations": conv.max_iterations, "created_at": conv.created_at.isoformat()},
-        "messages": [{"id": str(m.id), "role": m.role, "content": m.content, "tool_calls": m.tool_calls, "tool_call_id": m.tool_call_id, "tool_name": m.tool_name, "tool_result": m.tool_result, "iteration": m.iteration, "model_used": m.model_used, "created_at": m.created_at.isoformat()} for m in messages],
+        "messages": [_message_payload(m) for m in messages],
+        "has_more": has_more,
+        "surfaces": crud_surface.states(db, conversation_id),
     }
 
 
-@router.post("/conversations/{conversation_id}/messages")
-async def send_agent_message(
-    conversation_id: UUID,
-    data: AgentMessageCreate,
-    db: Session = Depends(deps.get_db),
-    current_user=Depends(deps.get_current_user),
-):
+def _idle_conversation(db: Session, conversation_id: UUID, current_user):
+    """The user's conversation, refused while a run is still working on it."""
     conv = crud_conv.get(db, conversation_id)
     if not conv or conv.user_id != current_user.id:
         raise HTTPException(status_code=404)
@@ -338,12 +374,23 @@ async def send_agent_message(
             status_code=409,
             detail="กำลังหยุดงานก่อนหน้า รอสักครู่แล้วส่งข้อความอีกครั้ง",
         )
+    return conv
 
+
+def _start_run(db: Session, conversation_id: UUID, current_user, user_message: str,
+               ui_action: dict | None = None, run_id: UUID | None = None) -> AgentRun:
+    """Queue a run with its user turn; commits whatever the caller changed in the same transaction.
+
+    503 when the queue is down: the run is then failed, which also reopens a
+    panel the turn answered (crud_agent_surface.panel_status).
+    """
     run = crud_run.create(
         db,
         conversation_id=conversation_id,
         user_id=current_user.id,
-        user_message=data.content,
+        user_message=user_message,
+        ui_action=ui_action,
+        run_id=run_id,
     )
     try:
         from app.tasks.agent_tasks import run_agent_task
@@ -357,7 +404,44 @@ async def send_agent_message(
         run.error = "Agent queue is unavailable"
         db.commit()
         raise HTTPException(status_code=503, detail="Agent queue is unavailable")
+    return run
 
+
+@router.post("/conversations/{conversation_id}/messages")
+async def send_agent_message(
+    conversation_id: UUID,
+    data: AgentMessageCreate,
+    db: Session = Depends(deps.get_db),
+    current_user=Depends(deps.get_current_user),
+):
+    _idle_conversation(db, conversation_id, current_user)
+    run = _start_run(db, conversation_id, current_user, data.content)
+    return JSONResponse(status_code=202, content={"run": _agent_run_payload(db, run)})
+
+
+@router.post("/conversations/{conversation_id}/ui-actions")
+async def send_agent_ui_action(
+    conversation_id: UUID,
+    data: AgentUiActionCreate,
+    db: Session = Depends(deps.get_db),
+    current_user=Depends(deps.get_current_user),
+):
+    """A click on a panel button: checked against the panel, then answered by a run.
+
+    The panel must belong to this conversation and still be active, offer this
+    button, and show every named document. Accepting marks the panel answered
+    by the run it starts, and records the click in the conversation.
+    """
+    _idle_conversation(db, conversation_id, current_user)
+    run_id = uuid4()
+    try:
+        action = ui_actions.accept(db, conversation_id, run_id, surface_id=data.surface_id, name=data.name,
+                                   source_component_id=data.source_component_id, document_ids=data.document_ids)
+    except ui_actions.UiActionRefused as refused:
+        db.rollback()
+        raise HTTPException(status_code=refused.status_code, detail=refused.reason)
+    display = ui_actions.display_text(action["name"], len(action["document_ids"]))
+    run = _start_run(db, conversation_id, current_user, display, ui_action=action, run_id=run_id)
     return JSONResponse(status_code=202, content={"run": _agent_run_payload(db, run)})
 
 
@@ -406,8 +490,8 @@ async def cancel_agent_run(
     """Stop an active run and free the conversation.
 
     A queued run's task is revoked; a running one stops at its next step (the
-    worker checks the run's status). Waiting approvals are rejected so they
-    cannot be confirmed later for a run that has ended.
+    worker checks the run's status). Waiting approvals expire (the user never
+    answered them) so they cannot be confirmed later for a run that has ended.
     """
     from datetime import datetime, timezone
     from app.celery_app import celery_app
@@ -429,11 +513,7 @@ async def cancel_agent_run(
         .update({"status": "cancelled", "error": "Stopped by the user"}, synchronize_session=False)
     )
     if stopped:
-        db.query(AgentPendingAction).filter(
-            AgentPendingAction.conversation_id == conversation_id,
-            AgentPendingAction.user_id == current_user.id,
-            AgentPendingAction.status == "pending",
-        ).update({"status": "rejected"}, synchronize_session=False)
+        crud_pending.expire_for_run(db, run.id)  # commits the stop with it
     db.commit()
     db.refresh(run)
     if stopped and run.task_id:
@@ -442,6 +522,13 @@ async def cancel_agent_run(
         except Exception:  # noqa: BLE001 — the status change already stops the run
             pass
     return {"run": _agent_run_payload(db, run)}
+
+
+_NOT_WAITING = {
+    "expired": "คำขอยืนยันนี้หมดเวลาแล้ว ไม่มีการเปลี่ยนแปลงใดๆ ขอให้ Agent ถามใหม่ได้",
+    "confirmed": "คำขอยืนยันนี้ได้รับคำตอบแล้ว",
+    "rejected": "คำขอยืนยันนี้ได้รับคำตอบแล้ว",
+}
 
 
 @router.post("/confirm/{pending_action_id}")
@@ -455,14 +542,16 @@ async def confirm_pending_action(
     if not action or action.user_id != current_user.id:
         raise HTTPException(status_code=404)
     if action.status != "pending":
-        raise HTTPException(status_code=400, detail=f"Action is {action.status}")
+        raise HTTPException(status_code=409, detail=_NOT_WAITING.get(action.status, _NOT_WAITING["confirmed"]))
     if data.approved and requires_explicit_confirmation(action.tool_name) and not data.explicit_confirmation:
         raise HTTPException(
             status_code=400,
             detail=f"{action.tool_name} requires explicit user confirmation",
         )
     if not crud_pending.resolve(db, pending_action_id, "confirmed" if data.approved else "rejected"):
-        raise HTTPException(status_code=409, detail="This request is no longer waiting for an answer")
+        db.expire_all()
+        settled = crud_pending.get(db, pending_action_id)
+        raise HTTPException(status_code=409, detail=_NOT_WAITING.get(settled.status if settled else "", _NOT_WAITING["confirmed"]))
     return {"ok": True}
 
 
@@ -1023,6 +1112,7 @@ async def agent_metrics(
     pend_counts = {status: count for status, count in pend_rows}
     confirmed = pend_counts.get("confirmed", 0)
     rejected = pend_counts.get("rejected", 0)
+    # Answered requests only: an expired one was never answered, so it is not a rejection.
     resolved = confirmed + rejected
 
     return {
@@ -1038,6 +1128,7 @@ async def agent_metrics(
             "pending": pend_counts.get("pending", 0),
             "confirmed": confirmed,
             "rejected": rejected,
+            "expired": pend_counts.get("expired", 0),
             "rejection_rate": round(rejected / resolved, 4) if resolved else 0.0,
         },
     }

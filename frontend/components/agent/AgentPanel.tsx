@@ -3,10 +3,11 @@
 import { useState, useEffect, useRef, useCallback, type KeyboardEvent, type ReactNode } from "react"
 import { X, Plus, Trash2, Bot, ChevronDown, AlertTriangle, Loader2, Brain, Library, Sparkles, ListChecks, Check, Circle, ShieldCheck, ShieldAlert, FileText, GitCompare, CheckCircle2, Send, ArrowUpRight } from "lucide-react"
 import { getApiBaseUrl } from "@/lib/api"
-import { answeredSurfaceIds, latestSurfaceId, type SurfaceConversation } from "@/lib/a2ui"
+import { parseSurfaceStates, type SurfaceConversation, type SurfaceState, type UiActionRequest } from "@/lib/a2ui"
+import { mergeNewestPage, shownConfirmation, type PendingAction } from "@/lib/agentConversation"
 import AgentMessage from "./AgentMessage"
 import AgentToolCalls from "./AgentToolCalls"
-import ConfirmationDialog, { type PendingAction } from "./ConfirmationDialog"
+import ConfirmationDialog from "./ConfirmationDialog"
 import ThinkingIndicator from "./ThinkingIndicator"
 import SkillLibrary from "./SkillLibrary"
 import ChatInput from "@/components/chat/ChatInput"
@@ -24,6 +25,8 @@ interface Conversation {
 interface Message {
     id: string
     role: "user" | "assistant" | "tool" | "plan"
+    /** "ui_action": a panel click; content is the display text the server wrote. */
+    kind?: "text" | "ui_action"
     content: string | null
     tool_calls?: any[]
     tool_call_id?: string
@@ -105,7 +108,12 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay", onOpenDoc
     const [planSteps, setPlanSteps] = useState<string[]>([])
     const [reflection, setReflection] = useState<{ complete: boolean; missing: string[] } | null>(null)
     const [streamText, setStreamText] = useState("")
-    const [pendingAction, setPendingAction] = useState<PendingAction | null>(null)
+    const [surfaceStates, setSurfaceStates] = useState<Record<string, SurfaceState>>({})
+    const [hasOlderMessages, setHasOlderMessages] = useState(false)
+    const [loadingOlder, setLoadingOlder] = useState(false)
+    const skipNextScrollRef = useRef(false)
+    // What is loaded, for merging a reloaded newest page without re-creating the loaders.
+    const historyRef = useRef<{ messages: Message[]; hasMore: boolean }>({ messages: [], hasMore: false })
     const [autoConfirm, setAutoConfirm] = useState(false)
     const [autoConfirmedIds, setAutoConfirmedIds] = useState<Set<string>>(new Set())
     const autoConfirmRef = useRef(false)
@@ -130,7 +138,16 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay", onOpenDoc
         return { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) }
     }, [])
 
-    useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: "smooth" }) }, [messages, streamText, events])
+    useEffect(() => { historyRef.current = { messages, hasMore: hasOlderMessages } }, [messages, hasOlderMessages])
+
+    useEffect(() => {
+        // Loading earlier history must not jump the reader to the bottom.
+        if (skipNextScrollRef.current) {
+            skipNextScrollRef.current = false
+            return
+        }
+        messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
+    }, [messages, streamText, events])
 
     useEffect(() => {
         const load = async () => {
@@ -153,10 +170,33 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay", onOpenDoc
             const res = await fetch(`${apiBase}/agent/conversations/${activeConversation}`, { headers: headers() })
             if (res.ok) {
                 const data = await res.json()
-                setMessages(data.messages || [])
+                const loaded = historyRef.current
+                const merged = mergeNewestPage(loaded.messages, loaded.hasMore, data.messages || [], Boolean(data.has_more))
+                setSurfaceStates(parseSurfaceStates(data.surfaces))
+                setMessages(merged.messages)
+                setHasOlderMessages(merged.hasMore)
             }
         } catch { }
     }, [activeConversation, apiBase, headers])
+
+    const loadOlderMessages = useCallback(async () => {
+        const oldest = messages[0]
+        if (!activeConversation || !oldest || loadingOlder) return
+        setLoadingOlder(true)
+        try {
+            const res = await fetch(`${apiBase}/agent/conversations/${activeConversation}?before=${oldest.id}`, { headers: headers() })
+            if (res.ok) {
+                const data = await res.json()
+                const older: Message[] = data.messages || []
+                skipNextScrollRef.current = true
+                setSurfaceStates(parseSurfaceStates(data.surfaces))
+                setMessages(prev => (prev[0]?.id === oldest.id ? [...older, ...prev] : prev))
+                setHasOlderMessages(Boolean(data.has_more))
+            }
+        } catch { } finally {
+            setLoadingOlder(false)
+        }
+    }, [activeConversation, apiBase, headers, loadingOlder, messages])
 
     const refreshAgentRun = useCallback(async (conversationId: string, runId: string) => {
         try {
@@ -205,15 +245,16 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay", onOpenDoc
     }, [apiBase, headers])
 
     useEffect(() => {
+        setMessages([])
+        setSurfaceStates({})
+        setHasOlderMessages(false)
         if (!activeConversation) {
-            setMessages([])
             setActiveRun(null)
             setStreaming(false)
             return
         }
         setActiveRun(null)
         setStreaming(false)
-        setPendingAction(null)
         setError(null)
         reloadActiveMessages()
         restoreActiveRun(activeConversation)
@@ -251,24 +292,22 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay", onOpenDoc
 
     useEffect(() => { loadSkills() }, [loadSkills])
 
+    // The dialog is derived from the run's polled request on every render; this
+    // effect only answers a waiting request automatically when the user opted in.
+    const pendingAction = activeRun?.pending_action
     useEffect(() => {
-        const action = activeRun?.pending_action
-        if (!action) return
-
-        const requiresExplicitConfirmation = action.tool_name === "create_skill" || action.tool_name === "web_search"
-        if (!requiresExplicitConfirmation && autoConfirmRef.current) {
-            if (!autoConfirmedIds.has(action.pending_action_id)) {
-                setAutoConfirmedIds(prev => new Set(prev).add(action.pending_action_id))
-                fetch(`${apiBase}/agent/confirm/${action.pending_action_id}`, {
-                    method: "POST",
-                    headers: headers(),
-                    body: JSON.stringify({ approved: true }),
-                }).catch(() => setPendingAction(action))
-            }
-            return
-        }
-        setPendingAction(action)
-    }, [activeRun?.pending_action, apiBase, autoConfirmedIds, headers])
+        if (pendingAction?.status !== "pending" || !autoConfirmRef.current) return
+        if (pendingAction.requires_explicit_confirmation || autoConfirmedIds.has(pendingAction.pending_action_id)) return
+        const id = pendingAction.pending_action_id
+        setAutoConfirmedIds(prev => new Set(prev).add(id))
+        fetch(`${apiBase}/agent/confirm/${id}`, { method: "POST", headers: headers(), body: JSON.stringify({ approved: true }) })
+            .then(res => { if (!res.ok) throw new Error(String(res.status)) })
+            .catch(() => {
+                // Ask by hand instead: the dialog reappears from the next poll.
+                setAutoConfirm(false)
+                setAutoConfirmedIds(prev => { const next = new Set(prev); next.delete(id); return next })
+            })
+    }, [pendingAction, apiBase, autoConfirmedIds, headers])
 
     const enableAutoConfirm = () => {
         if (autoConfirm) {
@@ -335,8 +374,8 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay", onOpenDoc
         window.setTimeout(() => startInputRef.current?.focus(), 0)
     }
 
-    const sendMessage = async (override?: string) => {
-        const rawInput = override ?? inputValue
+    const sendMessage = async () => {
+        const rawInput = inputValue
         if (!rawInput.trim() || streaming) return
         setShowStartSkillPicker(false)
         let conversationId = activeConversation
@@ -346,7 +385,7 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay", onOpenDoc
             conversationId = conv.id
         }
         const userMsg = resolveOutgoingMessage(rawInput)
-        if (override === undefined) setInputValue("")
+        setInputValue("")
         setStreaming(true)
         setStreamText("")
         setEvents([])
@@ -383,14 +422,48 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay", onOpenDoc
         }
     }
 
+    /** A panel button click: the server checks it against the panel, then a run answers it. */
+    const sendUiAction = async (action: UiActionRequest) => {
+        if (!activeConversation || streaming) return
+        setStreaming(true)
+        setStreamText("")
+        setEvents([])
+        setError(null)
+        setThinkingIteration(null)
+        setPlanSteps([])
+        setReflection(null)
+        try {
+            const res = await fetch(`${apiBase}/agent/conversations/${activeConversation}/ui-actions`, {
+                method: "POST", headers: headers(), body: JSON.stringify(action),
+            })
+            const data = await res.json().catch(() => null)
+            if (!res.ok || !data?.run) {
+                setError(data?.detail || `Server error: ${res.status}`)
+                setStreaming(false)
+                await reloadActiveMessages()
+                return
+            }
+            setActiveRun(data.run as AgentRun)
+            await reloadActiveMessages()
+        } catch (e) {
+            setError(e instanceof Error ? e.message : "Network error")
+            setStreaming(false)
+        }
+    }
+
     const confirmAction = async (approved: boolean) => {
-        if (!pendingAction) return
-        await fetch(`${apiBase}/agent/confirm/${pendingAction.pending_action_id}`, {
+        const action = pendingAction
+        if (action?.status !== "pending" || !activeConversation || !activeRun) return
+        const res = await fetch(`${apiBase}/agent/confirm/${action.pending_action_id}`, {
             method: "POST",
             headers: headers(),
             body: JSON.stringify({ approved, explicit_confirmation: true }),
-        })
-        setPendingAction(null)
+        }).catch(() => null)
+        if (res && !res.ok) {
+            const data = await res.json().catch(() => null)
+            setError(data?.detail || `Server error: ${res.status}`)
+        }
+        await refreshAgentRun(activeConversation, activeRun.id)
     }
 
     const deleteConversation = async (convId: string) => {
@@ -417,16 +490,14 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay", onOpenDoc
         }
     }
 
+    const confirmation = shownConfirmation(pendingAction)
+    const autoConfirming = confirmation?.status === "pending" && autoConfirmedIds.has(confirmation.pending_action_id)
     const surfaceConversation: SurfaceConversation = {
-        latestSurfaceId: latestSurfaceId([
-            ...messages.filter(msg => msg.role === "tool").map(msg => msg.tool_result),
-            ...events.filter(evt => evt.type === "tool_result").map(evt => evt.result),
-        ]),
-        answered: answeredSurfaceIds(messages.filter(msg => msg.role === "user").map(msg => msg.content || "")),
+        states: surfaceStates,
         runActive: streaming || (activeRun !== null && ["queued", "running"].includes(activeRun.status)),
     }
     const surfaceProps = {
-        onSurfaceAction: (message: string) => { void sendMessage(message) },
+        onSurfaceAction: (action: UiActionRequest) => { void sendUiAction(action) },
         surfaceConversation,
         onOpenDocument,
     }
@@ -678,7 +749,6 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay", onOpenDoc
                             setShowConvList(false)
                             setAutoConfirm(false)
                             setAutoConfirmedIds(new Set())
-                            setPendingAction(null)
                         }}>
                             <span className="flex-1 truncate">{conv.title || "New conversation"}</span>
                             <button onClick={e => { e.stopPropagation(); deleteConversation(conv.id) }} className="text-mute-gray hover:text-red-500"><Trash2 className="h-3.5 w-3.5" /></button>
@@ -898,6 +968,19 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay", onOpenDoc
                         </div>
                     </div>
                 )}
+                {hasOlderMessages && (
+                    <div className="flex justify-center">
+                        <button
+                            type="button"
+                            onClick={() => { void loadOlderMessages() }}
+                            disabled={loadingOlder}
+                            className="inline-flex items-center gap-1.5 rounded-full border border-hairline bg-white px-3 py-1 text-xs font-medium text-softnix-blue hover:border-softnix-blue/40 disabled:text-mute-gray"
+                        >
+                            {loadingOlder && <Loader2 className="h-3 w-3 animate-spin" />}
+                            โหลดข้อความก่อนหน้า
+                        </button>
+                    </div>
+                )}
                 {renderMessageList()}
                 {streaming && planSteps.length > 0 && renderPlanCard(planSteps, reflection, true, "live-plan")}
                 {events.filter(e => e.type === "tool_call").length > 0 && (
@@ -930,7 +1013,9 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay", onOpenDoc
             )}
 
             {/* Confirmation Dialog */}
-            {pendingAction && <ConfirmationDialog action={pendingAction} onConfirm={() => confirmAction(true)} onReject={() => confirmAction(false)} />}
+            {confirmation && !autoConfirming && (
+                <ConfirmationDialog action={confirmation} onConfirm={() => confirmAction(true)} onReject={() => confirmAction(false)} />
+            )}
 
             {/* Input */}
             {activeConversation && !showStartComposer && slashCommand && (

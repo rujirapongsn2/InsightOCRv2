@@ -12,6 +12,7 @@ import { createIntegration } from "@/lib/integrations-api"
 import { createAIProvider } from "@/lib/ai-settings-api"
 import ChatInput from "@/components/chat/ChatInput"
 import ConfirmationDialog from "@/components/agent/ConfirmationDialog"
+import type { PendingAction as AgentPendingAction } from "@/lib/agentConversation"
 
 // ── Types ────────────────────────────────────────────────────────────
 interface AgentEvent {
@@ -26,13 +27,15 @@ interface AgentEvent {
     tool_name?: string
     description?: string
     message?: string
+    status?: string
 }
+
+type PendingAction = Omit<AgentPendingAction, "arguments" | "requires_explicit_confirmation"> & { arguments: any }
 
 type TranscriptItem =
     | { kind: "msg"; id: string; role: "user" | "assistant"; content: string }
     | { kind: "tool"; id: string; name: string; args: any; result?: any }
 
-interface PendingAction { pending_action_id: string; tool_name: string; description: string; arguments: any }
 interface CredentialRequest { pending_action_id: string; credential_kind: string; fields: string[]; purpose: string }
 
 const SECRET_FIELDS = new Set(["api_key", "private_key", "client_secret", "authHeader", "apiKey"])
@@ -290,13 +293,17 @@ function AiBuilderInner() {
                             break
                         }
                         case "confirmation_required":
-                            setPendingAction(evt as unknown as PendingAction)
+                            setPendingAction({ ...(evt as unknown as Omit<PendingAction, "status">), status: "pending" })
                             if (evt.tool_name === "save_workflow" && evt.arguments?.definition) {
                                 setPreviewDef(evt.arguments.definition)
                                 setPreviewName(evt.arguments.name || "Workflow")
                                 setValidated(true)
                                 setIssues([])
                             }
+                            break
+                        case "tool_rejected":
+                            // An unanswered request expired on the server: say so instead of leaving Confirm up.
+                            setPendingAction(prev => (prev && evt.status === "expired" ? { ...prev, status: "expired" } : null))
                             break
                         case "delta":
                             finalText += evt.text || ""
@@ -423,7 +430,7 @@ function AiBuilderInner() {
                             <button disabled={streaming} onClick={() => { setConnectionNeeded(null); void sendMessage(`เชื่อมต่อ ${connectionNeeded} แล้ว ช่วยตรวจบัญชีอีกครั้งและสร้าง Workflow ต่อ`); }} className="border rounded-lg px-3 py-2 disabled:opacity-50">ตรวจอีกครั้ง</button>
                         </div>
                     </div>}
-                    {pendingAction?.tool_name === "save_workflow" ? (
+                    {pendingAction?.tool_name === "save_workflow" && pendingAction.status === "pending" ? (
                         <div className="mx-3 mb-3 rounded-lg border border-[#CBD5E1] p-4 space-y-3">
                             <p className="text-sm font-medium">บันทึก “{pendingAction.arguments?.name || previewName}”?</p>
                             <p className="text-xs text-[#5B6B7E]">{pendingAction.arguments?.schedule_enabled ? `เปิดใช้งานตามเวลา ${pendingAction.arguments.schedule_cron}` : "เริ่มทำงานเมื่อคุณกด Run"}</p>

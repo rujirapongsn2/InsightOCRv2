@@ -1,0 +1,238 @@
+{
+  "tool": "show_metrics",
+  "arguments": {
+    "title": "สรุปค่าใช้จ่าย ม.ค. 2569",
+    "sources": [
+      "6ea645a2-e950-56ba-9ea1-37fb3a1959c6",
+      "47e08edf-2452-503c-85de-450d8a406d74",
+      "d1423691-1c1f-56af-bee8-c48c6ac52ff9"
+    ],
+    "metrics": [
+      {
+        "label": "ค่าใช้จ่ายรวม",
+        "kind": "money",
+        "value": 3685.5,
+        "previous": 3276,
+        "previous_label": "ธ.ค. 2568",
+        "higher_is": "bad"
+      },
+      {
+        "label": "จำนวนใบแจ้งหนี้",
+        "kind": "count",
+        "value": 12,
+        "previous": 12,
+        "previous_label": "ธ.ค. 2568"
+      },
+      {
+        "label": "ส่วนลดเฉลี่ย",
+        "kind": "percent",
+        "value": 4.5,
+        "previous": 6,
+        "previous_label": "ธ.ค. 2568",
+        "higher_is": "good"
+      }
+    ]
+  },
+  "result": {
+    "ok": true,
+    "panel_id": "jobs-show-metrics",
+    "metrics": [
+      {
+        "label": "ค่าใช้จ่ายรวม",
+        "change": {
+          "delta": 409.5,
+          "percent": 12.5,
+          "direction": "up",
+          "sentiment": "bad"
+        }
+      },
+      {
+        "label": "จำนวนใบแจ้งหนี้",
+        "change": {
+          "delta": 0.0,
+          "percent": 0.0,
+          "direction": "flat",
+          "sentiment": "neutral"
+        }
+      },
+      {
+        "label": "ส่วนลดเฉลี่ย",
+        "change": {
+          "delta": -1.5,
+          "percent": null,
+          "direction": "down",
+          "sentiment": "bad"
+        }
+      }
+    ],
+    "sources": 3,
+    "a2ui": [
+      {
+        "version": "v0.9",
+        "createSurface": {
+          "surfaceId": "jobs-show-metrics",
+          "catalogId": "https://insightdoc.app/a2ui/catalogs/jobs/v2"
+        }
+      },
+      {
+        "version": "v0.9",
+        "updateComponents": {
+          "surfaceId": "jobs-show-metrics",
+          "components": [
+            {
+              "id": "root",
+              "component": "Column",
+              "children": [
+                "title",
+                "metrics",
+                "sources"
+              ]
+            },
+            {
+              "id": "title",
+              "component": "Text",
+              "text": "สรุปค่าใช้จ่าย ม.ค. 2569",
+              "variant": "heading"
+            },
+            {
+              "id": "metrics",
+              "component": "Row",
+              "children": [
+                "metric0",
+                "metric1",
+                "metric2"
+              ]
+            },
+            {
+              "id": "sources",
+              "component": "Sources",
+              "documents": {
+                "path": "/sources"
+              }
+            },
+            {
+              "id": "metric0",
+              "component": "Metric",
+              "label": "ค่าใช้จ่ายรวม",
+              "kind": "money",
+              "currency": "THB",
+              "previous_label": "ธ.ค. 2568",
+              "data": {
+                "path": "/metrics/0"
+              }
+            },
+            {
+              "id": "metric1",
+              "component": "Metric",
+              "label": "จำนวนใบแจ้งหนี้",
+              "kind": "count",
+              "previous_label": "ธ.ค. 2568",
+              "data": {
+                "path": "/metrics/1"
+              }
+            },
+            {
+              "id": "metric2",
+              "component": "Metric",
+              "label": "ส่วนลดเฉลี่ย",
+              "kind": "percent",
+              "previous_label": "ธ.ค. 2568",
+              "data": {
+                "path": "/metrics/2"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "version": "v0.9",
+        "updateDataModel": {
+          "surfaceId": "jobs-show-metrics",
+          "path": "/",
+          "value": {
+            "metrics": [
+              {
+                "value": 3685.5,
+                "previous": 3276.0,
+                "change": {
+                  "delta": 409.5,
+                  "percent": 12.5,
+                  "direction": "up",
+                  "sentiment": "bad"
+                }
+              },
+              {
+                "value": 12.0,
+                "previous": 12.0,
+                "change": {
+                  "delta": 0.0,
+                  "percent": 0.0,
+                  "direction": "flat",
+                  "sentiment": "neutral"
+                }
+              },
+              {
+                "value": 4.5,
+                "previous": 6.0,
+                "change": {
+                  "delta": -1.5,
+                  "percent": null,
+                  "direction": "down",
+                  "sentiment": "bad"
+                }
+              }
+            ],
+            "sources": [
+              {
+                "document_id": "6ea645a2-e950-56ba-9ea1-37fb3a1959c6",
+                "filename": "ใบแจ้งหนี้-บริษัทสยามคลีน-ม.ค.69.pdf"
+              },
+              {
+                "document_id": "47e08edf-2452-503c-85de-450d8a406d74",
+                "filename": "ใบแจ้งหนี้-บริษัทสยามคลีน-ธ.ค.68.pdf"
+              },
+              {
+                "document_id": "d1423691-1c1f-56af-bee8-c48c6ac52ff9",
+                "filename": "ใบแจ้งหนี้-ออฟฟิศเมท-ม.ค.69.pdf"
+              }
+            ]
+          }
+        }
+      }
+    ]
+  },
+  "model_sees": {
+    "ok": true,
+    "panel_id": "jobs-show-metrics",
+    "metrics": [
+      {
+        "label": "ค่าใช้จ่ายรวม",
+        "change": {
+          "delta": 409.5,
+          "percent": 12.5,
+          "direction": "up",
+          "sentiment": "bad"
+        }
+      },
+      {
+        "label": "จำนวนใบแจ้งหนี้",
+        "change": {
+          "delta": 0.0,
+          "percent": 0.0,
+          "direction": "flat",
+          "sentiment": "neutral"
+        }
+      },
+      {
+        "label": "ส่วนลดเฉลี่ย",
+        "change": {
+          "delta": -1.5,
+          "percent": null,
+          "direction": "down",
+          "sentiment": "bad"
+        }
+      }
+    ],
+    "sources": 3
+  }
+}

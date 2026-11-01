@@ -2,24 +2,20 @@
 
 import { Component, useState, type ReactNode } from "react"
 import { Button } from "@/components/ui/button"
-import { Chart, DataTable, Metric, OpenDocumentButton, RiskBadge, RiskList } from "@/components/agent/a2ui/analytics"
+import { Chart, DataTable, Metric, OpenDocumentButton, RiskList, Sources } from "@/components/agent/a2ui/analytics"
+import { formatGeneratedAt } from "@/lib/a2uiFormat"
 import {
-    COMPUTED_NOTE,
-    actionMessage,
     buildAction,
-    documentRows,
     documentStatusLabel,
-    getPointer,
     hasEmptyBinding,
-    resolveValue,
     selectedIds,
     setPointer,
-    showsComputedNumbers,
     type A2uiComponent,
     type ComponentOf,
     type ComponentType,
     type DataModel,
     type Surface,
+    type UiActionRequest,
 } from "@/lib/a2ui"
 
 export interface A2uiSurfaceProps {
@@ -29,8 +25,10 @@ export interface A2uiSurfaceProps {
     actionsDisabled?: boolean
     /** Short lines under the surface saying why its buttons are off. */
     notes?: string[]
-    /** Receives the user message a button click sends to the agent. */
-    onAction?: (message: string) => void
+    /** When the server computed the panel's data (ISO); shown as "ข้อมูล ณ ...". */
+    generatedAt?: string | null
+    /** Receives the click; the server checks it against the panel. */
+    onAction?: (action: UiActionRequest) => void
     onOpenDocument?: (documentId: string) => void
 }
 
@@ -39,7 +37,7 @@ interface RenderContext {
     data: DataModel
     setData: (path: string, value: unknown) => void
     actionsDisabled: boolean
-    onAction?: (message: string) => void
+    onAction?: (action: UiActionRequest) => void
     onOpenDocument?: (documentId: string) => void
     render: (id: string) => ReactNode
 }
@@ -51,7 +49,7 @@ const TEXT_CLASS = {
 } as const
 
 function DocumentList({ component, ctx }: { component: ComponentOf<"DocumentList">; ctx: RenderContext }) {
-    const rows = documentRows(getPointer(ctx.data, component.documents.path))
+    const rows = component.documents
     const selected = new Set(selectedIds(ctx.data, component.selection))
     const setSelected = (ids: string[]) => component.selection && ctx.setData(component.selection, ids)
     const toggle = (id: string) => setSelected(
@@ -109,18 +107,20 @@ const CATALOG: { [K in ComponentType]: (component: ComponentOf<K>, ctx: RenderCo
     ),
     Row: (component, ctx) => (
         <div className="flex flex-wrap gap-2">
-            {component.children.map(id => <div key={id} className="min-w-[9rem] flex-1">{ctx.render(id)}</div>)}
+            {/* Tiles share the width and wrap on narrow screens; buttons keep their own width. */}
+            {component.children.map(id => (
+                <div key={id} className={ctx.surface.components[id].component === "Metric" ? "min-w-[9rem] flex-1" : "shrink-0"}>
+                    {ctx.render(id)}
+                </div>
+            ))}
         </div>
     ),
-    Metric: (component, ctx) => <Metric component={component} data={ctx.data} />,
-    DataTable: (component, ctx) => <DataTable component={component} data={ctx.data} onOpenDocument={ctx.onOpenDocument} />,
-    Chart: (component, ctx) => <Chart component={component} data={ctx.data} />,
-    RiskList: (component, ctx) => <RiskList component={component} data={ctx.data} onOpenDocument={ctx.onOpenDocument} />,
-    RiskBadge: component => <RiskBadge level={component.level} />,
-    Text: (component, ctx) => {
-        const text = resolveValue(component.text, ctx.data)
-        return <p className={TEXT_CLASS[component.variant]}>{typeof text === "string" ? text : ""}</p>
-    },
+    Metric: component => <Metric component={component} />,
+    DataTable: (component, ctx) => <DataTable component={component} onOpenDocument={ctx.onOpenDocument} />,
+    Chart: component => <Chart component={component} />,
+    RiskList: (component, ctx) => <RiskList component={component} onOpenDocument={ctx.onOpenDocument} />,
+    Sources: (component, ctx) => <Sources component={component} onOpenDocument={ctx.onOpenDocument} />,
+    Text: component => <p className={TEXT_CLASS[component.variant]}>{component.text}</p>,
     DocumentList: (component, ctx) => <DocumentList component={component} ctx={ctx} />,
     Button: (component, ctx) => {
         const disabled = ctx.actionsDisabled || !ctx.onAction || hasEmptyBinding(component.action.event.context, ctx.data)
@@ -129,8 +129,7 @@ const CATALOG: { [K in ComponentType]: (component: ComponentOf<K>, ctx: RenderCo
                 size="sm"
                 variant={component.variant === "primary" ? "default" : "outline"}
                 disabled={disabled}
-                onClick={() => ctx.onAction?.(actionMessage(
-                    buildAction(ctx.surface, component, ctx.data, new Date().toISOString()), component.label))}
+                onClick={() => ctx.onAction?.(buildAction(ctx.surface, component, ctx.data))}
             >
                 {component.label}
             </Button>
@@ -150,7 +149,7 @@ class SurfaceBoundary extends Component<{ fallback: ReactNode; children: ReactNo
     }
 }
 
-function SurfaceBody({ surface, actionsDisabled = false, notes = [], onAction, onOpenDocument }: Omit<A2uiSurfaceProps, "fallback">) {
+function SurfaceBody({ surface, actionsDisabled = false, notes = [], generatedAt, onAction, onOpenDocument }: Omit<A2uiSurfaceProps, "fallback">) {
     const [data, setDataModel] = useState<DataModel>(surface.dataModel)
     const ctx: RenderContext = {
         surface,
@@ -165,12 +164,14 @@ function SurfaceBody({ surface, actionsDisabled = false, notes = [], onAction, o
             return render(component, ctx)
         },
     }
+    // The root is the layout boundary: the containing block of every positioned
+    // descendant, clipping whatever overflows sideways, so no component can widen
+    // the chat. Wide content scrolls inside its own wrapper.
     return (
-        <div className="mx-3 rounded-lg border border-hairline bg-white p-3" data-surface-id={surface.surfaceId}>
+        <div className="relative mx-3 min-w-0 overflow-x-clip rounded-lg border border-hairline bg-white p-3"
+            data-surface-id={surface.surfaceId}>
             {ctx.render("root")}
-            {showsComputedNumbers(surface) && (
-                <p className="mt-2 text-xs text-viz-muted">{COMPUTED_NOTE}</p>
-            )}
+            {generatedAt && <p className="mt-2 text-xs text-slate-gray">{formatGeneratedAt(generatedAt)}</p>}
             {notes.map(note => <p key={note} className="mt-2 text-xs text-slate-gray">{note}</p>)}
         </div>
     )

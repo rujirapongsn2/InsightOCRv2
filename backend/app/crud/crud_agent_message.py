@@ -1,6 +1,7 @@
 from typing import Optional, Any
 from uuid import UUID
 from sqlalchemy.orm import Session
+from app.models.agent_conversation import AgentConversation
 from app.models.agent_message import AgentMessage
 
 
@@ -15,11 +16,26 @@ def _sanitize_jsonb(value: Any) -> Any:
 
 
 class CRUDAgentMessage:
-    def add(self, db: Session, *, conversation_id: UUID, role: str, content: Optional[str] = None, tool_calls: Optional[list] = None, tool_call_id: Optional[str] = None, tool_name: Optional[str] = None, tool_result: Optional[dict] = None, iteration: Optional[int] = None, model_used: Optional[str] = None, tokens_in: Optional[int] = None, tokens_out: Optional[int] = None) -> AgentMessage:
-        msg = AgentMessage(conversation_id=conversation_id, role=role, content=content, tool_calls=_sanitize_jsonb(tool_calls), tool_call_id=tool_call_id, tool_name=tool_name, tool_result=_sanitize_jsonb(tool_result), iteration=iteration, model_used=model_used, tokens_in=tokens_in, tokens_out=tokens_out)
+    def add(self, db: Session, *, conversation_id: UUID, role: str, content: Optional[str] = None, kind: str = "text", ui_action: Optional[dict] = None, tool_calls: Optional[list] = None, tool_call_id: Optional[str] = None, tool_name: Optional[str] = None, tool_result: Optional[dict] = None, iteration: Optional[int] = None, model_used: Optional[str] = None, tokens_in: Optional[int] = None, tokens_out: Optional[int] = None) -> AgentMessage:
+        msg = AgentMessage(conversation_id=conversation_id, role=role, kind=kind, content=content, ui_action=ui_action, tool_calls=_sanitize_jsonb(tool_calls), tool_call_id=tool_call_id, tool_name=tool_name, tool_result=_sanitize_jsonb(tool_result), iteration=iteration, model_used=model_used, tokens_in=tokens_in, tokens_out=tokens_out)
         db.add(msg)
         db.commit()
         db.refresh(msg)
+        return msg
+
+    def add_user_turn(self, db: Session, *, conversation_id: UUID, content: str,
+                      ui_action: Optional[dict] = None) -> AgentMessage:
+        """Record a user turn and title the conversation after it; the caller commits.
+
+        content is what the chat shows; for a panel click it is the display text
+        and ui_action is the action the model reads (app.agent.ui_actions).
+        """
+        msg = AgentMessage(conversation_id=conversation_id, role="user", kind="ui_action" if ui_action else "text",
+                           content=content, ui_action=ui_action, iteration=0)
+        db.add(msg)
+        conversation = db.get(AgentConversation, conversation_id)
+        if conversation is not None:
+            conversation.title = content[:60]
         return msg
 
 

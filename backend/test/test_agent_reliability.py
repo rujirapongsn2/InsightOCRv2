@@ -70,7 +70,7 @@ def test_another_tasks_duplicate_leaves_a_live_run_alone(db, monkeypatch):
 
 
 class _SlowLoop:
-    async def run(self, _message):
+    async def run(self, _message, _ui_action=None, *, turn_recorded=False):
         for index in range(50):
             await asyncio.sleep(0)
             yield f'data: {{"type":"thinking","iteration":{index}}}\n\n'

@@ -4,6 +4,7 @@ from uuid import UUID
 import json
 import re
 from sqlalchemy.orm import Session
+from app.agent.ui_actions import user_turn
 from app.crud.crud_agent_conversation import agent_conversation as crud_conv
 from app.crud.crud_agent_memory import agent_memory as crud_memory
 from app.crud.crud_agent_skill import agent_skill as crud_skill
@@ -57,7 +58,7 @@ def _looks_like_prior_file_claim(content: str | None) -> bool:
 
 
 def _without_surface(result):
-    """A render_ui result without its A2UI messages: the user sees the surface, the model only the summary."""
+    """A panel tool result without its A2UI messages: the user sees the panel, the model only the summary."""
     if isinstance(result, dict) and "a2ui" in result:
         return {key: value for key, value in result.items() if key != "a2ui"}
     if isinstance(result, list):
@@ -205,7 +206,8 @@ class AgentContext:
         history = []
         for m in messages:
             if m.role == "user":
-                history.append({"role": "user", "content": m.content})
+                ui_action = m.ui_action if m.kind == "ui_action" else None
+                history.append({"role": "user", "content": user_turn(m.content, ui_action)})
             elif m.role == "assistant":
                 if _looks_like_prior_file_claim(m.content) and not m.tool_calls:
                     history.append({
@@ -469,13 +471,14 @@ result = _save_file('/tmp/output.pdf')
 - Use skill tools when a reusable procedure is relevant; load full procedures with `execute_skill`.
 - Use `web_search` only for external context such as public product/vendor/regulatory information. Cite URLs when relying on web results.
 - Use integration tools only after checking available integrations.
-- When presenting a set of documents the user may act on (for example documents awaiting approval or with problems), call `render_ui` with a selectable DocumentList and action buttons, and still give a short text answer. The panel only displays; approvals and rejections still go through `bulk_approve` / `bulk_reject` (pass `doc_ids`), `approve_document`, or `reject_document`.
-- For analysis answers, `render_ui` can show analytics: a Row of Metric tiles for headline numbers (with a delta whose direction is the change and whose sentiment is whether it is good for the user, e.g. cost up = up + bad), a DataTable for comparisons, a Chart for categories (bar) or trends over time (line), and a RiskList for risk analysis. Compute every number first with tools (`execute_python`, `get_document_detail`, `compare_documents`); never estimate. Still write a short text answer with the conclusion.
-- For contract risk analysis, read the contract text first (`get_document_detail`) and check at least payment terms, penalties, termination, liability, auto-renewal, and missing clauses. Give each risk a level, a `quote` copied verbatim from that document's text, its `document_id` (and `page` when known), and a recommendation. If the result reports `unverified_quotes`, tell the user which risks need checking against the document.
-- A user message with an `a2ui-action` code block is a button click on a panel you rendered. Act on `context.document_ids` with one call: `approve_documents` → `bulk_approve` with those `doc_ids`; `reject_documents` → `bulk_reject` with those `doc_ids`; `ask_agent` → answer the question in `context`. The user confirms the whole set once; report any `not_approved_doc_ids` / `not_rejected_doc_ids` from the result.
+- Panels: one panel tool call shows one panel in the chat. `show_documents` for documents the user may act on (with `actions` for approve/reject buttons), `show_metrics` for headline numbers, `show_table` for comparisons, `show_chart` for categories (bar) or trends over dates or months (line), `show_risks` for a contract risk analysis. Send raw typed values only; the system formats them, computes every change (give `previous` or a `change` column, never a delta), resolves filenames, and checks quotes. Compute every number first with tools (`execute_python`, `get_document_detail`, `compare_documents`); never estimate. Still give a short text answer with the conclusion; do not repeat the panel in text.
+- A panel already states its sources and which quotes were verified. Do not restate or reinterpret that in text. If you mention a quote that was not found, name the risk by the title the result gives for it. The panels only display; approvals and rejections still go through `bulk_approve` / `bulk_reject` (pass `doc_ids`), `approve_document`, or `reject_document`.
+- For contract risk analysis, read the contract text first (`get_document_detail`) and check at least payment terms, penalties, termination, liability, auto-renewal, and missing clauses. Give each risk a level, a category, a `quote` copied verbatim from that document's text (and `page` when known), and a recommendation.
+- A user turn of the form `[ui_action] {{"surface_id": ..., "name": ..., "document_ids": [...]}}` is a button click on a panel you showed; the system already checked that those documents were on that panel. Act on `document_ids` with one call: `approve_documents` → `bulk_approve` with those `doc_ids`; `reject_documents` → `bulk_reject` with those `doc_ids`. The user confirms the whole set once; report any `not_approved_doc_ids` / `not_rejected_doc_ids` from the result.
 
 ## Safety and Governance
 - Destructive or externally visible actions require confirmation; the system gates these tools.
+- If a tool result says the confirmation request expired, the user did not answer in time and nothing was done. Say that it expired (not that the user rejected it) and offer to ask again.
 - Never bypass tenant isolation, confirmation gates, or integration access checks.
 - Apply the evidence hierarchy above without naming its internal data layers. Surface only the fact, its business impact, and any uncertainty that changes the conclusion.
 - Do not output JSON Schema unless the user explicitly requests a schema.

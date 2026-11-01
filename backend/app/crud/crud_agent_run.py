@@ -1,8 +1,10 @@
+import uuid
 from typing import Optional
 from uuid import UUID
 
 from sqlalchemy.orm import Session
 
+from app.crud.crud_agent_message import agent_message
 from app.models.agent_run import AgentRun
 
 
@@ -17,14 +19,24 @@ class CRUDAgentRun:
         conversation_id: UUID,
         user_id: UUID,
         user_message: str,
+        ui_action: Optional[dict] = None,
+        run_id: Optional[UUID] = None,
     ) -> AgentRun:
+        """Queue a run together with the user turn it answers, in one commit.
+
+        The turn is in the conversation from the moment the request is
+        accepted, so every reload shows it; the worker does not record it again.
+        """
         run = AgentRun(
+            id=run_id or uuid.uuid4(),
             conversation_id=conversation_id,
             user_id=user_id,
             user_message=user_message,
+            ui_action=ui_action,
             status="queued",
         )
         db.add(run)
+        agent_message.add_user_turn(db, conversation_id=conversation_id, content=user_message, ui_action=ui_action)
         db.commit()
         db.refresh(run)
         return run

@@ -1,31 +1,30 @@
 "use client"
 
-import { AlertTriangle, Check, X } from "lucide-react"
+import { AlertTriangle, Check, Clock, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { documentStatusLabel } from "@/lib/a2ui"
-
-/** A document the action will change, as the server froze it when asking. */
-export interface ConfirmationDocument {
-    id: string
-    filename: string
-    status: string
-}
-
-export interface PendingAction {
-    pending_action_id: string
-    tool_name: string
-    description: string
-    arguments: unknown
-    documents?: ConfirmationDocument[]
-}
+import type { PendingAction } from "@/lib/agentConversation"
 
 interface ConfirmationDialogProps {
-    action: PendingAction
+    /** A request the server still waits on ("pending") or gave up on ("expired"). */
+    action: Pick<PendingAction, "status" | "tool_name" | "description" | "arguments" | "documents">
     onConfirm: () => void
     onReject: () => void
 }
 
 export default function ConfirmationDialog({ action, onConfirm, onReject }: ConfirmationDialogProps) {
+    if (action.status === "expired") {
+        return (
+            <div role="status" className="mx-3 mb-3 flex items-start gap-2 rounded-xl border border-hairline bg-off-white p-3">
+                <Clock className="mt-0.5 h-4 w-4 flex-shrink-0 text-slate-gray" />
+                <div className="min-w-0">
+                    <p className="text-sm font-semibold text-ink-navy">คำขอยืนยันหมดเวลา</p>
+                    <p className="mt-0.5 text-xs text-slate-gray">{action.description}</p>
+                    <p className="mt-0.5 text-xs text-slate-gray">ไม่มีการเปลี่ยนแปลงใดๆ ขอให้ Agent ถามใหม่ได้</p>
+                </div>
+            </div>
+        )
+    }
     return (
         <div className="mx-3 mb-3 rounded-xl border-2 border-amber-300 bg-amber-50 p-4">
             <div className="flex items-start gap-2 mb-3">

@@ -1,0 +1,207 @@
+{
+  "tool": "show_risks",
+  "arguments": {
+    "document_id": "ffcb8c38-0ea5-54e4-bb23-602fc3cd357f",
+    "title": "ความเสี่ยงในสัญญาจ้างบริการทำความสะอาด",
+    "risks": [
+      {
+        "title": "ค่าปรับส่งมอบล่าช้า",
+        "level": "high",
+        "category": "ค่าปรับ",
+        "description": "ค่าปรับคิดต่อวันโดยไม่มีเพดาน",
+        "quote": "ร้อยละ 0.5 ของมูลค่างานต่อวัน",
+        "recommendation": "เจรจาเพดานค่าปรับไม่เกินร้อยละ 10",
+        "page": 2
+      },
+      {
+        "title": "ต่ออายุอัตโนมัติ",
+        "level": "critical",
+        "category": "การต่ออายุ",
+        "description": "สัญญาต่ออายุเองทุกปีหากไม่แจ้งเป็นหนังสือ",
+        "quote": "สัญญานี้ต่ออายุโดยอัตโนมัติทุกปี",
+        "page": 3,
+        "recommendation": "ตั้งการแจ้งเตือนก่อนครบรอบสัญญา 60 วัน"
+      },
+      {
+        "title": "ผู้ว่าจ้างรับผิดไม่จำกัด",
+        "level": "medium",
+        "category": "ความรับผิด",
+        "description": "ไม่มีเพดานความรับผิดของผู้ว่าจ้าง",
+        "quote": "ผู้ว่าจ้างรับผิดไม่จำกัดจำนวน",
+        "recommendation": "เพิ่มเพดานความรับผิดเท่ากับมูลค่าสัญญา"
+      },
+      {
+        "title": "ชำระเงินภายใน 30 วัน",
+        "level": "low",
+        "category": "การชำระเงิน",
+        "description": "ระยะเวลาชำระเงินมาตรฐาน",
+        "quote": "ชำระค่าจ้างภายใน 30 วัน",
+        "recommendation": "ไม่ต้องแก้ไข"
+      }
+    ]
+  },
+  "result": {
+    "ok": true,
+    "panel_id": "jobs-show-risks",
+    "document": "สัญญาจ้างบริการทำความสะอาด-2569.pdf",
+    "quotes_found": 3,
+    "quotes_total": 4,
+    "risks": [
+      {
+        "id": "r1",
+        "title": "ค่าปรับส่งมอบล่าช้า",
+        "level": "high",
+        "quote": "found"
+      },
+      {
+        "id": "r2",
+        "title": "ต่ออายุอัตโนมัติ",
+        "level": "critical",
+        "quote": "found"
+      },
+      {
+        "id": "r3",
+        "title": "ผู้ว่าจ้างรับผิดไม่จำกัด",
+        "level": "medium",
+        "quote": "not_found"
+      },
+      {
+        "id": "r4",
+        "title": "ชำระเงินภายใน 30 วัน",
+        "level": "low",
+        "quote": "found"
+      }
+    ],
+    "a2ui": [
+      {
+        "version": "v0.9",
+        "createSurface": {
+          "surfaceId": "jobs-show-risks",
+          "catalogId": "https://insightdoc.app/a2ui/catalogs/jobs/v2"
+        }
+      },
+      {
+        "version": "v0.9",
+        "updateComponents": {
+          "surfaceId": "jobs-show-risks",
+          "components": [
+            {
+              "id": "root",
+              "component": "Column",
+              "children": [
+                "title",
+                "risks"
+              ]
+            },
+            {
+              "id": "title",
+              "component": "Text",
+              "text": "ความเสี่ยงในสัญญาจ้างบริการทำความสะอาด",
+              "variant": "heading"
+            },
+            {
+              "id": "risks",
+              "component": "RiskList",
+              "document": {
+                "path": "/document"
+              },
+              "items": {
+                "path": "/risks"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "version": "v0.9",
+        "updateDataModel": {
+          "surfaceId": "jobs-show-risks",
+          "path": "/",
+          "value": {
+            "document": {
+              "document_id": "ffcb8c38-0ea5-54e4-bb23-602fc3cd357f",
+              "filename": "สัญญาจ้างบริการทำความสะอาด-2569.pdf"
+            },
+            "risks": [
+              {
+                "id": "r1",
+                "title": "ค่าปรับส่งมอบล่าช้า",
+                "level": "high",
+                "category": "ค่าปรับ",
+                "description": "ค่าปรับคิดต่อวันโดยไม่มีเพดาน",
+                "quote": "ร้อยละ 0.5 ของมูลค่างานต่อวัน",
+                "page": 2,
+                "recommendation": "เจรจาเพดานค่าปรับไม่เกินร้อยละ 10",
+                "quote_verified": true
+              },
+              {
+                "id": "r2",
+                "title": "ต่ออายุอัตโนมัติ",
+                "level": "critical",
+                "category": "การต่ออายุ",
+                "description": "สัญญาต่ออายุเองทุกปีหากไม่แจ้งเป็นหนังสือ",
+                "quote": "สัญญานี้ต่ออายุโดยอัตโนมัติทุกปี",
+                "page": 3,
+                "recommendation": "ตั้งการแจ้งเตือนก่อนครบรอบสัญญา 60 วัน",
+                "quote_verified": true
+              },
+              {
+                "id": "r3",
+                "title": "ผู้ว่าจ้างรับผิดไม่จำกัด",
+                "level": "medium",
+                "category": "ความรับผิด",
+                "description": "ไม่มีเพดานความรับผิดของผู้ว่าจ้าง",
+                "quote": "ผู้ว่าจ้างรับผิดไม่จำกัดจำนวน",
+                "recommendation": "เพิ่มเพดานความรับผิดเท่ากับมูลค่าสัญญา",
+                "quote_verified": false
+              },
+              {
+                "id": "r4",
+                "title": "ชำระเงินภายใน 30 วัน",
+                "level": "low",
+                "category": "การชำระเงิน",
+                "description": "ระยะเวลาชำระเงินมาตรฐาน",
+                "quote": "ชำระค่าจ้างภายใน 30 วัน",
+                "recommendation": "ไม่ต้องแก้ไข",
+                "quote_verified": true
+              }
+            ]
+          }
+        }
+      }
+    ]
+  },
+  "model_sees": {
+    "ok": true,
+    "panel_id": "jobs-show-risks",
+    "document": "สัญญาจ้างบริการทำความสะอาด-2569.pdf",
+    "quotes_found": 3,
+    "quotes_total": 4,
+    "risks": [
+      {
+        "id": "r1",
+        "title": "ค่าปรับส่งมอบล่าช้า",
+        "level": "high",
+        "quote": "found"
+      },
+      {
+        "id": "r2",
+        "title": "ต่ออายุอัตโนมัติ",
+        "level": "critical",
+        "quote": "found"
+      },
+      {
+        "id": "r3",
+        "title": "ผู้ว่าจ้างรับผิดไม่จำกัด",
+        "level": "medium",
+        "quote": "not_found"
+      },
+      {
+        "id": "r4",
+        "title": "ชำระเงินภายใน 30 วัน",
+        "level": "low",
+        "quote": "found"
+      }
+    ]
+  }
+}

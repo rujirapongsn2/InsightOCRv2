@@ -1476,114 +1476,131 @@ Date: 2026-06-30
   "OCR degraded"), banner "ไม่พบ buyer — …", and no duplicate "รอตรวจ" chip
   beside "ยืนยันถูกต้อง" on `line_items`.
 
-## Agent generative UI (A2UI prototype)
+## Agent generative UI (A2UI panels, catalog v2)
 
-- The Jobs agent has a `render_ui` tool. It returns A2UI v0.9 messages
-  (`createSurface`, `updateComponents`, `updateDataModel`) for the catalog
-  `https://insightdoc.app/a2ui/catalogs/jobs/v1` (Column, Text, DocumentList,
-  Button). The chat renders a successful result inline instead of a tool card.
-  A result that does not parse stays a normal tool call.
-- Filenames and statuses in a surface come from the job's documents. Ids from
-  another job are dropped and reported. One malformed id rejects the whole
-  call (render_ui, `bulk_approve`, `bulk_reject`) with a corrective error.
-- render_ui data may hold only what components bind to. Pointers must lead
-  through objects only (no `/groups/0/docs`), a selection may not sit inside
-  the documents array, bound Text is a string of at most 2000 characters, and
-  the data object is capped at 100000 characters.
-- The model sees only a render_ui summary (`ok`, `surface_id`,
-  `document_count`, dropped ids). The stored tool result keeps `a2ui` for the
-  chat. A render_ui failure that the model fixes later in the run does not
-  count as a run failure.
-- Confirmations freeze their targets when they are created. `bulk_approve`
-  and `bulk_reject` are rewritten to the exact eligible `doc_ids` (this job,
-  `extraction_completed`, `min_confidence` applied). Execution changes at most
-  that set and reports anything no longer waiting in
-  `not_approved_doc_ids` / `not_rejected_doc_ids`. The confirmation's document
-  list is the frozen snapshot, stored in the pending action's `result` column
-  (no migration). If nothing is eligible, the agent gets the error and the user
-  is not asked.
-- Manual check: open a job with at least 3 documents in `extraction_completed`,
-  open the AI Agent tab and ask "หาเอกสารที่ยังไม่อนุมัติ". Expect a short text
-  answer and a selectable list with filename, status "รอตรวจ" and an optional
-  note. "เปิดดู" opens that document's preview.
-- With nothing selected, the approve button is disabled. Select 2 and click it.
-  The chat shows "อนุมัติเอกสาร 2 รายการที่เลือก" without the JSON block. While
-  a run is queued or running, the surface buttons are disabled. After the
-  click the surface shows "ส่งคำสั่งแล้ว" and its buttons stay disabled, also
-  after a page reload.
-- Expect one confirmation: "อนุมัติเอกสารที่รอตรวจ 2 รายการ", the 2 filenames
-  with Thai status labels, and the raw arguments under "Show arguments".
-  Confirm, then check that only those 2 documents became reviewed. Reject
-  instead and check that nothing changed.
-- Select 2 and click a reject button. Expect one `bulk_reject` confirmation for
-  both documents, not one per document.
-- Freeze check: ask "อนุมัติเอกสารที่รอตรวจทั้งหมด". While the confirmation is
-  open, upload or finish extracting another document. Confirm. Only the
-  documents listed in the dialog become reviewed.
-- Ask for a second panel. The older panel's buttons become disabled with
-  "แผงนี้ไม่ใช่แผงล่าสุด สถานะเอกสารอาจไม่เป็นปัจจุบัน".
-- Automated: `cd backend && SECRET_KEY=test python -m pytest test/test_agent_render_ui.py
-  test/test_agent_document_confirm.py test/test_agent_tools_reliability.py`
-  (Python 3.11) and `cd frontend && node --test test/a2ui.test.mjs`.
-- Not yet checked against a live model or in a browser.
-
-### Analytics components (same catalog id, additive)
-
-- New components: `Row` (tiles side by side, wraps on narrow widths),
-  `Metric` (number with an optional delta), `DataTable`, `Chart` (bar or
-  line, inline SVG), `RiskList` and `RiskBadge`.
-- A delta has a direction (▲ ▼ ▬) and a sentiment (good, bad, neutral). Color
-  follows the sentiment only, so "cost up" shows ▲ in red with "(แย่ลง)". The
-  direction is also read out as text for screen readers. The value sign must
-  match the direction: `up` needs a value of 0 or more, `down` 0 or less,
-  and `flat` exactly 0. Anything else is a corrective error.
-- DataTable columns take an optional `unit` (number, currency, percent and
-  delta columns) and `format` (delta columns only, number|currency|percent).
-  A delta column with `format: "currency", unit: "บาท"` shows "+25,000.00 บาท".
-- Server bounds: numbers must be finite, enums are enforced, strings are
-  capped, at most 500 rows x 12 columns, 8 series x 200 points, 50 risks.
-  Data keys that no component binds to are rejected. The 100000-character
-  data cap is unchanged.
-- Any `document_id` in table rows or risk items must be a document of the
-  job; otherwise the whole surface is rejected with a corrective error.
-- No binding may overlap a DocumentList `documents` pointer (the same path or
-  one nested in it), because the system replaces those rows. Bind the table
-  or text to a separate key such as `/rows`.
-- Each risk `quote` is checked against the document's OCR text with the same
-  normalization as `search_documents`: whitespace, case, and Thai versus
-  Arabic digits are ignored, so "ชำระภายใน 30 วัน" matches OCR text
-  "ชำระภายใน ๓๐ วัน". OCR text is read only for documents that a quote
-  cites. The server stores
-  `quote_verified`. A model that sends `quote_verified` itself, or a quote
-  without `document_id`, gets a corrective error. The model sees component
-  counts, risk counts per level, `quotes` and `unverified_quotes`.
-- A surface shows "ตัวเลขในแผงนี้ AI คำนวณจากข้อมูลที่ดึงจากเอกสาร
-  ควรตรวจทานก่อนนำไปใช้" only when a component reachable from root shows a
-  computed number: a Metric, a Chart, or a DataTable with a number,
-  currency, percent or delta column. A text-only table does not show it.
-- Manual check, numbers: ask "สรุปยอดรวมของเอกสารใน job นี้ เทียบกับเดือนก่อน".
-  Expect metric tiles with ▲/▼, a signed amount and "(แย่ลง)" / "(ดีขึ้น)",
-  plus the computed-numbers note.
-- Manual check, table and charts: ask for a comparison by vendor, a bar
-  chart by vendor or category, and a monthly trend. Numbers use Thai
-  grouping (1,234,567.89), dates use the Thai calendar (30 พ.ย. 2569), long
-  tables scroll inside the panel, and "ดูข้อมูลเป็นตาราง" opens the values
-  behind each chart. Bars show their value at the right; a chart with
-  several series has a legend. A line chart labels at most 5 x positions,
-  always the first and last, and adjacent labels never sit closer than one
-  step (6 months label ม.ค., มี.ค., มิ.ย.). Value ticks are compact (300K)
-  with "%" on percent charts; any other unit appears once above the axis.
-- Manual check, risks: upload a contract with OCR text and ask
-  "วิเคราะห์ความเสี่ยงของสัญญานี้". Expect counts per level (วิกฤต / สูง /
-  ปานกลาง / ต่ำ), items ordered from วิกฤต down, a quote with "พบในเอกสาร"
-  for verified quotes and "ไม่พบข้อความนี้ในเอกสาร ควรตรวจสอบ" for the rest,
-  and "เปิดดู" opening the cited document. The text answer mentions any
-  unverified quotes.
-- Phone width: at about 360px the tiles wrap, the table scrolls sideways
-  inside its box, and the page itself does not scroll sideways.
-- The app is light-only (`data-theme="light"`), so the panel stays light
-  when the OS is in dark mode.
-- Automated: add `test/test_agent_render_ui_analytics.py` to the pytest
-  command above. The frontend tests are in `test/a2ui.test.mjs`.
-- Rendered with headless Chrome from static markup at 360px and 860px.
-  Not yet checked in the running app or against a live model.
+- The Jobs agent shows panels with five tools. One call shows one panel:
+  `show_documents`, `show_metrics`, `show_table`, `show_chart` and
+  `show_risks`. `render_ui` and the v1 catalog are gone.
+- Each tool's parameters schema is generated from the Pydantic model that
+  also validates the call (`app/agent/a2ui.py`). Extra keys are rejected,
+  definitions are inlined (no `$ref`), and numbers must be JSON numbers.
+  A rejected call returns a corrective error that lists every problem. If
+  the model fixes it later in the run, the run does not count it as a
+  failure.
+- The model sends raw values with a kind: `text`, `count`, `number`,
+  `money` (with an ISO 4217 `currency`, default THB), `percent` (12.5 means
+  12.5%), `date` (`2026-01-31`), `month` (`2026-01`) or `document` (an id).
+  The frontend is the only formatter: "1,250.00 บาท", "12.5%",
+  "31 ม.ค. 2569", "ม.ค. 69".
+- The backend computes every comparison. A metric with `previous` and
+  `higher_is` gets a change with direction, sentiment, the amount and the
+  relative change (none when `previous` is 0; percent metrics change in
+  points, "จุด"). A table `change` column compares two numeric columns of the
+  same kind per row. The model cannot send a delta or a direction.
+- `sources` (required for metrics, tables and charts) must all be documents
+  of the job. The panel shows "AI คำนวณจาก N เอกสาร", which opens to the
+  filenames with "เปิดดู". A `document` column shows the filename and
+  "เปิดดู" per row.
+- `show_risks` takes one `document_id`. The system numbers the risks r1..rn
+  and checks each quote against that document's OCR text (whitespace, case,
+  and Thai versus Arabic digits are ignored). The panel states, for example,
+  "ข้อความอ้างอิงตรวจพบในเอกสาร 3 จาก 4 รายการ · ไม่พบ: <title>" and marks each
+  quote as found or not found.
+- The model sees an itemised result without the A2UI payload: shown and
+  dropped ids, per-metric changes, row and point counts with the source
+  count, and per-risk `{id, title, level, quote: found|not_found}`.
+- `show_documents` keeps the old behaviour. Foreign ids are dropped and
+  reported, one malformed id rejects the call, and `actions` adds the
+  "อนุมัติที่เลือก" / "ปฏิเสธที่เลือก" buttons. The agent answers a click with
+  `bulk_approve` / `bulk_reject` and one frozen confirmation.
+- A click is a structured `ui_action` message, not text. The browser posts
+  `{surface_id, name, source_component_id, document_ids}` to
+  `POST /agent/conversations/{id}/ui-actions`. The server refuses the click
+  with a reason when the panel belongs to another conversation (404), was
+  already answered or superseded (409), did not offer that button (422), or
+  did not show one of the documents (422). An accepted click stores
+  `kind = "ui_action"` and the payload on the user message. The server
+  records a click or a typed message in the same commit as the run that
+  answers it, so a reload while the run waits in the queue still shows it.
+  The worker does not record it again. The chat bubble
+  and the conversation title show the server's text ("อนุมัติเอกสาร 2
+  รายการที่เลือก"). The model reads `[ui_action] {"surface_id", "name",
+  "document_ids"}`, which is rendered from the payload. The loop uses the
+  same rendering for its request, the system prompt, the plan, the
+  reflection and the compact wrap-up (`ui_actions.user_turn`).
+- Panel status lives on the server, in `agent_surfaces`: `active`,
+  `answered` or `superseded`. A new panel supersedes the earlier panels that
+  have buttons, and an accepted click answers its panel. The answer
+  follows the run that the click started (`agent_surfaces.answered_by_run_id`).
+  It stands while the run is queued or running, and afterwards only if the
+  user confirmed an action in that run. If the run failed or was stopped,
+  or its request was rejected or expired, the panel is `active` again. If
+  a newer panel with buttons appeared meanwhile, it is `superseded`. Panels without
+  buttons (metrics, tables, charts, risks) stay `active` and never show the
+  "ไม่ใช่แผงล่าสุด" note. `GET /agent/conversations/{id}` returns every
+  panel's status and `generated_at` in `surfaces`, whichever page of
+  messages is loaded. Every panel shows "ข้อมูล ณ 31 ต.ค. 2569 14:05".
+- History pages: `GET /agent/conversations/{id}?before=<message id>&limit=50`
+  returns the older page and `has_more`. The chat shows
+  "โหลดข้อความก่อนหน้า" while older messages remain.
+- Confirmations that nobody answers expire. After 5 minutes the request
+  becomes `expired`, not `rejected`. The tool result says the request
+  expired, and the agent says so and offers to ask again. Every run poll
+  carries the run's latest request with its status. The dialog shows while
+  the status is `pending`, shows "คำขอยืนยันหมดเวลา" once it is `expired`, and
+  disappears once it is answered, without a reload. Confirming a request
+  that is no longer pending returns 409 with a reason. Stopping a run
+  also expires its waiting request. `GET /agent/metrics` reports
+  `confirmations.expired` apart from `rejected`. A request without a run
+  id is shown only for the run created before it and before the next run.
+  The poll's pending action carries `requires_explicit_confirmation`, and
+  auto-confirm skips every request where it is true.
+- The panel root is the layout boundary (`relative min-w-0 overflow-x-clip`).
+  No component can widen the page. Wide tables and charts scroll inside
+  their own wrapper.
+- Migration `0031_agent_ui_actions` adds `agent_messages.kind`,
+  `agent_messages.ui_action`, `agent_runs.ui_action` and `agent_surfaces`.
+  It converts old text-encoded clicks (```` ```a2ui-action ```` blocks in
+  user messages and runs) into `ui_action` rows and repairs the
+  conversation titles that were cut from them. It also backfills a status
+  row for every catalog-v2 panel, with no `answered_by_run_id`: a
+  converted click stays answered. Running it again changes nothing, and
+  its downgrade restores the text encoding.
+- Panels from the v1 catalog in old conversations show as an ordinary tool
+  call.
+- Manual check: ask "หาเอกสารที่ยังไม่อนุมัติ", select 2, click
+  "อนุมัติที่เลือก", and confirm once. The bubble and the conversation list
+  show "อนุมัติเอกสาร 2 รายการที่เลือก" with no code block, and the panel
+  says "ส่งคำสั่งแล้ว". Click "อนุมัติที่เลือก" on a new panel and reject the
+  confirmation. Once the run ends, the panel's buttons work again. Ask again
+  and leave the confirmation unanswered for
+  5 minutes. The dialog changes to "คำขอยืนยันหมดเวลา", and the agent says
+  the request expired. In a conversation with more than 50 messages, reload
+  and use "โหลดข้อความก่อนหน้า". The first panel's status stays the same. Ask "สรุปยอดรวมเทียบเดือนก่อน", a
+  comparison by vendor, a monthly trend and "วิเคราะห์ความเสี่ยงของสัญญานี้".
+  Expect Thai formatting as above, changes like "▲ +12.5% (แย่ลง)", month
+  names on the x axis, the sources list, and a risk summary that names
+  unverified items. The text answer should not restate the sources or the
+  verification.
+- Golden fixtures: `backend/test/test_agent_panels.py` writes each tool's real
+  result to `frontend/test/fixtures/a2ui/*.json`, and the frontend tests
+  render the same files. After an intended change, regenerate them with
+  `cd backend && A2UI_WRITE_FIXTURES=1 SECRET_KEY=test python -m pytest test/test_agent_panels.py -k golden`.
+- Automated: `cd backend && SECRET_KEY=test python -m pytest test/test_agent_panels.py
+  test/test_agent_ui_actions.py test/test_agent_confirmation_expiry.py`
+  (Python 3.11) and `cd frontend && node --test test/a2ui.test.mjs`. The
+  frontend run includes a headless Chrome check at a 360px viewport.
+  `document.documentElement.scrollWidth` stays at 360 with every fixture
+  panel. The same markup without the root containment measures 756px, so
+  the check detects the defect it guards. Set `CHROME_PATH` if Chrome is
+  not in `/Applications`. Without Chrome, the check is skipped.
+- Migration 0031 was run against a throwaway Postgres 16. The steps were:
+  build the phase-A schema, stamp it at 0030, add a legacy click, upgrade,
+  run the data step again, downgrade, and upgrade again. Every step gave
+  the expected rows. After `answered_by_run_id` was added, the same steps
+  were run against a throwaway `postgres:15-alpine`. They also checked
+  that the column is empty for a converted click and that its foreign key
+  is `ON DELETE SET NULL`. `crud_agent_surface.states` was also run against
+  that database: a failed run reopens its panel, and a confirmed action
+  keeps the panel answered.
+- Not yet checked in the running app or against a live model.

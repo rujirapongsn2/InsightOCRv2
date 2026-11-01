@@ -32,13 +32,14 @@ from app.agent.context import (
     tool_content_for_llm,
 )
 from app.agent.events import sse_event, SSEEventType
-from app.agent.confirmations import requires_confirmation, describe_action
+from app.agent.confirmations import CONFIRMATION_TIMEOUT_S, declined_result, describe_action, requires_confirmation
 from app.agent.tools.document_tools import freeze_confirmation
+from app.agent.a2ui import PANEL_TOOLS
+from app.agent.ui_actions import user_turn
 from app.agent.tools.registry import tool_registry
 from app.agent.tools import document_tools, integration_tools, memory_tools, code_tools, skill_tools, filesystem_tools, web_search_tools, workflow_tools, ui_tools  # noqa: F401 — side-effect: registers tools
 from app.crud.crud_agent_message import agent_message as crud_msg
 from app.crud.crud_agent_pending import agent_pending as crud_pending
-from app.crud.crud_agent_conversation import agent_conversation as crud_conv
 from app.models.agent_message import AgentMessage
 from app.utils.activity_logger import log_activity
 
@@ -424,7 +425,7 @@ def _aggregate_success(
 
 # Tools whose failure is a corrective message to the model, not a failed action:
 # a later success of the same tool means the model fixed its call.
-SELF_CORRECTING_TOOLS = frozenset({"render_ui"})
+SELF_CORRECTING_TOOLS = frozenset(PANEL_TOOLS)
 
 
 def _settle_corrected_failures(tool_name: str, *failure_lists: list[dict[str, Any]]) -> None:
@@ -969,8 +970,13 @@ class AgentLoop:
         # allowlist blocks confirmation-gated tools in ToolRegistry instead.
         return False if self.autonomous else requires_confirmation(tool_name, tool_args)
 
-    async def run(self, user_message: str) -> AsyncGenerator[str, None]:
-        iterator = self._run_inner(user_message)
+    async def run(self, user_message: str, ui_action: dict | None = None, *,
+                  turn_recorded: bool = False) -> AsyncGenerator[str, None]:
+        """Answer one user turn. With ui_action (a checked panel click) user_message is its display text.
+
+        turn_recorded: the caller already stored the turn (crud_agent_run.create does for queued runs).
+        """
+        iterator = self._run_inner(user_message, ui_action, turn_recorded)
         deadline = asyncio.get_running_loop().time() + AGENT_MAX_RUNTIME_S
         try:
             while True:
@@ -995,27 +1001,32 @@ class AgentLoop:
         finally:
             await iterator.aclose()
 
-    async def _run_inner(self, user_message: str) -> AsyncGenerator[str, None]:
-        crud_msg.add(self.db, conversation_id=self.conversation_id, role="user", content=user_message, iteration=0)
-        crud_conv.update_title(self.db, self.conversation_id, user_message[:60])
+    async def _run_inner(self, display_text: str, ui_action: dict | None = None,
+                         turn_recorded: bool = False) -> AsyncGenerator[str, None]:
+        if not turn_recorded:
+            crud_msg.add_user_turn(self.db, conversation_id=self.conversation_id, content=display_text,
+                                   ui_action=ui_action)
+            self.db.commit()
+        # The turn as the model reads it in history; display_text only picks the language of canned replies.
+        request = user_turn(display_text, ui_action)
         self.context.clear_active_skill_tool_policy()
         if self.initial_allowed_tools is not None:
             self.context.activate_skill_tool_policy(
                 sorted(self.initial_allowed_tools), enforce=True
             )
-        self.context.current_request = user_message
+        self.context.current_request = request
         # Workflow Agent nodes have an explicit Skill/tool policy and may need
         # artifact tools even for legal questions, so the chat-only legal QA
         # narrowing must not override their configured capabilities.
-        focused_legal_qa = is_focused_legal_qa(user_message) and not self.autonomous
+        focused_legal_qa = is_focused_legal_qa(request) and not self.autonomous
 
         if self.kind == "workflow_builder":
-            async for event in self._run_workflow_builder(user_message):
+            async for event in self._run_workflow_builder(request):
                 yield event
             return
 
         if self.llm_config.get("provider") == "completion_messages":
-            async for event in self._run_completion_provider(user_message):
+            async for event in self._run_completion_provider(request):
                 yield event
             return
 
@@ -1031,7 +1042,7 @@ class AgentLoop:
             max_retries=0,  # retries are handled by _chat_with_retry with backoff
         )
         model = self.llm_config.get("model", "gpt-4o-mini")
-        system_prompt = self._build_system_prompt(user_message)
+        system_prompt = self._build_system_prompt(request)
         history = await self.context.load_history()
 
         # System prompt only once in messages[0] — subsequent iterations append to messages directly
@@ -1058,21 +1069,21 @@ class AgentLoop:
         nudged_required_file = False
         stale_file_claim_nudges = 0
         requires_file = _node_requires_file(
-            getattr(self, "output_format", "text"), user_message, bool(self.autonomous)
+            getattr(self, "output_format", "text"), request, bool(self.autonomous)
         )
 
-        if _is_xlsx_conversion_request(user_message):
+        if _is_xlsx_conversion_request(request):
             source_path = self._latest_convertible_output_path()
             if source_path:
-                async for event in self._run_direct_file_conversion(user_message, source_path):
+                async for event in self._run_direct_file_conversion(request, source_path):
                     yield event
                 return
 
-        if _is_pdf_creation_request(user_message):
+        if _is_pdf_creation_request(request):
             source_path = self._latest_text_output_path()
             source_content = None if source_path else self._latest_assistant_content_for_pdf()
             if source_path or source_content:
-                async for event in self._run_direct_pdf_creation(user_message, source_path, source_content):
+                async for event in self._run_direct_pdf_creation(request, source_path, source_content):
                     yield event
                 return
 
@@ -1083,13 +1094,13 @@ class AgentLoop:
         plan_steps: list[str] = []
         plan_msg = None
         reflected = False
-        if _is_complex_request(user_message) and not focused_legal_qa and not self.skip_planning:
+        if _is_complex_request(request) and not focused_legal_qa and not self.skip_planning:
             # Send an immediate event, then keep the stream alive while the
             # optional planning call is in flight.
             yield sse_event(SSEEventType.THINKING, {"iteration": 0})
             self._awaited = None
             async for keepalive in self._await_with_keepalive(
-                self._build_plan(client, model, user_message, history)
+                self._build_plan(client, model, request, history)
             ):
                 yield keepalive
             plan_steps = self._awaited or []
@@ -1276,10 +1287,10 @@ class AgentLoop:
                                     "documents": frozen.documents,
                                     "arguments": tool_args,
                                 })
-                                approved = await self._wait_for_confirmation(pending.id)
-                                if not approved:
-                                    result = {"error": "User rejected action", "tool_name": tool_name}
-                                    yield sse_event(SSEEventType.TOOL_REJECTED, {"id": tc.id, "name": tool_name})
+                                answer = await self._wait_for_confirmation(pending.id)
+                                if answer != "confirmed":
+                                    result = declined_result(tool_name, answer)
+                                    yield sse_event(SSEEventType.TOOL_REJECTED, {"id": tc.id, "name": tool_name, "status": answer})
                                 else:
                                     result = await tool_registry.execute(tool_name, tool_args, self.context)
                                     result = _verify_file_tool_result(self.context, tool_name, result)
@@ -1453,7 +1464,7 @@ class AgentLoop:
                     and current_turn_file_success
                     and latest_file_success_result
                 ):
-                    final_text = _file_success_final_text(latest_file_success_result, user_message)
+                    final_text = _file_success_final_text(latest_file_success_result, display_text)
                     crud_msg.add(
                         self.db,
                         conversation_id=self.conversation_id,
@@ -1540,7 +1551,7 @@ class AgentLoop:
                                 client,
                                 model,
                                 messages,
-                                user_message,
+                                request,
                                 evidence_notes,
                                 max_tokens=self.max_output_tokens,
                                 max_attempts=self.max_request_attempts,
@@ -1556,19 +1567,19 @@ class AgentLoop:
                         final_text = recovered_text
                     else:
                         empty_answer_failure = True
-                        final_text = _max_iterations_fallback_text(user_message, evidence_notes)
+                        final_text = _max_iterations_fallback_text(display_text, evidence_notes)
                         critical_tool_failures.append({
                             "tool": "provider_response",
                             "error": "AI provider returned an empty answer after document evidence was retrieved",
                         })
                 if _looks_like_raw_tool_payload(final_text):
                     if latest_report_success:
-                        final_text = _short_report_final_text(latest_report_success, user_message)
+                        final_text = _short_report_final_text(latest_report_success, display_text)
                     else:
-                        final_text = _raw_tool_payload_failure_text(user_message)
+                        final_text = _raw_tool_payload_failure_text(display_text)
                 elif latest_report_success and len(final_text) > 800:
-                    final_text = _short_report_final_text(latest_report_success, user_message)
-                if _requires_web_search(user_message) and "web_search" not in current_turn_tools and not nudged_required_search:
+                    final_text = _short_report_final_text(latest_report_success, display_text)
+                if _requires_web_search(request) and "web_search" not in current_turn_tools and not nudged_required_search:
                     messages.append({"role": "system", "content": _required_tool_instruction("web_search")})
                     nudged_required_search = True
                     continue
@@ -1611,7 +1622,7 @@ class AgentLoop:
                     and latest_file_success_result
                     and _claims_failure(final_text)
                 ):
-                    final_text = _file_success_final_text(latest_file_success_result, user_message)
+                    final_text = _file_success_final_text(latest_file_success_result, display_text)
                 if _claims_file_success(final_text) and not current_turn_file_success and stale_file_claim_nudges >= 2:
                     sanitized = _sanitize_unverified_file_claims(final_text)
                     final_text = (
@@ -1639,7 +1650,7 @@ class AgentLoop:
                     self._awaited = None
                     async for keepalive in self._await_with_keepalive(
                         self._reflect(
-                            client, model, user_message, plan_steps, final_text, current_turn_tools
+                            client, model, request, plan_steps, final_text, current_turn_tools
                         )
                     ):
                         yield keepalive
@@ -1694,7 +1705,7 @@ class AgentLoop:
             self._awaited = None
             async for keepalive in self._await_with_keepalive(_chat_with_retry(
                 client, model=model,
-                messages=_compact_wrapup_messages(messages, user_message, evidence_notes),
+                messages=_compact_wrapup_messages(messages, request, evidence_notes),
                 temperature=LLM_TEMPERATURE, stream=False,
             )):
                 yield keepalive
@@ -1704,12 +1715,12 @@ class AgentLoop:
             pass
         if not final_text or _looks_like_raw_tool_payload(final_text):
             final_text = (
-                _file_success_final_text(latest_file_success_result, user_message)
+                _file_success_final_text(latest_file_success_result, display_text)
                 if current_turn_file_success and latest_file_success_result
-                else _max_iterations_fallback_text(user_message, evidence_notes)
+                else _max_iterations_fallback_text(display_text, evidence_notes)
             )
         if current_turn_file_success and latest_file_success_result and _claims_failure(final_text):
-            final_text = _file_success_final_text(latest_file_success_result, user_message)
+            final_text = _file_success_final_text(latest_file_success_result, display_text)
         if _claims_file_success(final_text) and not current_turn_file_success:
             final_text = (
                 _failure_final_text(unresolved_tool_errors)
@@ -2173,30 +2184,21 @@ class AgentLoop:
             })
             # Poll for the user's decision, emitting a keepalive every ~10s so the
             # SSE stream survives however long the user takes to confirm.
-            approved = None
-            for tick in range(300):
+            answer = None
+            for tick in range(CONFIRMATION_TIMEOUT_S):
                 self.db.rollback()  # end the read txn before sleeping
                 action = crud_pending.get(self.db, pending.id)
-                if action and action.status == "confirmed":
-                    approved = True
-                    break
-                if action and action.status == "rejected":
-                    approved = False
+                if action is None or action.status != "pending":
+                    answer = action.status if action else "rejected"
                     break
                 if tick % 10 == 0:
                     yield ": keepalive\n\n"
                 await asyncio.sleep(1)
-            if approved is None:
-                if crud_pending.resolve(self.db, pending.id, "rejected"):
-                    approved = False
-                else:
-                    # Answered in the last second: honour the stored answer.
-                    self.db.expire_all()
-                    action = crud_pending.get(self.db, pending.id)
-                    approved = bool(action and action.status == "confirmed")
-            if not approved:
-                result = {"error": "User rejected action", "tool_name": tool_name}
-                yield sse_event(SSEEventType.TOOL_REJECTED, {"id": call_id, "name": tool_name})
+            if answer is None:
+                answer = self._expire_confirmation(pending.id)
+            if answer != "confirmed":
+                result = declined_result(tool_name, answer)
+                yield sse_event(SSEEventType.TOOL_REJECTED, {"id": call_id, "name": tool_name, "status": answer})
             else:
                 result = await tool_registry.execute(tool_name, tool_args, self.context)
         else:
@@ -2545,10 +2547,10 @@ __TOOL_CATALOG__
                         "documents": frozen.documents,
                         "arguments": tool_args,
                     })
-                    approved = await self._wait_for_confirmation(pending.id)
-                    if not approved:
-                        result = {"error": "User rejected action", "tool_name": tool_name}
-                        yield sse_event(SSEEventType.TOOL_REJECTED, {"id": call_id, "name": tool_name})
+                    answer = await self._wait_for_confirmation(pending.id)
+                    if answer != "confirmed":
+                        result = declined_result(tool_name, answer)
+                        yield sse_event(SSEEventType.TOOL_REJECTED, {"id": call_id, "name": tool_name, "status": answer})
                     else:
                         result = await tool_registry.execute(tool_name, tool_args, self.context)
                         result = _verify_file_tool_result(self.context, tool_name, result)
@@ -2603,41 +2605,42 @@ __TOOL_CATALOG__
         with SessionLocal() as check:
             return check.query(AgentRun.status).filter(AgentRun.id == self.run_id).scalar() == "running"
 
-    async def _wait_for_confirmation(self, pending_id: UUID, timeout_s: int = 300) -> bool:
+    def _expire_confirmation(self, pending_id: UUID) -> str:
+        """Mark an unanswered request expired; an answer stored at the last moment wins."""
+        if crud_pending.resolve(self.db, pending_id, "expired"):
+            return "expired"
+        self.db.expire_all()
+        action = crud_pending.get(self.db, pending_id)
+        return action.status if action else "expired"
+
+    async def _wait_for_confirmation(self, pending_id: UUID, timeout_s: int = CONFIRMATION_TIMEOUT_S) -> str:
+        """The answer to a confirmation request: "confirmed", "rejected" or "expired"."""
         settled = False
         try:
             for _ in range(timeout_s):
                 if not self._run_active():
-                    # A stopped run must never carry out an action approved afterwards.
-                    crud_pending.resolve(self.db, pending_id, "rejected")
+                    # A stopped run must never carry out an action approved afterwards,
+                    # and the user never answered this request: it expires with the run.
+                    crud_pending.expire_for_run(self.db, self.run_id)
                     settled = True
-                    return False
+                    return "expired"
                 # End the read transaction before sleeping so the session does
                 # not sit idle-in-transaction on a pooled connection all night.
                 self.db.rollback()
                 await asyncio.sleep(1)
                 self.db.expire_all()
                 action = crud_pending.get(self.db, pending_id)
-                if action and action.status == "confirmed":
+                if action is None or action.status != "pending":
                     settled = True
-                    return True
-                if action and action.status == "rejected":
-                    settled = True
-                    return False
-            if crud_pending.resolve(self.db, pending_id, "rejected"):
-                settled = True
-                return False
-            # The user answered at the last moment: honour that answer.
-            self.db.expire_all()
-            action = crud_pending.get(self.db, pending_id)
+                    return action.status if action else "rejected"
             settled = True
-            return bool(action and action.status == "confirmed")
+            return self._expire_confirmation(pending_id)
         finally:
             if not settled:
                 # The run ended while waiting (runtime limit, Stop): the request must not
                 # stay "pending" and be approved later for a run that no longer exists.
                 try:
                     self.db.rollback()
-                    crud_pending.resolve(self.db, pending_id, "rejected")
+                    crud_pending.resolve(self.db, pending_id, "expired")
                 except Exception:  # noqa: BLE001
                     logger.warning("Could not expire pending action %s", pending_id)

@@ -1,66 +1,36 @@
 import { CircleAlert, CircleCheck, Eye, Info, OctagonAlert, TriangleAlert, type LucideIcon } from "lucide-react"
 import {
     RISK_LEVELS,
-    chartPoints,
-    getPointer,
-    isFiniteNumber,
-    parseDelta,
-    resolveValue,
+    bySeverity,
+    quoteSummary,
     riskCounts,
-    riskItems,
-    tableRows,
+    type Change,
     type ChartPoint,
     type ChartSeries,
     type ComponentOf,
-    type DataModel,
-    type Delta,
-    type NumberFormat,
+    type DocumentRef,
+    type Measure,
     type RiskItem,
     type RiskLevel,
-    type TableColumn,
+    type TableCell,
+    type XKind,
 } from "@/lib/a2ui"
+import { axisUnit, describeChange, formatDate, formatMeasure, formatMonth, formatTick, formatX } from "@/lib/a2uiFormat"
 
-const NUMBER = new Intl.NumberFormat("th-TH", { maximumFractionDigits: 2 })
-const CURRENCY = new Intl.NumberFormat("th-TH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })
-const COMPACT = new Intl.NumberFormat("th-TH", { notation: "compact", maximumFractionDigits: 1 })
-const DATE = new Intl.DateTimeFormat("th-TH", { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" })
-
-export function formatNumber(value: number, format: NumberFormat, unit?: string): string {
-    const digits = (format === "currency" ? CURRENCY : NUMBER).format(value)
-    if (format === "percent") return `${digits}%`
-    return unit ? `${digits} ${unit}` : digits
-}
-
-function formatDate(value: unknown): string | null {
-    if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return null
-    const date = new Date(`${value}T00:00:00Z`)
-    return Number.isNaN(date.getTime()) ? null : DATE.format(date)
-}
-
-const DIRECTION_VIEW = {
-    up: { glyph: "▲", word: "เพิ่มขึ้น" },
-    down: { glyph: "▼", word: "ลดลง" },
-    flat: { glyph: "▬", word: "คงที่" },
-} as const
+type OpenDocument = ((documentId: string) => void) | undefined
 
 /** Color carries sentiment only; the glyph carries direction, and both are also in text. */
-const SENTIMENT_VIEW = {
-    good: { className: "text-viz-good", word: "ดีขึ้น" },
-    bad: { className: "text-viz-bad", word: "แย่ลง" },
-    neutral: { className: "text-viz-neutral", word: "" },
-} as const
+const SENTIMENT_CLASS = { good: "text-viz-good", bad: "text-viz-bad", neutral: "text-viz-neutral" } as const
 
-export function DeltaText({ delta, format = "number", unit }: { delta: Delta; format?: NumberFormat; unit?: string }) {
-    const direction = DIRECTION_VIEW[delta.direction]
-    const sentiment = SENTIMENT_VIEW[delta.sentiment]
-    const amount = formatNumber(delta.value, format, unit)
+export function ChangeText({ change, measure }: { change: Change; measure: Measure }) {
+    const view = describeChange(change, measure)
     return (
-        <span className={`inline-flex flex-wrap items-baseline gap-x-1 text-xs ${sentiment.className}`}>
-            <span aria-hidden="true">{direction.glyph}</span>
-            <span className="sr-only">{direction.word}</span>
-            <span className="font-medium tabular-nums">{delta.value > 0 ? `+${amount}` : amount}</span>
-            {sentiment.word && <span>({sentiment.word})</span>}
-            {delta.label && <span className="text-viz-muted">{delta.label}</span>}
+        <span className={`inline-flex flex-wrap items-baseline gap-x-1 text-xs ${SENTIMENT_CLASS[change.sentiment]}`}>
+            <span aria-hidden="true">{view.glyph}</span>
+            <span className="sr-only">{view.direction}</span>
+            <span className="font-medium tabular-nums">{view.amount}</span>
+            {view.sentiment && <span>({view.sentiment})</span>}
+            {view.detail && <span className="text-viz-muted tabular-nums">{view.detail}</span>}
         </span>
     )
 }
@@ -96,83 +66,89 @@ export function OpenDocumentButton({ documentId, onOpen }: { documentId: string;
     )
 }
 
+function DocumentName({ document, onOpen }: { document: DocumentRef; onOpen: OpenDocument }) {
+    return (
+        <span className="inline-flex min-w-0 max-w-full items-center gap-2">
+            <span className="truncate" title={document.filename}>{document.filename}</span>
+            {onOpen && <OpenDocumentButton documentId={document.document_id} onOpen={onOpen} />}
+        </span>
+    )
+}
+
 const Dash = () => <span className="text-viz-muted">–</span>
 
-export function Metric({ component, data }: { component: ComponentOf<"Metric">; data: DataModel }) {
-    const value = resolveValue(component.value, data)
+/** "AI คำนวณจาก N เอกสาร", opening to the documents the numbers came from. */
+export function Sources({ component, onOpenDocument }: { component: ComponentOf<"Sources">; onOpenDocument: OpenDocument }) {
+    return (
+        <details className="text-xs">
+            <summary className="cursor-pointer text-viz-muted hover:text-ink-navy">
+                AI คำนวณจาก {component.documents.length} เอกสาร
+            </summary>
+            <ul className="mt-1 space-y-1 pl-4">
+                {component.documents.map(document => (
+                    <li key={document.document_id} className="text-ink-navy">
+                        <DocumentName document={document} onOpen={onOpenDocument} />
+                    </li>
+                ))}
+            </ul>
+        </details>
+    )
+}
+
+export function Metric({ component }: { component: ComponentOf<"Metric"> }) {
+    const { value, previous, change } = component.value
     return (
         <div className="h-full rounded-md border border-hairline px-3 py-2">
             <p className="text-xs text-viz-muted">{component.label}</p>
-            <p className="text-lg font-semibold text-ink-navy">
-                {isFiniteNumber(value) ? formatNumber(value, component.format, component.unit) : <Dash />}
-            </p>
-            {component.delta && <DeltaText delta={component.delta} format={component.format} unit={component.unit} />}
+            <p className="text-lg font-semibold text-ink-navy tabular-nums">{formatMeasure(value, component.measure)}</p>
+            {change && <ChangeText change={change} measure={component.measure} />}
+            {previous !== undefined && (
+                <p className="text-xs text-viz-muted">
+                    เทียบ{component.previousLabel ? ` ${component.previousLabel}` : "ค่าก่อนหน้า"}:{" "}
+                    <span className="tabular-nums">{formatMeasure(previous, component.measure)}</span>
+                </p>
+            )}
         </div>
     )
 }
 
-const ALIGN_CLASS = { left: "text-left", center: "text-center", right: "text-right" } as const
-
-function Cell({ column, value }: { column: TableColumn; value: unknown }) {
-    switch (column.type) {
-        case "number":
-        case "currency":
-        case "percent":
-            return isFiniteNumber(value) ? <>{formatNumber(value, column.type, column.unit)}</> : <Dash />
-        case "date":
-            return <>{formatDate(value) ?? <Dash />}</>
-        case "delta": {
-            const delta = parseDelta(value)
-            return delta ? <DeltaText delta={delta} format={column.format} unit={column.unit} /> : <Dash />
-        }
-        case "risk":
-            return RISK_LEVELS.includes(value as RiskLevel) ? <RiskBadge level={value as RiskLevel} /> : <Dash />
-        case "text":
-            return typeof value === "string" && value ? <>{value}</> : <Dash />
+function Cell({ cell, onOpenDocument }: { cell: TableCell; onOpenDocument: OpenDocument }) {
+    switch (cell.kind) {
+        case "empty": return <Dash />
+        case "text": return <>{cell.value}</>
+        case "date": return <>{formatDate(cell.value)}</>
+        case "month": return <>{formatMonth(cell.value)}</>
+        case "document": return <DocumentName document={cell.value} onOpen={onOpenDocument} />
+        case "measure": return <>{formatMeasure(cell.value, cell.measure)}</>
+        case "change": return <ChangeText change={cell.value} measure={cell.measure} />
     }
 }
 
-export function DataTable({ component, data, onOpenDocument }: {
-    component: ComponentOf<"DataTable">
-    data: DataModel
-    onOpenDocument?: (documentId: string) => void
-}) {
-    const rows = tableRows(getPointer(data, component.rows.path))
-    const showOpen = Boolean(onOpenDocument) && rows.some(row => typeof row.document_id === "string")
-    if (rows.length === 0) return <p className="text-xs text-viz-muted">ไม่มีข้อมูล</p>
+const isNumeric = (kind: string) => kind === "measure" || kind === "change"
+
+export function DataTable({ component, onOpenDocument }: { component: ComponentOf<"DataTable">; onOpenDocument: OpenDocument }) {
     return (
         <div className="max-h-80 overflow-auto rounded-md border border-hairline">
             <table className="w-full min-w-max border-collapse text-sm">
-                {component.caption && (
-                    <caption className="px-3 py-2 text-left text-xs font-medium text-ink-navy">{component.caption}</caption>
-                )}
                 <thead className="sticky top-0 bg-off-white">
                     <tr>
                         {component.columns.map(column => (
-                            <th key={column.key} scope="col"
-                                className={`px-3 py-1.5 text-xs font-medium text-viz-muted ${ALIGN_CLASS[column.align]}`}>
+                            <th key={column.key} scope="col" className={`px-3 py-1.5 text-xs font-medium text-viz-muted ${
+                                isNumeric(column.format.kind) ? "text-right" : "text-left"}`}>
                                 {column.label}
                             </th>
                         ))}
-                        {showOpen && <th scope="col" className="px-3 py-1.5"><span className="sr-only">เอกสาร</span></th>}
                     </tr>
                 </thead>
                 <tbody className="divide-y divide-hairline">
-                    {rows.map((row, index) => (
+                    {component.rows.map((row, index) => (
                         <tr key={index}>
-                            {component.columns.map(column => (
-                                <td key={column.key}
-                                    className={`px-3 py-1.5 text-ink-navy tabular-nums ${ALIGN_CLASS[column.align]}`}>
-                                    <Cell column={column} value={row[column.key]} />
+                            {row.map((cell, columnIndex) => (
+                                <td key={component.columns[columnIndex].key} className={`px-3 py-1.5 text-ink-navy tabular-nums ${
+                                    isNumeric(component.columns[columnIndex].format.kind) ? "text-right" : "text-left"}`}>
+                                    <Cell cell={cell} onOpenDocument={onOpenDocument} />
                                 </td>
                             ))}
-                            {showOpen && (
-                                <td className="px-3 py-1.5 text-right">
-                                    {typeof row.document_id === "string" && onOpenDocument && (
-                                        <OpenDocumentButton documentId={row.document_id} onOpen={onOpenDocument} />
-                                    )}
-                                </td>
-                            )}
                         </tr>
                     ))}
                 </tbody>
@@ -188,6 +164,7 @@ const SERIES_CLASS = [
 ] as const
 
 const round = (value: number) => Math.round(value * 100) / 100
+const isValue = (value: number | null): value is number => value !== null
 
 function niceStep(raw: number): number {
     const power = 10 ** Math.floor(Math.log10(raw))
@@ -211,12 +188,19 @@ export function niceScale(values: number[], includeZero: boolean): { min: number
     return { min, max, ticks }
 }
 
+interface PlotProps {
+    points: ChartPoint[]
+    series: ChartSeries[]
+    measure: Measure
+    xKind: XKind
+}
+
 const BAR_HEIGHT = 12
 const BAR_GAP = 2
 
-function BarChart({ points, series, format }: { points: ChartPoint[]; series: ChartSeries[]; format: (value: number) => string }) {
+function BarChart({ points, series, measure, xKind }: PlotProps) {
     // No value axis here (each bar is labelled), so the longest bar may fill the track.
-    const values = points.flatMap(point => point.values.filter(isFiniteNumber))
+    const values = points.flatMap(point => point.values.filter(isValue))
     const min = Math.min(0, ...values)
     const max = Math.max(0, ...values)
     const percent = (value: number) => (max === min ? 0 : round(((value - min) / (max - min)) * 100))
@@ -224,35 +208,38 @@ function BarChart({ points, series, format }: { points: ChartPoint[]; series: Ch
     const height = series.length * BAR_HEIGHT + (series.length - 1) * BAR_GAP
     return (
         <div className="space-y-1.5">
-            {points.map((point, pointIndex) => (
-                <div key={pointIndex}
-                    className="grid grid-cols-[minmax(0,6rem)_minmax(0,1fr)_auto] items-center gap-x-2 sm:grid-cols-[minmax(0,9rem)_minmax(0,1fr)_auto]">
-                    <span className="truncate text-xs text-charcoal" title={point.label}>{point.label}</span>
-                    <svg width="100%" height={height} aria-hidden="true" className="block overflow-visible">
-                        {min < 0 && <line x1={`${zero}%`} x2={`${zero}%`} y1={0} y2={height} className="stroke-viz-grid" strokeWidth={1} />}
-                        {point.values.map((value, seriesIndex) => value !== null && (
-                            <rect
-                                key={seriesIndex}
-                                data-bar=""
-                                x={`${Math.min(zero, percent(value))}%`}
-                                y={seriesIndex * (BAR_HEIGHT + BAR_GAP)}
-                                width={`${Math.abs(percent(value) - zero)}%`}
-                                height={BAR_HEIGHT}
-                                rx={3}
-                                fill="currentColor"
-                                className={SERIES_CLASS[seriesIndex]}
-                            >
-                                <title>{`${point.label} · ${series[seriesIndex].label}: ${format(value)}`}</title>
-                            </rect>
-                        ))}
-                    </svg>
-                    <div className="flex flex-col text-right text-[11px] leading-[14px] text-ink-navy tabular-nums">
-                        {point.values.map((value, seriesIndex) => (
-                            <span key={seriesIndex}>{value === null ? "–" : format(value)}</span>
-                        ))}
+            {points.map((point, pointIndex) => {
+                const label = formatX(point.x, xKind)
+                return (
+                    <div key={pointIndex}
+                        className="grid grid-cols-[minmax(0,6rem)_minmax(0,1fr)_auto] items-center gap-x-2 sm:grid-cols-[minmax(0,9rem)_minmax(0,1fr)_auto]">
+                        <span className="truncate text-xs text-charcoal" title={label}>{label}</span>
+                        <svg width="100%" height={height} aria-hidden="true" className="block overflow-visible">
+                            {min < 0 && <line x1={`${zero}%`} x2={`${zero}%`} y1={0} y2={height} className="stroke-viz-grid" strokeWidth={1} />}
+                            {point.values.map((value, seriesIndex) => value !== null && (
+                                <rect
+                                    key={seriesIndex}
+                                    data-bar=""
+                                    x={`${Math.min(zero, percent(value))}%`}
+                                    y={seriesIndex * (BAR_HEIGHT + BAR_GAP)}
+                                    width={`${Math.abs(percent(value) - zero)}%`}
+                                    height={BAR_HEIGHT}
+                                    rx={3}
+                                    fill="currentColor"
+                                    className={SERIES_CLASS[seriesIndex]}
+                                >
+                                    <title>{`${label} · ${series[seriesIndex].label}: ${formatMeasure(value, measure)}`}</title>
+                                </rect>
+                            ))}
+                        </svg>
+                        <div className="flex flex-col text-right text-[11px] leading-[14px] text-ink-navy tabular-nums">
+                            {point.values.map((value, seriesIndex) => (
+                                <span key={seriesIndex}>{value === null ? "–" : formatMeasure(value, measure)}</span>
+                            ))}
+                        </div>
                     </div>
-                </div>
-            ))}
+                )
+            })}
         </div>
     )
 }
@@ -288,39 +275,27 @@ export function xLabelIndices(count: number, maxLabels: number): number[] {
     return [...indices, last]
 }
 
-/** A value-axis tick: compact digits, with the percent sign; the unit is the axis title. */
-export function formatTick(value: number, format: NumberFormat): string {
-    const digits = COMPACT.format(value)
-    return format === "percent" ? `${digits}%` : digits
-}
-
-function LineChart({ points, series, format, tickFormat, unit }: {
-    points: ChartPoint[]
-    series: ChartSeries[]
-    format: (value: number) => string
-    tickFormat: NumberFormat
-    unit?: string
-}) {
+function LineChart({ points, series, measure, xKind }: PlotProps) {
     const count = points.length
-    const { min, max, ticks } = niceScale(points.flatMap(point => point.values.filter(isFiniteNumber)), false)
+    const { min, max, ticks } = niceScale(points.flatMap(point => point.values.filter(isValue)), false)
     const x = (index: number) => (count === 1 ? 50 : (index / (count - 1)) * 100)
     const y = (value: number) => 100 - ((value - min) / (max - min)) * 100
     const labelled = xLabelIndices(count, MAX_X_LABELS)
     // Every point gets a marker while they stay legible; past that, only each series' last point does.
     const lastIndex = series.map((_, seriesIndex) => points.findLastIndex(point => point.values[seriesIndex] !== null))
     const marked = (seriesIndex: number, index: number) => count <= MAX_MARKED_POINTS || index === lastIndex[seriesIndex]
-    const axisTitle = tickFormat === "percent" ? undefined : unit
+    const unit = axisUnit(measure)
     return (
-        <div className={`relative mb-6 ml-12 mr-3 h-40 ${axisTitle ? "mt-7" : "mt-2"}`}>
-            {axisTitle && (
+        <div className={`relative mb-6 ml-12 mr-3 h-40 ${unit ? "mt-7" : "mt-2"}`}>
+            {unit && (
                 <span data-axis-title="" className="absolute -left-12 bottom-full mb-3 whitespace-nowrap text-[11px] text-viz-muted">
-                    {axisTitle}
+                    {unit}
                 </span>
             )}
             {ticks.map(tick => (
                 <span key={tick} data-tick="" className="absolute -left-12 w-10 -translate-y-1/2 text-right text-[11px] text-viz-muted tabular-nums"
                     style={{ top: `${round(y(tick))}%` }}>
-                    {formatTick(tick, tickFormat)}
+                    {formatTick(tick, measure)}
                 </span>
             ))}
             <svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"
@@ -341,7 +316,7 @@ function LineChart({ points, series, format, tickFormat, unit }: {
                                         strokeWidth={12} strokeLinecap="round" vectorEffect="non-scaling-stroke" />
                                     <path data-point="" d={`M${round(x(index))} ${round(y(value))}h0`} stroke="currentColor"
                                         strokeWidth={8} strokeLinecap="round" vectorEffect="non-scaling-stroke">
-                                        <title>{`${points[index].label} · ${item.label}: ${format(value)}`}</title>
+                                        <title>{`${formatX(points[index].x, xKind)} · ${item.label}: ${formatMeasure(value, measure)}`}</title>
                                     </path>
                                 </g>
                             ))}
@@ -350,31 +325,30 @@ function LineChart({ points, series, format, tickFormat, unit }: {
                 })}
             </svg>
             {labelled.map(index => (
-                <span key={index}
+                <span key={index} data-x-label=""
                     className="absolute top-full mt-1 whitespace-nowrap text-[11px] text-viz-muted"
                     style={{
                         left: `${round(x(index))}%`,
                         transform: count === 1 ? "translateX(-50%)"
                             : index === 0 ? undefined : index === count - 1 ? "translateX(-100%)" : "translateX(-50%)",
                     }}>
-                    {points[index].label}
+                    {formatX(points[index].x, xKind)}
                 </span>
             ))}
         </div>
     )
 }
 
-export function Chart({ component, data }: { component: ComponentOf<"Chart">; data: DataModel }) {
-    const points = chartPoints(getPointer(data, component.data.path), component.x, component.series)
-    const format = (value: number) => formatNumber(value, component.format, component.unit)
-    const hasValues = points.some(point => point.values.some(isFiniteNumber))
+export function Chart({ component }: { component: ComponentOf<"Chart"> }) {
+    const { points, series, measure } = component
+    const plot = { points, series, measure, xKind: component.x.kind }
     const kind = component.type === "bar" ? "กราฟแท่ง" : "กราฟเส้น"
     return (
         <figure className="space-y-2">
-            {component.title && <figcaption className="text-sm font-semibold text-ink-navy">{component.title}</figcaption>}
-            {component.series.length > 1 && (
+            <figcaption className="text-sm font-semibold text-ink-navy">{component.title}</figcaption>
+            {series.length > 1 && (
                 <ul className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-ink-navy">
-                    {component.series.map((item, index) => (
+                    {series.map((item, index) => (
                         <li key={item.key} className="inline-flex items-center gap-1.5">
                             <span aria-hidden="true" className={`inline-block bg-current ${SERIES_CLASS[index]} ${
                                 component.type === "line" ? "h-0.5 w-3" : "h-2.5 w-2.5 rounded-sm"}`} />
@@ -383,45 +357,36 @@ export function Chart({ component, data }: { component: ComponentOf<"Chart">; da
                     ))}
                 </ul>
             )}
-            {hasValues ? (
-                <div role="img" aria-label={`${kind}${component.title ? ` ${component.title}` : ""} ${points.length} รายการ ดูค่าในตารางด้านล่าง`}>
-                    {component.type === "bar"
-                        ? <BarChart points={points} series={component.series} format={format} />
-                        : <LineChart points={points} series={component.series} format={format}
-                            tickFormat={component.format} unit={component.unit} />}
-                </div>
-            ) : (
-                <p className="text-xs text-viz-muted">ไม่มีข้อมูล</p>
-            )}
-            {hasValues && (
-                <details className="text-xs">
-                    <summary className="cursor-pointer text-viz-muted hover:text-ink-navy">ดูข้อมูลเป็นตาราง</summary>
-                    <div className="mt-1 max-h-60 overflow-auto">
-                        <table className="w-full min-w-max border-collapse">
-                            <thead>
-                                <tr>
-                                    <th scope="col" className="px-2 py-1 text-left font-medium text-viz-muted">รายการ</th>
-                                    {component.series.map(item => (
-                                        <th key={item.key} scope="col" className="px-2 py-1 text-right font-medium text-viz-muted">{item.label}</th>
+            <div role="img" aria-label={`${kind} ${component.title} ${points.length} รายการ ดูค่าในตารางด้านล่าง`}>
+                {component.type === "bar" ? <BarChart {...plot} /> : <LineChart {...plot} />}
+            </div>
+            <details className="text-xs">
+                <summary className="cursor-pointer text-viz-muted hover:text-ink-navy">ดูข้อมูลเป็นตาราง</summary>
+                <div className="mt-1 max-h-60 overflow-auto">
+                    <table className="w-full min-w-max border-collapse">
+                        <thead>
+                            <tr>
+                                <th scope="col" className="px-2 py-1 text-left font-medium text-viz-muted">{component.x.label}</th>
+                                {series.map(item => (
+                                    <th key={item.key} scope="col" className="px-2 py-1 text-right font-medium text-viz-muted">{item.label}</th>
+                                ))}
+                            </tr>
+                        </thead>
+                        <tbody className="divide-y divide-hairline">
+                            {points.map((point, index) => (
+                                <tr key={index}>
+                                    <th scope="row" className="px-2 py-1 text-left font-normal text-ink-navy">{formatX(point.x, component.x.kind)}</th>
+                                    {point.values.map((value, seriesIndex) => (
+                                        <td key={seriesIndex} className="px-2 py-1 text-right text-ink-navy tabular-nums">
+                                            {value === null ? "–" : formatMeasure(value, measure)}
+                                        </td>
                                     ))}
                                 </tr>
-                            </thead>
-                            <tbody className="divide-y divide-hairline">
-                                {points.map((point, index) => (
-                                    <tr key={index}>
-                                        <th scope="row" className="px-2 py-1 text-left font-normal text-ink-navy">{point.label}</th>
-                                        {point.values.map((value, seriesIndex) => (
-                                            <td key={seriesIndex} className="px-2 py-1 text-right text-ink-navy tabular-nums">
-                                                {value === null ? "–" : format(value)}
-                                            </td>
-                                        ))}
-                                    </tr>
-                                ))}
-                            </tbody>
-                        </table>
-                    </div>
-                </details>
-            )}
+                            ))}
+                        </tbody>
+                    </table>
+                </div>
+            </details>
         </figure>
     )
 }
@@ -431,14 +396,15 @@ export const QUOTE_NOTES = {
     unverified: "ไม่พบข้อความนี้ในเอกสาร ควรตรวจสอบ",
 } as const
 
-function Quote({ item }: { item: RiskItem & { quote: string } }) {
-    const verified = item.quote_verified === true
+function Quote({ item }: { item: RiskItem }) {
+    const verified = item.quoteVerified
     return (
         <figure className="space-y-1">
             <blockquote className={`border-l-2 pl-2 text-xs text-charcoal ${verified ? "border-hairline" : "border-viz-bad"}`}>
                 “{item.quote}”
             </blockquote>
-            <figcaption className={`inline-flex items-center gap-1 text-xs ${verified ? "text-viz-good" : "font-medium text-viz-bad"}`}>
+            <figcaption data-quote={verified ? "found" : "not_found"}
+                className={`inline-flex items-center gap-1 text-xs ${verified ? "text-viz-good" : "font-medium text-viz-bad"}`}>
                 {verified
                     ? <CircleCheck aria-hidden="true" className="h-3.5 w-3.5" />
                     : <TriangleAlert aria-hidden="true" className="h-3.5 w-3.5" />}
@@ -449,16 +415,15 @@ function Quote({ item }: { item: RiskItem & { quote: string } }) {
     )
 }
 
-export function RiskList({ component, data, onOpenDocument }: {
-    component: ComponentOf<"RiskList">
-    data: DataModel
-    onOpenDocument?: (documentId: string) => void
-}) {
-    const items = riskItems(getPointer(data, component.items.path))
+export function RiskList({ component, onOpenDocument }: { component: ComponentOf<"RiskList">; onOpenDocument: OpenDocument }) {
+    const items = bySeverity(component.items)
     const counts = riskCounts(items)
+    const allFound = items.every(item => item.quoteVerified)
     return (
         <section className="space-y-2">
-            {component.title && <h3 className="text-sm font-semibold text-ink-navy">{component.title}</h3>}
+            <p className="text-xs text-ink-navy">
+                <DocumentName document={component.document} onOpen={onOpenDocument} />
+            </p>
             <ul aria-label="จำนวนความเสี่ยงตามระดับ" className="flex flex-wrap gap-x-3 gap-y-1">
                 {RISK_LEVELS.map(level => (
                     <li key={level} className="inline-flex items-center gap-1 text-xs text-ink-navy">
@@ -467,33 +432,28 @@ export function RiskList({ component, data, onOpenDocument }: {
                     </li>
                 ))}
             </ul>
-            {items.length === 0 ? (
-                <p className="text-xs text-viz-muted">ไม่พบความเสี่ยง</p>
-            ) : (
-                <ol className="max-h-[32rem] divide-y divide-hairline overflow-y-auto rounded-md border border-hairline">
-                    {items.map((item, index) => (
-                        <li key={index} className="space-y-1.5 px-3 py-2.5">
-                            <div className="flex flex-wrap items-center gap-2">
-                                <RiskBadge level={item.level} />
-                                <span className="text-sm font-medium text-ink-navy">{item.title}</span>
-                                {item.category && (
-                                    <span className="rounded-full border border-hairline px-2 py-0.5 text-xs text-viz-muted">{item.category}</span>
-                                )}
-                            </div>
-                            <p className="text-sm text-charcoal">{item.description}</p>
-                            {item.quote && <Quote item={{ ...item, quote: item.quote }} />}
-                            {item.recommendation && (
-                                <p className="text-xs text-ink-navy">
-                                    <span className="font-medium">ข้อเสนอแนะ: </span>{item.recommendation}
-                                </p>
-                            )}
-                            {item.document_id && onOpenDocument && (
-                                <OpenDocumentButton documentId={item.document_id} onOpen={onOpenDocument} />
-                            )}
-                        </li>
-                    ))}
-                </ol>
-            )}
+            <p data-quote-summary="" className={`inline-flex items-start gap-1 text-xs ${allFound ? "text-viz-good" : "text-viz-bad"}`}>
+                {allFound
+                    ? <CircleCheck aria-hidden="true" className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                    : <TriangleAlert aria-hidden="true" className="mt-0.5 h-3.5 w-3.5 shrink-0" />}
+                {quoteSummary(items)}
+            </p>
+            <ol className="max-h-[32rem] divide-y divide-hairline overflow-y-auto rounded-md border border-hairline">
+                {items.map(item => (
+                    <li key={item.id} className="space-y-1.5 px-3 py-2.5">
+                        <div className="flex flex-wrap items-center gap-2">
+                            <RiskBadge level={item.level} />
+                            <span className="text-sm font-medium text-ink-navy">{item.title}</span>
+                            <span className="rounded-full border border-hairline px-2 py-0.5 text-xs text-viz-muted">{item.category}</span>
+                        </div>
+                        <p className="text-sm text-charcoal">{item.description}</p>
+                        <Quote item={item} />
+                        <p className="text-xs text-ink-navy">
+                            <span className="font-medium">ข้อเสนอแนะ: </span>{item.recommendation}
+                        </p>
+                    </li>
+                ))}
+            </ol>
         </section>
     )
 }

@@ -1,0 +1,177 @@
+{
+  "tool": "show_chart",
+  "arguments": {
+    "title": "ค่าใช้จ่ายรายเดือน",
+    "type": "line",
+    "value_kind": "money",
+    "sources": [
+      "6ea645a2-e950-56ba-9ea1-37fb3a1959c6",
+      "47e08edf-2452-503c-85de-450d8a406d74",
+      "d1423691-1c1f-56af-bee8-c48c6ac52ff9"
+    ],
+    "x": {
+      "key": "month",
+      "label": "เดือน",
+      "kind": "month"
+    },
+    "series": [
+      {
+        "key": "cleaning",
+        "label": "ทำความสะอาด"
+      },
+      {
+        "key": "office",
+        "label": "เครื่องเขียน"
+      }
+    ],
+    "points": [
+      {
+        "month": "2026-01",
+        "cleaning": 2450.5,
+        "office": 1235
+      },
+      {
+        "month": "2025-09",
+        "cleaning": 1980,
+        "office": 1120
+      },
+      {
+        "month": "2025-10",
+        "cleaning": 2010,
+        "office": 980
+      },
+      {
+        "month": "2025-11",
+        "cleaning": 2105,
+        "office": null
+      },
+      {
+        "month": "2025-12",
+        "cleaning": 2156,
+        "office": 1120
+      }
+    ]
+  },
+  "result": {
+    "ok": true,
+    "panel_id": "jobs-show-chart",
+    "points": 5,
+    "series": 2,
+    "sources": 3,
+    "a2ui": [
+      {
+        "version": "v0.9",
+        "createSurface": {
+          "surfaceId": "jobs-show-chart",
+          "catalogId": "https://insightdoc.app/a2ui/catalogs/jobs/v2"
+        }
+      },
+      {
+        "version": "v0.9",
+        "updateComponents": {
+          "surfaceId": "jobs-show-chart",
+          "components": [
+            {
+              "id": "root",
+              "component": "Column",
+              "children": [
+                "chart",
+                "sources"
+              ]
+            },
+            {
+              "id": "chart",
+              "component": "Chart",
+              "type": "line",
+              "title": "ค่าใช้จ่ายรายเดือน",
+              "x": {
+                "key": "month",
+                "label": "เดือน",
+                "kind": "month"
+              },
+              "series": [
+                {
+                  "key": "cleaning",
+                  "label": "ทำความสะอาด"
+                },
+                {
+                  "key": "office",
+                  "label": "เครื่องเขียน"
+                }
+              ],
+              "value_kind": "money",
+              "currency": "THB",
+              "points": {
+                "path": "/points"
+              }
+            },
+            {
+              "id": "sources",
+              "component": "Sources",
+              "documents": {
+                "path": "/sources"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "version": "v0.9",
+        "updateDataModel": {
+          "surfaceId": "jobs-show-chart",
+          "path": "/",
+          "value": {
+            "points": [
+              {
+                "month": "2025-09",
+                "cleaning": 1980.0,
+                "office": 1120.0
+              },
+              {
+                "month": "2025-10",
+                "cleaning": 2010.0,
+                "office": 980.0
+              },
+              {
+                "month": "2025-11",
+                "cleaning": 2105.0,
+                "office": null
+              },
+              {
+                "month": "2025-12",
+                "cleaning": 2156.0,
+                "office": 1120.0
+              },
+              {
+                "month": "2026-01",
+                "cleaning": 2450.5,
+                "office": 1235.0
+              }
+            ],
+            "sources": [
+              {
+                "document_id": "6ea645a2-e950-56ba-9ea1-37fb3a1959c6",
+                "filename": "ใบแจ้งหนี้-บริษัทสยามคลีน-ม.ค.69.pdf"
+              },
+              {
+                "document_id": "47e08edf-2452-503c-85de-450d8a406d74",
+                "filename": "ใบแจ้งหนี้-บริษัทสยามคลีน-ธ.ค.68.pdf"
+              },
+              {
+                "document_id": "d1423691-1c1f-56af-bee8-c48c6ac52ff9",
+                "filename": "ใบแจ้งหนี้-ออฟฟิศเมท-ม.ค.69.pdf"
+              }
+            ]
+          }
+        }
+      }
+    ]
+  },
+  "model_sees": {
+    "ok": true,
+    "panel_id": "jobs-show-chart",
+    "points": 5,
+    "series": 2,
+    "sources": 3
+  }
+}

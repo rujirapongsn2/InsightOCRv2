@@ -11,7 +11,12 @@ class AgentMessage(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
     conversation_id = Column(UUID(as_uuid=True), ForeignKey("agent_conversations.id", ondelete="CASCADE"), nullable=False, index=True)
     role = Column(String(20), nullable=False)
+    # "text" | "ui_action" (a click on a panel button). A ui_action message's
+    # content is display text the server wrote; the model reads ui_action
+    # {surface_id, name, document_ids, source_component_id, timestamp}.
+    kind = Column(String(16), nullable=False, default="text", server_default="text")
     content = Column(Text, nullable=True)
+    ui_action = Column(JSONB, nullable=True)
     tool_calls = Column(JSONB, nullable=True)
     tool_call_id = Column(String(100), nullable=True)
     tool_name = Column(String(100), nullable=True)
