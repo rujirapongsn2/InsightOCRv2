@@ -95,10 +95,6 @@ interface AgentPanelProps {
     onOpenDocument?: (documentId: string) => void
 }
 
-/** Sensitive actions are always confirmed by hand, even with auto-confirm on. */
-const requiresExplicitConfirmation = (action: PendingAction) =>
-    action.tool_name === "create_skill" || action.tool_name === "web_search"
-
 export default function AgentPanel({ jobId, onClose, mode = "overlay", onOpenDocument }: AgentPanelProps) {
     const isInline = mode === "inline"
     const [conversations, setConversations] = useState<Conversation[]>([])
@@ -301,7 +297,7 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay", onOpenDoc
     const pendingAction = activeRun?.pending_action
     useEffect(() => {
         if (pendingAction?.status !== "pending" || !autoConfirmRef.current) return
-        if (requiresExplicitConfirmation(pendingAction) || autoConfirmedIds.has(pendingAction.pending_action_id)) return
+        if (pendingAction.requires_explicit_confirmation || autoConfirmedIds.has(pendingAction.pending_action_id)) return
         const id = pendingAction.pending_action_id
         setAutoConfirmedIds(prev => new Set(prev).add(id))
         fetch(`${apiBase}/agent/confirm/${id}`, { method: "POST", headers: headers(), body: JSON.stringify({ approved: true }) })

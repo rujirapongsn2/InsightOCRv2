@@ -196,6 +196,8 @@ def _agent_run_payload(db: Session, run: AgentRun) -> dict:
             "pending_action_id": str(pending.id),
             "status": pending.status,
             "tool_name": pending.tool_name,
+            # Auto-confirm never answers these; only the user's own click does.
+            "requires_explicit_confirmation": requires_explicit_confirmation(pending.tool_name),
             "description": pending.description or pending.tool_name,
             "arguments": pending.tool_arguments,
             "expires_at": pending.expires_at.isoformat() if pending.expires_at else None,

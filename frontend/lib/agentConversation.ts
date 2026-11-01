@@ -15,6 +15,8 @@ export interface PendingAction {
     pending_action_id: string
     status: PendingStatus
     tool_name: string
+    /** Sensitive actions are always confirmed by the user's own click, even with auto-confirm on. */
+    requires_explicit_confirmation: boolean
     description: string
     arguments: unknown
     documents?: ConfirmationDocument[]

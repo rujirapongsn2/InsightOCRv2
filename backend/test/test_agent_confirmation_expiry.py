@@ -186,3 +186,16 @@ def test_a_request_without_a_run_belongs_only_to_the_run_whose_span_holds_it(db,
     later_request = unattributed(15)
     assert _agent_run_payload(db, run)["pending_action"]["pending_action_id"] == own
     assert _agent_run_payload(db, later)["pending_action"]["pending_action_id"] == later_request
+
+
+def test_the_poll_says_which_requests_only_the_user_may_confirm(db, run):
+    def ask(tool_name, minutes):
+        db.add(AgentPendingAction(conversation_id=run.conversation_id, user_id=USER, run_id=run.id, status="pending",
+                                  tool_name=tool_name, tool_arguments={},
+                                  created_at=datetime(2026, 10, 31, 7, minutes, tzinfo=timezone.utc)))
+        db.commit()
+        return _agent_run_payload(db, run)["pending_action"]["requires_explicit_confirmation"]
+
+    assert ask("bulk_approve", 0) is False
+    assert ask("create_skill", 1) is True
+    assert ask("web_search", 2) is True

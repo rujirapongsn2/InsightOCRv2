@@ -7,7 +7,7 @@ import type { PendingAction } from "@/lib/agentConversation"
 
 interface ConfirmationDialogProps {
     /** A request the server still waits on ("pending") or gave up on ("expired"). */
-    action: PendingAction
+    action: Pick<PendingAction, "status" | "tool_name" | "description" | "arguments" | "documents">
     onConfirm: () => void
     onReject: () => void
 }

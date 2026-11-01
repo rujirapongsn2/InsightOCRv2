@@ -30,7 +30,7 @@ interface AgentEvent {
     status?: string
 }
 
-type PendingAction = Omit<AgentPendingAction, "arguments"> & { arguments: any }
+type PendingAction = Omit<AgentPendingAction, "arguments" | "requires_explicit_confirmation"> & { arguments: any }
 
 type TranscriptItem =
     | { kind: "msg"; id: string; role: "user" | "assistant"; content: string }
