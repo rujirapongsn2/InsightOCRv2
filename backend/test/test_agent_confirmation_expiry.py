@@ -27,10 +27,11 @@ def _jsonb_on_sqlite(element, compiler, **kw):
 from app.agent import loop as loop_module  # noqa: E402
 from app.agent.confirmations import declined_result  # noqa: E402
 from app.api.v1.endpoints.agent import (  # noqa: E402
-    _agent_run_payload, cancel_agent_run, confirm_pending_action,
+    _agent_run_payload, agent_metrics, cancel_agent_run, confirm_pending_action,
 )
 from app.crud.crud_agent_pending import agent_pending  # noqa: E402
 from app.models.agent_conversation import AgentConversation  # noqa: E402
+from app.models.agent_message import AgentMessage  # noqa: E402
 from app.models.agent_pending_action import AgentPendingAction  # noqa: E402
 from app.models.agent_run import AgentRun  # noqa: E402
 from app.schemas.agent import ConfirmActionRequest  # noqa: E402
@@ -41,7 +42,7 @@ USER = uuid.uuid4()
 @pytest.fixture
 def db():
     engine = create_engine("sqlite://")
-    tables = [AgentConversation.__table__, AgentPendingAction.__table__, AgentRun.__table__]
+    tables = [AgentConversation.__table__, AgentMessage.__table__, AgentPendingAction.__table__, AgentRun.__table__]
     AgentRun.metadata.create_all(engine, tables=tables)
     session = sessionmaker(bind=engine)()
     yield session
@@ -154,3 +155,12 @@ def test_a_loop_that_notices_its_run_stopped_expires_the_request(db, run, monkey
     db.expire_all()
     assert answer == "expired" and agent_pending.get(db, pending.id).status == "expired"
     assert declined_result("bulk_approve", answer)["expired"] is True
+
+
+def test_metrics_count_expired_requests_apart_from_rejections(db, run):
+    _ask(db, run)
+    for status in ("confirmed", "rejected", "expired", "expired"):
+        agent_pending.resolve(db, _ask(db, run).id, status)
+    body = asyncio.run(agent_metrics(days=0, db=db, current_user=SimpleNamespace(role="admin")))
+    assert body["confirmations"] == {"pending": 1, "confirmed": 1, "rejected": 1, "expired": 2,
+                                     "rejection_rate": 0.5}

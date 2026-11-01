@@ -1099,6 +1099,7 @@ async def agent_metrics(
     pend_counts = {status: count for status, count in pend_rows}
     confirmed = pend_counts.get("confirmed", 0)
     rejected = pend_counts.get("rejected", 0)
+    # Answered requests only: an expired one was never answered, so it is not a rejection.
     resolved = confirmed + rejected
 
     return {
@@ -1114,6 +1115,7 @@ async def agent_metrics(
             "pending": pend_counts.get("pending", 0),
             "confirmed": confirmed,
             "rejected": rejected,
+            "expired": pend_counts.get("expired", 0),
             "rejection_rate": round(rejected / resolved, 4) if resolved else 0.0,
         },
     }
