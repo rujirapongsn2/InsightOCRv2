@@ -340,6 +340,44 @@ def test_a_turn_is_in_the_conversation_once_accepted_and_the_worker_does_not_rec
     assert title == "สรุปยอดรวม"
 
 
+def test_every_user_turn_the_loop_rebuilds_is_the_rendered_action(db, monkeypatch):
+    from app.agent.ui_actions import user_turn
+
+    conversation = _conversation(db)
+    ids = _docs(db, "a.pdf", "b.pdf")
+    action = {"surface_id": "jobs-abc", "name": "approve_documents", "document_ids": ids,
+              "source_component_id": "approve", "timestamp": "2026-10-31T07:05:00+00:00"}
+    display = "อนุมัติเอกสาร 2 รายการที่เลือก"
+    rendered = user_turn(display, action)
+    prompts, calls = [], []
+
+    async def chat(_client, **kwargs):
+        calls.append(kwargs["messages"])
+        compact = kwargs["messages"][0]["content"].startswith("Answer the user's request now")
+        message = SimpleNamespace(content="เรียบร้อย" if compact else "", tool_calls=None)
+        return SimpleNamespace(choices=[SimpleNamespace(message=message, finish_reason="stop")], usage=None)
+
+    async def no_history(self, *args, **kwargs):
+        return []
+
+    monkeypatch.setattr(loop_mod, "_chat_with_retry", chat)
+    monkeypatch.setattr(loop_mod, "build_system_prompt", lambda context, request: prompts.append(request) or "sys")
+    monkeypatch.setattr(AgentContext, "load_history", no_history)
+    loop = loop_mod.AgentLoop(db=db, conversation_id=conversation, user_id=USER.id, job_id=JOB,
+                              llm_config={"apiKey": "k", "model": "m"})
+
+    async def drain():
+        return [event async for event in loop.run(display, action)]
+
+    asyncio.run(drain())
+    assert loop.context.current_request == rendered
+    assert prompts == [rendered]
+    plan, compact = calls[0], calls[-1]
+    assert plan[-1]["content"].endswith(f"Request to plan:\n{rendered}")  # an approval is planned
+    assert compact[-1] == {"role": "user", "content": rendered}  # the empty-answer recovery
+    assert display not in json.dumps(calls, ensure_ascii=False)
+
+
 # ── Paging ─────────────────────────────────────────────────────────────────
 
 def test_paging_walks_back_through_history_and_statuses_do_not_depend_on_the_page(api, db):

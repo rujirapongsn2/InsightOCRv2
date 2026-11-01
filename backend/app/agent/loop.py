@@ -35,7 +35,7 @@ from app.agent.events import sse_event, SSEEventType
 from app.agent.confirmations import CONFIRMATION_TIMEOUT_S, declined_result, describe_action, requires_confirmation
 from app.agent.tools.document_tools import freeze_confirmation
 from app.agent.a2ui import PANEL_TOOLS
-from app.agent.ui_actions import llm_content
+from app.agent.ui_actions import user_turn
 from app.agent.tools.registry import tool_registry
 from app.agent.tools import document_tools, integration_tools, memory_tools, code_tools, skill_tools, filesystem_tools, web_search_tools, workflow_tools, ui_tools  # noqa: F401 — side-effect: registers tools
 from app.crud.crud_agent_message import agent_message as crud_msg
@@ -1001,30 +1001,32 @@ class AgentLoop:
         finally:
             await iterator.aclose()
 
-    async def _run_inner(self, user_message: str, ui_action: dict | None = None,
+    async def _run_inner(self, display_text: str, ui_action: dict | None = None,
                          turn_recorded: bool = False) -> AsyncGenerator[str, None]:
         if not turn_recorded:
-            crud_msg.add_user_turn(self.db, conversation_id=self.conversation_id, content=user_message,
+            crud_msg.add_user_turn(self.db, conversation_id=self.conversation_id, content=display_text,
                                    ui_action=ui_action)
             self.db.commit()
+        # The turn as the model reads it in history; display_text only picks the language of canned replies.
+        request = user_turn(display_text, ui_action)
         self.context.clear_active_skill_tool_policy()
         if self.initial_allowed_tools is not None:
             self.context.activate_skill_tool_policy(
                 sorted(self.initial_allowed_tools), enforce=True
             )
-        self.context.current_request = user_message
+        self.context.current_request = request
         # Workflow Agent nodes have an explicit Skill/tool policy and may need
         # artifact tools even for legal questions, so the chat-only legal QA
         # narrowing must not override their configured capabilities.
-        focused_legal_qa = is_focused_legal_qa(user_message) and not self.autonomous
+        focused_legal_qa = is_focused_legal_qa(request) and not self.autonomous
 
         if self.kind == "workflow_builder":
-            async for event in self._run_workflow_builder(user_message):
+            async for event in self._run_workflow_builder(request):
                 yield event
             return
 
         if self.llm_config.get("provider") == "completion_messages":
-            async for event in self._run_completion_provider(llm_content(ui_action) if ui_action else user_message):
+            async for event in self._run_completion_provider(request):
                 yield event
             return
 
@@ -1040,7 +1042,7 @@ class AgentLoop:
             max_retries=0,  # retries are handled by _chat_with_retry with backoff
         )
         model = self.llm_config.get("model", "gpt-4o-mini")
-        system_prompt = self._build_system_prompt(user_message)
+        system_prompt = self._build_system_prompt(request)
         history = await self.context.load_history()
 
         # System prompt only once in messages[0] — subsequent iterations append to messages directly
@@ -1067,21 +1069,21 @@ class AgentLoop:
         nudged_required_file = False
         stale_file_claim_nudges = 0
         requires_file = _node_requires_file(
-            getattr(self, "output_format", "text"), user_message, bool(self.autonomous)
+            getattr(self, "output_format", "text"), request, bool(self.autonomous)
         )
 
-        if _is_xlsx_conversion_request(user_message):
+        if _is_xlsx_conversion_request(request):
             source_path = self._latest_convertible_output_path()
             if source_path:
-                async for event in self._run_direct_file_conversion(user_message, source_path):
+                async for event in self._run_direct_file_conversion(request, source_path):
                     yield event
                 return
 
-        if _is_pdf_creation_request(user_message):
+        if _is_pdf_creation_request(request):
             source_path = self._latest_text_output_path()
             source_content = None if source_path else self._latest_assistant_content_for_pdf()
             if source_path or source_content:
-                async for event in self._run_direct_pdf_creation(user_message, source_path, source_content):
+                async for event in self._run_direct_pdf_creation(request, source_path, source_content):
                     yield event
                 return
 
@@ -1092,13 +1094,13 @@ class AgentLoop:
         plan_steps: list[str] = []
         plan_msg = None
         reflected = False
-        if _is_complex_request(user_message) and not focused_legal_qa and not self.skip_planning:
+        if _is_complex_request(request) and not focused_legal_qa and not self.skip_planning:
             # Send an immediate event, then keep the stream alive while the
             # optional planning call is in flight.
             yield sse_event(SSEEventType.THINKING, {"iteration": 0})
             self._awaited = None
             async for keepalive in self._await_with_keepalive(
-                self._build_plan(client, model, user_message, history)
+                self._build_plan(client, model, request, history)
             ):
                 yield keepalive
             plan_steps = self._awaited or []
@@ -1462,7 +1464,7 @@ class AgentLoop:
                     and current_turn_file_success
                     and latest_file_success_result
                 ):
-                    final_text = _file_success_final_text(latest_file_success_result, user_message)
+                    final_text = _file_success_final_text(latest_file_success_result, display_text)
                     crud_msg.add(
                         self.db,
                         conversation_id=self.conversation_id,
@@ -1549,7 +1551,7 @@ class AgentLoop:
                                 client,
                                 model,
                                 messages,
-                                user_message,
+                                request,
                                 evidence_notes,
                                 max_tokens=self.max_output_tokens,
                                 max_attempts=self.max_request_attempts,
@@ -1565,19 +1567,19 @@ class AgentLoop:
                         final_text = recovered_text
                     else:
                         empty_answer_failure = True
-                        final_text = _max_iterations_fallback_text(user_message, evidence_notes)
+                        final_text = _max_iterations_fallback_text(display_text, evidence_notes)
                         critical_tool_failures.append({
                             "tool": "provider_response",
                             "error": "AI provider returned an empty answer after document evidence was retrieved",
                         })
                 if _looks_like_raw_tool_payload(final_text):
                     if latest_report_success:
-                        final_text = _short_report_final_text(latest_report_success, user_message)
+                        final_text = _short_report_final_text(latest_report_success, display_text)
                     else:
-                        final_text = _raw_tool_payload_failure_text(user_message)
+                        final_text = _raw_tool_payload_failure_text(display_text)
                 elif latest_report_success and len(final_text) > 800:
-                    final_text = _short_report_final_text(latest_report_success, user_message)
-                if _requires_web_search(user_message) and "web_search" not in current_turn_tools and not nudged_required_search:
+                    final_text = _short_report_final_text(latest_report_success, display_text)
+                if _requires_web_search(request) and "web_search" not in current_turn_tools and not nudged_required_search:
                     messages.append({"role": "system", "content": _required_tool_instruction("web_search")})
                     nudged_required_search = True
                     continue
@@ -1620,7 +1622,7 @@ class AgentLoop:
                     and latest_file_success_result
                     and _claims_failure(final_text)
                 ):
-                    final_text = _file_success_final_text(latest_file_success_result, user_message)
+                    final_text = _file_success_final_text(latest_file_success_result, display_text)
                 if _claims_file_success(final_text) and not current_turn_file_success and stale_file_claim_nudges >= 2:
                     sanitized = _sanitize_unverified_file_claims(final_text)
                     final_text = (
@@ -1648,7 +1650,7 @@ class AgentLoop:
                     self._awaited = None
                     async for keepalive in self._await_with_keepalive(
                         self._reflect(
-                            client, model, user_message, plan_steps, final_text, current_turn_tools
+                            client, model, request, plan_steps, final_text, current_turn_tools
                         )
                     ):
                         yield keepalive
@@ -1703,7 +1705,7 @@ class AgentLoop:
             self._awaited = None
             async for keepalive in self._await_with_keepalive(_chat_with_retry(
                 client, model=model,
-                messages=_compact_wrapup_messages(messages, user_message, evidence_notes),
+                messages=_compact_wrapup_messages(messages, request, evidence_notes),
                 temperature=LLM_TEMPERATURE, stream=False,
             )):
                 yield keepalive
@@ -1713,12 +1715,12 @@ class AgentLoop:
             pass
         if not final_text or _looks_like_raw_tool_payload(final_text):
             final_text = (
-                _file_success_final_text(latest_file_success_result, user_message)
+                _file_success_final_text(latest_file_success_result, display_text)
                 if current_turn_file_success and latest_file_success_result
-                else _max_iterations_fallback_text(user_message, evidence_notes)
+                else _max_iterations_fallback_text(display_text, evidence_notes)
             )
         if current_turn_file_success and latest_file_success_result and _claims_failure(final_text):
-            final_text = _file_success_final_text(latest_file_success_result, user_message)
+            final_text = _file_success_final_text(latest_file_success_result, display_text)
         if _claims_file_success(final_text) and not current_turn_file_success:
             final_text = (
                 _failure_final_text(unresolved_tool_errors)

@@ -42,6 +42,11 @@ def llm_content(action: dict) -> str:
     return f"[ui_action] {json.dumps(payload, ensure_ascii=False)}"
 
 
+def user_turn(content: str, ui_action: dict | None) -> str:
+    """A user turn as the model reads it: the rendered action for a click, the text otherwise."""
+    return llm_content(ui_action) if ui_action else content
+
+
 def _canonical_ids(raw_ids: list[str]) -> list[str]:
     ids: list[str] = []
     for raw in raw_ids:

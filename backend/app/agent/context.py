@@ -4,7 +4,7 @@ from uuid import UUID
 import json
 import re
 from sqlalchemy.orm import Session
-from app.agent.ui_actions import llm_content
+from app.agent.ui_actions import user_turn
 from app.crud.crud_agent_conversation import agent_conversation as crud_conv
 from app.crud.crud_agent_memory import agent_memory as crud_memory
 from app.crud.crud_agent_skill import agent_skill as crud_skill
@@ -206,8 +206,8 @@ class AgentContext:
         history = []
         for m in messages:
             if m.role == "user":
-                content = llm_content(m.ui_action) if m.kind == "ui_action" else m.content
-                history.append({"role": "user", "content": content})
+                ui_action = m.ui_action if m.kind == "ui_action" else None
+                history.append({"role": "user", "content": user_turn(m.content, ui_action)})
             elif m.role == "assistant":
                 if _looks_like_prior_file_claim(m.content) and not m.tool_calls:
                     history.append({
