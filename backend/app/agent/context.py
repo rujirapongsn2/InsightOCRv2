@@ -234,11 +234,10 @@ class AgentContext:
                 })
         # Providers require every call to be followed by its result. A window cut
         # by max_messages can begin with results whose call is outside it: those
-        # are dropped. A call with no result is one the run never finished and
-        # whose worker died before storing that (app.agent.unfinished): it stays,
-        # with a result that says so, because
-        # dropping it shows the model an earlier request it seemingly never acted
-        # on, and it would act on it again.
+        # are dropped. A call with no result is one whose run ended and whose
+        # worker died before storing the result that says so (app.agent.unfinished):
+        # it stays, with that result, because dropping it shows the model an
+        # earlier request it seemingly never acted on, and it would act on it again.
         repaired = []
         index = 0
         while index < len(history):
