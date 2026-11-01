@@ -7,6 +7,7 @@ import uuid
 from datetime import datetime, timezone
 
 from app.agent.loop import AgentLoop
+from app.agent.unfinished import close_unfinished_calls
 from app.celery_app import celery_app
 from app.db.session import SessionLocal
 from app.models.agent_conversation import AgentConversation
@@ -105,6 +106,8 @@ def run_agent_task(self, run_id: str) -> None:
             db.commit()
             if interrupted:
                 logger.warning("Agent run %s was interrupted by a worker restart", run_id)
+                close_unfinished_calls(db, [run_id])
+                db.commit()
             return
 
         run = db.query(AgentRun).filter(AgentRun.id == run_id).first()
@@ -136,10 +139,15 @@ def run_agent_task(self, run_id: str) -> None:
         try:
             completed, error = asyncio.run(_consume_agent_run(loop, run.user_message, str(run.id), run.ui_action))
         finally:
-            # Whatever the outcome, nothing this run asked for may stay waiting.
+            # Whatever the outcome, nothing this run asked for may stay waiting, and
+            # no call of it may stay without a result. The loop has returned, so it
+            # can no longer store a real result; the run is still unfinished
+            # (finished_at), so no next run has started.
             db.rollback()
             from app.crud.crud_agent_pending import agent_pending
             agent_pending.expire_for_run(db, run.id)
+            close_unfinished_calls(db, [run.id])
+            db.commit()
 
         db.rollback()
         db.refresh(run)
