@@ -147,16 +147,26 @@ AGENT_QUEUED_STALE = timedelta(hours=1)
 
 
 def _reconcile_agent_runs(db, now: datetime) -> int:
+    from sqlalchemy import func as sql_func
+
+    from app.agent.unfinished import close_unfinished_calls
     from app.models.agent_run import AgentRun
 
+    stuck = [run_id for (run_id,) in db.query(AgentRun.id).filter(
+        AgentRun.status == "running", AgentRun.started_at.isnot(None),
+        AgentRun.started_at < now - AGENT_RUNNING_STALE)]
+    # A stopped run whose worker never reported back would lock its conversation.
+    # Aged from when the worker started (like running runs), not from queueing.
+    stopping = [run_id for (run_id,) in db.query(AgentRun.id).filter(
+        AgentRun.status == "cancelled", AgentRun.finished_at.is_(None),
+        sql_func.coalesce(AgentRun.started_at, AgentRun.created_at) < now - AGENT_RUNNING_STALE)]
     running = (
         db.query(AgentRun)
-        .filter(AgentRun.status == "running", AgentRun.started_at.isnot(None),
-                AgentRun.started_at < now - AGENT_RUNNING_STALE)
+        .filter(AgentRun.id.in_(stuck), AgentRun.status == "running")
         .update({"status": "failed", "finished_at": now,
                  "error": "Agent DOC stopped responding (worker restarted or timed out). Send the message again."},
                 synchronize_session=False)
-    )
+    ) if stuck else 0
     queued = (
         db.query(AgentRun)
         .filter(AgentRun.status == "queued", AgentRun.created_at < now - AGENT_QUEUED_STALE)
@@ -164,17 +174,14 @@ def _reconcile_agent_runs(db, now: datetime) -> int:
                  "error": "Agent DOC did not start in time. Send the message again."},
                 synchronize_session=False)
     )
-    # A stopped run whose worker never reported back would lock its conversation.
-    from sqlalchemy import func as sql_func
-
-    # Aged from when the worker started (like running runs), not from queueing.
-    stopping = (
+    stopped = (
         db.query(AgentRun)
-        .filter(AgentRun.status == "cancelled", AgentRun.finished_at.is_(None),
-                sql_func.coalesce(AgentRun.started_at, AgentRun.created_at) < now - AGENT_RUNNING_STALE)
+        .filter(AgentRun.id.in_(stopping), AgentRun.status == "cancelled", AgentRun.finished_at.is_(None))
         .update({"finished_at": now}, synchronize_session=False)
-    )
-    return running + queued + stopping
+    ) if stopping else 0
+    # Their workers are gone, so no real result can still arrive for their calls.
+    close_unfinished_calls(db, stuck + stopping)
+    return running + queued + stopped
 
 
 @celery_app.task

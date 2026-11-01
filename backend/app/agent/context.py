@@ -5,6 +5,7 @@ import json
 import re
 from sqlalchemy.orm import Session
 from app.agent.ui_actions import user_turn
+from app.agent.unfinished import call_name, unfinished_call_result
 from app.crud.crud_agent_conversation import agent_conversation as crud_conv
 from app.crud.crud_agent_memory import agent_memory as crud_memory
 from app.crud.crud_agent_skill import agent_skill as crud_skill
@@ -168,14 +169,9 @@ def _skill_matches_query(skill, query: str) -> bool:
 
 
 def _unfinished_call_result(call: dict) -> dict:
-    """The result the model reads for a call whose run ended before it returned."""
-    name = (call.get("function") or {}).get("name") or "this tool"
-    return {"role": "tool", "tool_call_id": call["id"], "content": tool_content_for_llm({
-        "error": (f"{name} did not finish: the run was stopped by the user or interrupted before it returned, "
-                  "so it had no result. Do not assume it took effect. That request is over: answer the user's "
-                  "latest message, and repeat this call only if that message asks for it."),
-        "unfinished": True,
-    })}
+    """The result the model reads for a call whose run ended before it returned (none was stored)."""
+    return {"role": "tool", "tool_call_id": call["id"],
+            "content": tool_content_for_llm(unfinished_call_result(call_name(call)))}
 
 
 class AgentContext:
@@ -238,10 +234,10 @@ class AgentContext:
                 })
         # Providers require every call to be followed by its result. A window cut
         # by max_messages can begin with results whose call is outside it: those
-        # are dropped. A call with no result is one the run never finished (Stop,
-        # or the worker died): it stays, with a result that says so, because
-        # dropping it shows the model an earlier request it seemingly never acted
-        # on, and it would act on it again.
+        # are dropped. A call with no result is one whose run ended and whose
+        # worker died before storing the result that says so (app.agent.unfinished):
+        # it stays, with that result, because dropping it shows the model an
+        # earlier request it seemingly never acted on, and it would act on it again.
         repaired = []
         index = 0
         while index < len(history):

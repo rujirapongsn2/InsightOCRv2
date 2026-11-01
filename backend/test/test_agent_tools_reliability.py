@@ -35,8 +35,8 @@ from app.models.schema import DocumentSchema
 @pytest.fixture
 def db():
     engine = create_engine("sqlite://")
-    tables = [AgentConversation.__table__, AgentPendingAction.__table__, AgentRun.__table__, Document.__table__,
-              DocumentSchema.__table__]
+    tables = [AgentConversation.__table__, AgentMessage.__table__, AgentPendingAction.__table__, AgentRun.__table__,
+              Document.__table__, DocumentSchema.__table__]
     AgentRun.metadata.create_all(engine, tables=tables)
     session = sessionmaker(bind=engine)()
     yield session

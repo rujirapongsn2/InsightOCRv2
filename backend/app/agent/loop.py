@@ -32,7 +32,9 @@ from app.agent.context import (
     tool_content_for_llm,
 )
 from app.agent.events import sse_event, SSEEventType
-from app.agent.confirmations import CONFIRMATION_TIMEOUT_S, declined_result, describe_action, requires_confirmation
+from app.agent.confirmations import (
+    CONFIRMATION_TIMEOUT_S, RunConfirmations, declined_result, describe_action, requires_confirmation,
+)
 from app.agent.tools.document_tools import freeze_confirmation
 from app.agent.a2ui import PANEL_TOOLS
 from app.agent.ui_actions import user_turn
@@ -960,6 +962,7 @@ class AgentLoop:
         self.context = AgentContext(db=db, user_id=user_id, job_id=job_id, conversation_id=conversation_id, kind=kind)
         # Checked before every tool call: a stopped run must not start another action.
         self.context.run_active_check = self._run_active if run_id is not None else None
+        self.confirmations = RunConfirmations()
 
     def _build_system_prompt(self, user_message: str) -> str:
         prompt = self.system_prompt_override or build_system_prompt(self.context, user_message)
@@ -1272,8 +1275,12 @@ class AgentLoop:
                         elif self._tool_requires_confirmation(tool_name, tool_args):
                             frozen = freeze_confirmation(self.db, self.job_id, tool_name, tool_args)
                             tool_args = frozen.arguments
+                            settled = self.confirmations.answer_without_asking(tool_name, tool_args, frozen.documents)
                             if frozen.error:
                                 result = frozen.error
+                            elif settled:
+                                result = settled
+                                yield sse_event(SSEEventType.TOOL_REJECTED, {"id": tc.id, "name": tool_name, "status": settled["declined"]})
                             else:
                                 pending = crud_pending.create(
                                     self.db, conversation_id=self.conversation_id, user_id=self.user_id,
@@ -1290,6 +1297,7 @@ class AgentLoop:
                                     "arguments": tool_args,
                                 })
                                 answer = await self._wait_for_confirmation(pending.id)
+                                self.confirmations.record(tool_name, tool_args, frozen.documents, answer)
                                 if answer != "confirmed":
                                     result = declined_result(tool_name, answer)
                                     yield sse_event(SSEEventType.TOOL_REJECTED, {"id": tc.id, "name": tool_name, "status": answer})
@@ -1310,10 +1318,10 @@ class AgentLoop:
                         if tool_name == "create_skill" and isinstance(result, dict) and result.get("ok"):
                             created_skill_result = result
 
-                        yield sse_event(SSEEventType.TOOL_RESULT, {"id": tc.id, "name": tool_name, "result": result})
                         crud_msg.add(self.db, conversation_id=self.conversation_id, role="tool",
                                      tool_call_id=tc.id, tool_name=tool_name,
                                      tool_result=result, iteration=iteration)
+                        yield sse_event(SSEEventType.TOOL_RESULT, {"id": tc.id, "name": tool_name, "result": result})
                         messages.append({
                             "role": "tool", "tool_call_id": tc.id,
                             "content": tool_content_for_llm(result),
@@ -1393,10 +1401,10 @@ class AgentLoop:
                             result = _verify_file_tool_result(self.context, tool_name, result)
                         if tool_name == "create_skill" and isinstance(result, dict) and result.get("ok"):
                             created_skill_result = result
-                        yield sse_event(SSEEventType.TOOL_RESULT, {"id": tc.id, "name": tool_name, "result": result})
                         crud_msg.add(self.db, conversation_id=self.conversation_id, role="tool",
                                      tool_call_id=tc.id, tool_name=tool_name,
                                      tool_result=result, iteration=iteration)
+                        yield sse_event(SSEEventType.TOOL_RESULT, {"id": tc.id, "name": tool_name, "result": result})
                         messages.append({
                             "role": "tool", "tool_call_id": tc.id,
                             "content": tool_content_for_llm(result),
@@ -2093,9 +2101,9 @@ class AgentLoop:
                      model_used=self.llm_config.get("model", "default_ai_settings"))
         yield sse_event(SSEEventType.TOOL_CALL, {"id": call_id, "name": tool_name, "arguments": tool_args})
         result = await tool_registry.execute(tool_name, tool_args, self.context)
-        yield sse_event(SSEEventType.TOOL_RESULT, {"id": call_id, "name": tool_name, "result": result})
         crud_msg.add(self.db, conversation_id=self.conversation_id, role="tool",
                      tool_call_id=call_id, tool_name=tool_name, tool_result=result, iteration=iteration)
+        yield sse_event(SSEEventType.TOOL_RESULT, {"id": call_id, "name": tool_name, "result": result})
         self._last_context_result = {"tool": tool_name, "arguments": tool_args, "result": result}
 
     async def _builder_model_text(self, prompt: str, system_prompt: str, tool_results: list[dict]) -> str:
@@ -2159,22 +2167,27 @@ class AgentLoop:
         allowed = {s["function"]["name"] for s in tool_registry.get_openai_schemas(categories=["workflow", "web"])}
         if tool_name not in allowed:
             result = {"error": "This tool is not available in the workflow builder"}
-            yield sse_event(SSEEventType.TOOL_RESULT, {"id": call_id, "name": tool_name, "result": result})
             crud_msg.add(self.db, conversation_id=self.conversation_id, role="tool",
                          tool_call_id=call_id, tool_name=tool_name, tool_result=result, iteration=iteration)
+            yield sse_event(SSEEventType.TOOL_RESULT, {"id": call_id, "name": tool_name, "result": result})
             self._last_builder_result = result
             return
         if tool_name == "save_workflow":
             from app.agent.tools.workflow_tools import prepare_workflow_save
             prepared = await prepare_workflow_save(tool_args, self.context)
             if not prepared.get("ok"):
-                yield sse_event(SSEEventType.TOOL_RESULT, {"id": call_id, "name": tool_name, "result": prepared})
                 crud_msg.add(self.db, conversation_id=self.conversation_id, role="tool",
                              tool_call_id=call_id, tool_name=tool_name, tool_result=prepared, iteration=iteration)
+                yield sse_event(SSEEventType.TOOL_RESULT, {"id": call_id, "name": tool_name, "result": prepared})
                 self._last_builder_result = prepared
                 return
             tool_args = prepared["arguments"]
-        if requires_confirmation(tool_name, tool_args):
+        settled = (self.confirmations.answer_without_asking(tool_name, tool_args, None)
+                   if requires_confirmation(tool_name, tool_args) else None)
+        if settled:
+            result = settled
+            yield sse_event(SSEEventType.TOOL_REJECTED, {"id": call_id, "name": tool_name, "status": settled["declined"]})
+        elif requires_confirmation(tool_name, tool_args):
             pending = crud_pending.create(
                 self.db, conversation_id=self.conversation_id, user_id=self.user_id,
                 tool_name=tool_name, tool_arguments=tool_args,
@@ -2198,6 +2211,7 @@ class AgentLoop:
                 await asyncio.sleep(1)
             if answer is None:
                 answer = self._expire_confirmation(pending.id)
+            self.confirmations.record(tool_name, tool_args, None, answer)
             if answer != "confirmed":
                 result = declined_result(tool_name, answer)
                 yield sse_event(SSEEventType.TOOL_REJECTED, {"id": call_id, "name": tool_name, "status": answer})
@@ -2205,9 +2219,9 @@ class AgentLoop:
                 result = await tool_registry.execute(tool_name, tool_args, self.context)
         else:
             result = await tool_registry.execute(tool_name, tool_args, self.context)
-        yield sse_event(SSEEventType.TOOL_RESULT, {"id": call_id, "name": tool_name, "result": result})
         crud_msg.add(self.db, conversation_id=self.conversation_id, role="tool",
                      tool_call_id=call_id, tool_name=tool_name, tool_result=result, iteration=iteration)
+        yield sse_event(SSEEventType.TOOL_RESULT, {"id": call_id, "name": tool_name, "result": result})
         self._last_builder_result = result
 
     async def _run_workflow_builder_native(self, user_message: str) -> AsyncGenerator[str, None]:
@@ -2532,8 +2546,12 @@ __TOOL_CATALOG__
             if self._tool_requires_confirmation(tool_name, tool_args):
                 frozen = freeze_confirmation(self.db, self.job_id, tool_name, tool_args)
                 tool_args = frozen.arguments
+                settled = self.confirmations.answer_without_asking(tool_name, tool_args, frozen.documents)
                 if frozen.error:
                     result = frozen.error
+                elif settled:
+                    result = settled
+                    yield sse_event(SSEEventType.TOOL_REJECTED, {"id": call_id, "name": tool_name, "status": settled["declined"]})
                 else:
                     pending = crud_pending.create(
                         self.db, conversation_id=self.conversation_id, user_id=self.user_id,
@@ -2550,6 +2568,7 @@ __TOOL_CATALOG__
                         "arguments": tool_args,
                     })
                     answer = await self._wait_for_confirmation(pending.id)
+                    self.confirmations.record(tool_name, tool_args, frozen.documents, answer)
                     if answer != "confirmed":
                         result = declined_result(tool_name, answer)
                         yield sse_event(SSEEventType.TOOL_REJECTED, {"id": call_id, "name": tool_name, "status": answer})
@@ -2567,10 +2586,10 @@ __TOOL_CATALOG__
                 result = await tool_registry.execute(tool_name, tool_args, self.context)
                 result = _verify_file_tool_result(self.context, tool_name, result)
 
-            yield sse_event(SSEEventType.TOOL_RESULT, {"id": call_id, "name": tool_name, "result": result})
             crud_msg.add(self.db, conversation_id=self.conversation_id, role="tool",
                          tool_call_id=call_id, tool_name=tool_name,
                          tool_result=result, iteration=iteration)
+            yield sse_event(SSEEventType.TOOL_RESULT, {"id": call_id, "name": tool_name, "result": result})
             tool_results.append({"tool": tool_name, "arguments": tool_args, "result": result})
             if tool_name == "create_skill" and isinstance(result, dict) and result.get("ok"):
                 final_text = _skill_creation_final_text(result)

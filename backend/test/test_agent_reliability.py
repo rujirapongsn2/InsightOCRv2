@@ -9,6 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import create_engine
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import sessionmaker
 
 import app.models
@@ -16,13 +18,19 @@ import app.models
 for _module in pkgutil.iter_modules(app.models.__path__):
     importlib.import_module(f"app.models.{_module.name}")
 
+from app.models.agent_message import AgentMessage
 from app.models.agent_run import AgentRun
+
+
+@compiles(JSONB, "sqlite")
+def _jsonb_on_sqlite(element, compiler, **kw):
+    return "JSON"
 
 
 @pytest.fixture
 def db():
     engine = create_engine("sqlite://")
-    AgentRun.metadata.create_all(engine, tables=[AgentRun.__table__])
+    AgentRun.metadata.create_all(engine, tables=[AgentRun.__table__, AgentMessage.__table__])
     session = sessionmaker(bind=engine)()
     yield session
     session.close()

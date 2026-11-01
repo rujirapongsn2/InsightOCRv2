@@ -8,6 +8,13 @@ import {
     type ChatToolCallStatus,
 } from "@astryxdesign/core/Chat"
 import { downloadAgentFile, normalizeAgentFilePath } from "@/lib/agent-download"
+import {
+    QUIET_STATE_LABEL,
+    toolCallGroupState,
+    toolCallMessage,
+    toolCallState,
+    type ToolCallState,
+} from "@/lib/agentToolStatus"
 import { surfaceAvailability, surfaceFromToolResult, type SurfaceConversation, type UiActionRequest } from "@/lib/a2ui"
 import A2uiSurface from "./a2ui/A2uiSurface"
 
@@ -26,6 +33,8 @@ interface AgentToolCallsProps {
     results?: Record<string, unknown>
     conversationId?: string
     autoConfirmedIds?: Set<string>
+    /** A run of the conversation is working; a call without a result is running only then. */
+    runActive: boolean
     /** Sends a surface button click to the server. */
     onSurfaceAction?: (action: UiActionRequest) => void
     /** The server's state of each panel; without it every surface is read-only. */
@@ -45,14 +54,6 @@ function stringify(value: unknown): string {
     } catch {
         return String(value)
     }
-}
-
-function getErrorMessage(result: unknown): string | null {
-    if (!isRecord(result) || !result.error) return null
-    const error = result.error
-    if (typeof error === "string") return error
-    if (isRecord(error)) return String(error.message || error.type || stringify(error))
-    return String(error)
 }
 
 function getResultPath(result: unknown): string | null {
@@ -96,14 +97,21 @@ function getTarget(name: string, args: unknown, result: unknown): string | undef
     return undefined
 }
 
-function getStatus(result: unknown): ChatToolCallStatus {
-    if (result === undefined) return "running"
-    return getErrorMessage(result) ? "error" : "complete"
+// ChatToolCalls has no neutral status, so a quiet call is passed as "complete"
+// and globals.css redraws its icon from data-tool-state.
+const CHIP_STATUS: Record<ToolCallState, ChatToolCallStatus> = {
+    running: "running",
+    complete: "complete",
+    error: "error",
+    stopped: "complete",
+    rejected: "complete",
+    expired: "complete",
 }
 
 function DetailBlock({
     call,
     result,
+    state,
     conversationId,
     onDownload,
     downloadingPath,
@@ -111,6 +119,7 @@ function DetailBlock({
 }: {
     call: AgentToolCallLike
     result: unknown
+    state: ToolCallState
     conversationId?: string
     onDownload: (path: string) => void
     downloadingPath: string | null
@@ -118,7 +127,7 @@ function DetailBlock({
 }) {
     const name = call.name || "tool"
     const args = call.arguments || {}
-    const errorMessage = getErrorMessage(result)
+    const message = toolCallMessage(result)
     const path = getResultPath(result)
     const canDownload = Boolean(conversationId && path && isWriteSuccess(name, result))
     const isCodeTool = ["execute_python", "run_report_code"].includes(name) && isRecord(args) && typeof args.code === "string"
@@ -136,9 +145,14 @@ function DetailBlock({
                     <pre className="mt-1 max-h-48 overflow-auto rounded-md bg-white p-2 text-xs">{stringify(args)}</pre>
                 </details>
             )}
-            {errorMessage && (
+            {message && state === "error" && (
                 <div className="rounded-md border border-red-200 bg-red-50 px-2 py-1.5 text-xs text-red-700">
-                    {errorMessage}
+                    {message}
+                </div>
+            )}
+            {message && QUIET_STATE_LABEL[state] && (
+                <div className="rounded-md border border-hairline bg-off-white px-2 py-1.5 text-xs text-slate-gray">
+                    {message}
                 </div>
             )}
             {downloadError && (
@@ -172,6 +186,7 @@ export default function AgentToolCalls({
     results = {},
     conversationId,
     autoConfirmedIds,
+    runActive,
     onSurfaceAction,
     surfaceConversation,
     onOpenDocument,
@@ -196,13 +211,24 @@ export default function AgentToolCalls({
         const id = call.id || `${call.name || "tool"}-${index}`
         const name = call.name || "tool"
         const result = call.result !== undefined ? call.result : results[id]
-        const status = getStatus(result)
+        const state = toolCallState(result, runActive)
+        const status = CHIP_STATUS[state]
+        const quietLabel = QUIET_STATE_LABEL[state]
         const autoConfirmed = autoConfirmedIds?.has(id)
-        const stats: ReactNode = autoConfirmed ? (
-            <span className="inline-flex items-center gap-1 rounded bg-emerald-100 px-1.5 py-0.5 text-xs font-medium text-emerald-700">
-                <ShieldCheck className="h-3 w-3" />
-                auto
-            </span>
+        const stats: ReactNode = quietLabel || autoConfirmed ? (
+            <>
+                {quietLabel && (
+                    <span data-tool-state={state} className="rounded bg-off-white px-1.5 py-0.5 text-xs font-medium text-slate-gray">
+                        {quietLabel}
+                    </span>
+                )}
+                {autoConfirmed && (
+                    <span className="inline-flex items-center gap-1 rounded bg-emerald-100 px-1.5 py-0.5 text-xs font-medium text-emerald-700">
+                        <ShieldCheck className="h-3 w-3" />
+                        auto
+                    </span>
+                )}
+            </>
         ) : undefined
 
         return {
@@ -212,12 +238,13 @@ export default function AgentToolCalls({
             target: getTarget(name, call.arguments, result),
             node: getCategory(name),
             stats,
-            errorMessage: status === "error" ? getErrorMessage(result) || undefined : undefined,
-            data: { arguments: call.arguments, result },
+            errorMessage: state === "error" ? toolCallMessage(result) || undefined : undefined,
+            data: { arguments: call.arguments, result, state },
             resultDetail: (
                 <DetailBlock
                     call={call}
                     result={result}
+                    state={state}
                     conversationId={conversationId}
                     onDownload={handleDownload}
                     downloadingPath={downloadingPath}
@@ -225,7 +252,7 @@ export default function AgentToolCalls({
                 />
             ),
         }
-    }), [autoConfirmedIds, calls, conversationId, downloadError, downloadingPath, handleDownload, results])
+    }), [autoConfirmedIds, calls, conversationId, downloadError, downloadingPath, handleDownload, results, runActive])
 
     // A successful panel tool result is shown as its surface; anything that does
     // not parse (an older v1 panel included) stays an ordinary tool call.
@@ -235,7 +262,8 @@ export default function AgentToolCalls({
     })), [items])
     const listed = entries.filter(entry => !entry.surface).map(entry => entry.item)
     const toolList = (shown: ChatToolCallItem[]) => (
-        <div className="mx-3">
+        <div className="mx-3" data-agent-tool-calls
+            data-tool-group-state={toolCallGroupState(shown.map(item => (item.data as { state: ToolCallState }).state))}>
             <ChatToolCalls calls={shown} defaultIsExpanded={false} label={`${shown.length} tool call${shown.length === 1 ? "" : "s"}`} />
         </div>
     )

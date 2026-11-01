@@ -258,3 +258,133 @@ def test_a_declined_confirmation_is_an_answer_not_a_failed_run(db, run, monkeypa
     db.expire_all()
     assert db.get(Document, doc.id).status == "extraction_completed"
     assert db.query(AgentPendingAction).one().description == "อนุมัติเอกสาร starbuck.pdf"
+
+
+def _documents(db, *names):
+    docs = [Document(id=uuid.uuid4(), job_id=JOB, filename=name, file_path="x", status="extraction_completed")
+            for name in names]
+    db.add_all(docs)
+    db.commit()
+    return docs
+
+
+def _run_calls(db, run, monkeypatch, calls, answers):
+    """Run the loop against a model that makes calls one turn at a time, then answers.
+
+    answers are the user's answers, in order, to the requests the loop waits on; the last one repeats.
+    Returns the SSE events, the waits, and the messages of the model's last turn.
+    """
+    asked, waits = [], []
+
+    async def chat(_client, **kwargs):
+        asked.append(kwargs["messages"])
+        if len(asked) <= len(calls):
+            name, args = calls[len(asked) - 1]
+            call = SimpleNamespace(id=f"call{len(asked)}", type="function", function=SimpleNamespace(
+                name=name, arguments=json.dumps(args)))
+            message = SimpleNamespace(content=None, tool_calls=[call])
+        else:
+            message = SimpleNamespace(content="ยังไม่ได้ทำรายการ", tool_calls=None)
+        return SimpleNamespace(choices=[SimpleNamespace(message=message, finish_reason="stop")], usage=None)
+
+    async def answered(self, pending_id, timeout_s=0):
+        answer = answers[min(len(waits), len(answers) - 1)]
+        waits.append(pending_id)
+        agent_pending.resolve(self.db, pending_id, answer)
+        return answer
+
+    monkeypatch.setattr(loop_module, "_chat_with_retry", chat)
+    monkeypatch.setattr(loop_module, "build_system_prompt", lambda context, request: "sys")
+    monkeypatch.setattr(loop_module.AgentLoop, "_wait_for_confirmation", answered)
+    loop = loop_module.AgentLoop(db=db, conversation_id=run.conversation_id, user_id=USER, job_id=JOB,
+                                 llm_config={"apiKey": "k", "model": "m"}, skip_planning=True)
+
+    async def drain():
+        return [event async for event in loop.run("อนุมัติเอกสาร")]
+
+    events = [json.loads(event[6:]) for event in asyncio.run(drain()) if event.startswith("data: ")]
+    return events, waits, asked[-1]
+
+
+def _told(messages, call_id):
+    return json.loads(next(m["content"] for m in messages if m.get("tool_call_id") == call_id))
+
+
+def _succeeded(events):
+    done = next(event for event in events if event["type"] == "done")
+    return (done["success"], done["failed_steps"]) == (True, []) and not any(e["type"] == "error" for e in events)
+
+
+def test_after_an_expiry_the_run_asks_nothing_more(db, run, monkeypatch):
+    """UAT round 2 N5: the request expired, then the agent asked to approve the same document again in the same run."""
+    quote, other = _documents(db, "Q25100034-8.pdf", "other.pdf")
+    events, waits, told = _run_calls(db, run, monkeypatch, [
+        ("approve_document", {"doc_id": str(quote.id), "note": "ok"}),
+        ("approve_document", {"doc_id": str(quote.id), "note": "ok"}),
+        ("reject_document", {"doc_id": str(other.id)}),
+    ], ["expired"])
+
+    assert len(waits) == 1
+    db.expire_all()
+    assert [a.status for a in db.query(AgentPendingAction).all()] == ["expired"]
+    assert sum(e["type"] == "confirmation_required" for e in events) == 1
+    for call_id in ("call2", "call3"):
+        result = _told(told, call_id)
+        assert result["declined"] == "expired"
+        assert "user is away" in result["error"] and "nothing was done" in result["error"]
+        assert "can ask again" in result["error"]
+    assert _succeeded(events)
+    assert {d.status for d in db.query(Document).all()} == {"extraction_completed"}
+
+
+def test_a_rejected_action_is_not_asked_again_but_another_action_is(db, run, monkeypatch):
+    doc, second = _documents(db, "starbuck.pdf", "second.pdf")
+    events, waits, told = _run_calls(db, run, monkeypatch, [
+        ("approve_document", {"doc_id": str(doc.id), "note": "first"}),
+        ("approve_document", {"doc_id": str(doc.id), "note": "worded differently"}),
+        ("bulk_approve", {"doc_ids": [str(doc.id)]}),
+        ("approve_document", {"doc_id": str(second.id)}),
+    ], ["rejected", "rejected"])
+
+    assert len(waits) == 2
+    db.expire_all()
+    assert {(a.tool_arguments["doc_id"], a.status) for a in db.query(AgentPendingAction).all()} == {
+        (str(doc.id), "rejected"), (str(second.id), "rejected")}
+    assert _told(told, "call2") == {"error": "User rejected action", "declined": "rejected",
+                                    "tool_name": "approve_document"}
+    assert _told(told, "call3") == {"error": "User rejected action", "declined": "rejected",
+                                    "tool_name": "bulk_approve"}
+    assert _succeeded(events)
+    assert {d.status for d in db.query(Document).all()} == {"extraction_completed"}
+
+
+def test_the_completion_provider_path_also_asks_nothing_more_after_an_expiry(db, run, monkeypatch):
+    (quote,) = _documents(db, "Q25100034-8.pdf")
+    approve = {"type": "tool_call", "tool": "approve_document", "arguments": {"doc_id": str(quote.id)}}
+    replies = [approve, approve, {"type": "final", "answer": "ยังไม่ได้อนุมัติ"}]
+    prompts, waits = [], []
+
+    async def complete(self, prompt, system_prompt, tool_results):
+        prompts.append(prompt)
+        return json.dumps(replies[len(prompts) - 1])
+
+    async def expired(self, pending_id, timeout_s=0):
+        waits.append(pending_id)
+        agent_pending.resolve(self.db, pending_id, "expired")
+        return "expired"
+
+    monkeypatch.setattr(loop_module, "build_system_prompt", lambda context, request: "sys")
+    monkeypatch.setattr(loop_module.AgentLoop, "_call_completion_provider", complete)
+    monkeypatch.setattr(loop_module.AgentLoop, "_wait_for_confirmation", expired)
+    loop = loop_module.AgentLoop(db=db, conversation_id=run.conversation_id, user_id=USER, job_id=JOB,
+                                 llm_config={"provider": "completion_messages", "model": "m"})
+
+    async def drain():
+        return [event async for event in loop.run("อนุมัติเอกสาร")]
+
+    events = [json.loads(event[6:]) for event in asyncio.run(drain()) if event.startswith("data: ")]
+    assert len(waits) == 1
+    db.expire_all()
+    assert [a.status for a in db.query(AgentPendingAction).all()] == ["expired"]
+    assert "user is away" in prompts[-1]
+    assert next(event for event in events if event["type"] == "done")["success"] is True
