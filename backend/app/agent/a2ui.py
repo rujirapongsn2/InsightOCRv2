@@ -426,7 +426,8 @@ def documents_panel(args: ShowDocuments, rows: list[dict]) -> Panel:
     data = {"documents": rows, **({"selected": []} if selectable else {})}
     shown = [row["document_id"] for row in rows]
     actions = tuple({"component_id": b["id"], "name": b["action"]["event"]["name"]} for b in buttons)
-    return Panel(components, data, {"shown": shown}, actions, tuple(shown) if actions else ())
+    summary = {"shown": shown, **({"buttons": [b["label"] for b in buttons]} if buttons else {})}
+    return Panel(components, data, summary, actions, tuple(shown) if actions else ())
 
 
 def metrics_panel(args: ShowMetrics, sources: list[DocumentRef]) -> Panel:

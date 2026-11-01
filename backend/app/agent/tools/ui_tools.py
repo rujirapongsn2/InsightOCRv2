@@ -105,8 +105,10 @@ def _handler(name: str, model: type, show: Callable[[Any, Any], tuple[Panel, dic
     return handle
 
 
-_SHOWN = ("The panel already shows its sources and, for risks, which quotes were found; do not restate or "
-          "reinterpret them in text. Still write a short text answer with the conclusion.")
+# Appended to every panel tool's description.
+SHOWN = ("The user sees the panel: do not restate or reinterpret what it shows (documents, filenames, statuses, "
+         "numbers, sources, quote checks) in text. Name a button by the label in the result's \"buttons\". "
+         "Still write a short text answer with the conclusion.")
 _COMPUTED = ("Send raw values (numbers, ISO dates \"2026-01-31\", months \"2026-01\"); the system formats them. "
              "Compute every number first with tools (execute_python, get_document_detail, compare_documents); "
              "never estimate. sources: every document the numbers come from.")
@@ -115,29 +117,30 @@ PANELS = [
     ("show_documents", ShowDocuments, _show_documents,
      "Show a list of this job's documents the user may act on, e.g. documents awaiting approval or with problems. "
      "actions adds buttons for the selected documents; a click comes back as a [ui_action] user turn, and "
-     "approving or rejecting still goes through bulk_approve / bulk_reject. A newer panel disables older buttons. Filenames and statuses are filled in by the system. "
-     "Ids that are not documents of this job are dropped and listed in the result."),
+     "approving or rejecting still goes through bulk_approve / bulk_reject. A newer panel disables older buttons. "
+     "Filenames and statuses are filled in by the system; a note is only for what they do not say (never the "
+     "filename or status). Ids that are not documents of this job are dropped and listed in the result."),
     ("show_metrics", ShowMetrics, _show_metrics,
      "Show 1-6 headline numbers as tiles. Give previous to compare with: the system computes the change, its "
      "direction and (with higher_is) whether it is good or bad. kind money takes currency (default THB); percent "
-     "values are percentage points (12.5 = 12.5%). " + _COMPUTED + " " + _SHOWN),
+     "values are percentage points (12.5 = 12.5%). " + _COMPUTED),
     ("show_table", ShowTable, _show_table,
      "Show a comparison table. Each column has a kind; rows hold raw values for the value columns. A change column "
      "{kind: \"change\", of, vs, higher_is} is computed by the system from two numeric columns of the same kind: "
      "never put it in rows. Include a document column whenever a row comes from one document; it shows the "
-     "filename with an open link. " + _COMPUTED + " " + _SHOWN),
+     "filename with an open link. " + _COMPUTED),
     ("show_chart", ShowChart, _show_chart,
      "Show a chart: bar for categories, line for a trend over dates or months (the system sorts the points). "
-     "value_kind formats every value. " + _COMPUTED + " " + _SHOWN),
+     "value_kind formats every value. " + _COMPUTED),
     ("show_risks", ShowRisks, _show_risks,
      "Show a contract risk analysis for one document. Read its text first (get_document_detail). Each risk needs "
      "a quote copied verbatim from that document's text; the system checks every quote and the result lists each "
      "risk's id, title and quote: found | not_found. If you mention an unverified quote, use its title from the "
-     "result. " + _SHOWN),
+     "result."),
 ]
 
 for _name, _model, _show, _description in PANELS:
     tool_registry.register(ToolDef(
-        name=_name, category="document", description=_description,
+        name=_name, category="document", description=f"{_description} {SHOWN}",
         parameters_schema=tool_parameters(_model), handler=_handler(_name, _model, _show),
     ))

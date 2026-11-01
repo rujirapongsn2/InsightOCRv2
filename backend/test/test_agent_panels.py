@@ -373,7 +373,8 @@ def test_documents_panel_shows_job_rows_and_reports_dropped_ids(db):
                                                         "context": {"document_ids": {"path": "/selected"}}}
     assert components["reject"]["action"]["event"]["name"] == "reject_documents"
     assert json.loads(tool_content_for_llm(result)) == {
-        "ok": True, "panel_id": result["panel_id"], "shown": [doc], "dropped": [foreign], "note": result["note"]}
+        "ok": True, "panel_id": result["panel_id"], "shown": [doc], "buttons": ["อนุมัติที่เลือก", "ปฏิเสธที่เลือก"],
+        "dropped": [foreign], "note": result["note"]}
     batch = json.loads(tool_content_for_llm([{"tool": "show_documents", "arguments": {}, "result": result}]))
     assert "a2ui" not in batch[0]["result"]
 
@@ -394,6 +395,23 @@ def test_panel_tools_are_offered_without_confirmation():
     names = {schema["function"]["name"] for schema in tool_registry.get_openai_schemas()}
     assert set(PANEL_TOOLS) <= names
     assert not any(requires_confirmation(tool, {}) for tool in PANEL_TOOLS)
+
+
+@pytest.mark.parametrize("tool", PANEL_TOOLS)
+def test_every_panel_tool_tells_the_model_not_to_restate_the_panel(tool):
+    """UAT 1: after show_documents the agent listed all 8 filenames and named buttons "approve/reject"."""
+    description = next(s["function"]["description"] for s in tool_registry.get_openai_schemas()
+                       if s["function"]["name"] == tool)
+    assert description.endswith(ui_tools.SHOWN)
+    assert "do not restate" in ui_tools.SHOWN and "filenames" in ui_tools.SHOWN
+
+
+def test_a_document_panel_tells_the_model_its_button_labels(db):
+    ids = [_doc(db, "a.pdf"), _doc(db, "b.pdf")]
+    result = _call(db, "show_documents", {"documents": [{"document_id": i} for i in ids], "actions": ["approve", "reject"]})
+    assert json.loads(tool_content_for_llm(result))["buttons"] == ["อนุมัติที่เลือก", "ปฏิเสธที่เลือก"]
+    listing = _call(db, "show_documents", {"documents": [{"document_id": ids[0]}]})
+    assert "buttons" not in listing
 
 
 @pytest.mark.parametrize("tool", PANEL_TOOLS)
