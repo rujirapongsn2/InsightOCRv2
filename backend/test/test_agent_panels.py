@@ -238,6 +238,35 @@ def test_invalid_tables_are_corrective_errors(db, rows, columns, expected):
     _fails(_table(db, rows, columns), "show_table was not shown", expected)
 
 
+DUE = [{"key": "vendor", "label": "ผู้ขาย", "kind": "text"}, {"key": "due", "label": "วันครบกำหนด/หมายเหตุ", "kind": "text"}]
+
+
+@pytest.mark.parametrize("cell, kind, iso", [
+    # UAT A3: the agent folded a remark into a due-date text column, so the date showed as 2026-03-20.
+    ("2026-03-20 (เครดิต 30 วันจากวันที่ออกใบแจ้งหนี้ 2026-02-18)", "date", "2026-03-20"),
+    ("ครบกำหนด 2026-03-20", "date", "2026-03-20"),
+    ("2026-03", "month", "2026-03"),
+])
+def test_a_date_in_a_text_column_is_sent_back_to_its_own_column(db, cell, kind, iso):
+    result = _table(db, [{"vendor": "Thai Golden Foods", "due": cell}], DUE)
+    _fails(result, "show_table was not shown", f'rows[0].due is text holding the {kind} "{iso}"',
+           f'a column of kind "{kind}"', "separate text column")
+
+
+@pytest.mark.parametrize("cell", ["ไม่ระบุในเอกสาร", "INV-2026-01-15", "230906-01-04641", "Valid until 31/01/2026",
+                                  "2026-02-30 ไม่ใช่วันที่", "รอบ 2026-01 ถึง 2026-03"])
+def test_text_that_is_not_a_date_stays_text(db, cell):
+    assert _table(db, [{"vendor": "ก", "due": cell}], DUE)["ok"] is True
+
+
+def test_the_table_schema_says_where_dates_go():
+    schema = next(s["function"]["parameters"] for s in tool_registry.get_openai_schemas()
+                  if s["function"]["name"] == "show_table")
+    kinds = [branch["properties"]["kind"] for branch in schema["properties"]["columns"]["items"]["anyOf"]
+             if "currency" in branch["properties"]]
+    assert "text never holds a date" in kinds[0]["description"]
+
+
 def test_valid_iso_dates_and_months_are_kept_raw(db):
     result = _table(db, [{"day": "2026-01-31", "m": "2026-01"}],
                     [{"key": "day", "label": "วันที่", "kind": "date"}, {"key": "m", "label": "เดือน", "kind": "month"}])
