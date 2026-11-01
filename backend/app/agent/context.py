@@ -167,6 +167,17 @@ def _skill_matches_query(skill, query: str) -> bool:
     return any(term in search_text for term in _query_terms(query_lower))
 
 
+def _unfinished_call_result(call: dict) -> dict:
+    """The result the model reads for a call whose run ended before it returned."""
+    name = (call.get("function") or {}).get("name") or "this tool"
+    return {"role": "tool", "tool_call_id": call["id"], "content": tool_content_for_llm({
+        "error": (f"{name} did not finish: the run was stopped by the user or interrupted before it returned, "
+                  "so it had no result. Do not assume it took effect. That request is over: answer the user's "
+                  "latest message, and repeat this call only if that message asks for it."),
+        "unfinished": True,
+    })}
+
+
 class AgentContext:
     def __init__(self, db: Session, user_id: UUID, job_id: UUID | None, conversation_id: UUID, kind: str = "document"):
         self.db = db
@@ -225,29 +236,27 @@ class AgentContext:
                     "tool_call_id": m.tool_call_id,
                     "content": tool_content_for_llm(m.tool_result),
                 })
-        # A sliding DB window can begin with an orphan result or end in an
-        # interrupted call batch. Providers require complete adjacent pairs.
+        # Providers require every call to be followed by its result. A window cut
+        # by max_messages can begin with results whose call is outside it: those
+        # are dropped. A call with no result is one the run never finished (Stop,
+        # or the worker died): it stays, with a result that says so, because
+        # dropping it shows the model an earlier request it seemingly never acted
+        # on, and it would act on it again.
         repaired = []
         index = 0
         while index < len(history):
             entry = history[index]
-            if entry.get("tool_calls"):
-                calls = entry["tool_calls"]
-                expected = {call["id"] for call in calls}
-                results = []
-                index += 1
-                while index < len(history) and history[index]["role"] == "tool":
-                    results.append(history[index])
-                    index += 1
-                found = {result.get("tool_call_id") for result in results}
-                if found == expected and len(results) == len(expected):
-                    repaired.extend([entry, *results])
-                elif entry.get("content"):
-                    repaired.append({"role": "assistant", "content": entry["content"]})
-                continue
-            if entry["role"] != "tool":
-                repaired.append(entry)
             index += 1
+            if entry["role"] == "tool":
+                continue
+            repaired.append(entry)
+            if entry.get("tool_calls"):
+                results = {}
+                while index < len(history) and history[index]["role"] == "tool":
+                    results.setdefault(history[index].get("tool_call_id"), history[index])
+                    index += 1
+                repaired.extend(results.get(call["id"]) or _unfinished_call_result(call)
+                                for call in entry["tool_calls"])
         return repaired
 
     def recall_relevant_memories(self, query: str, limit: int = 10) -> list:
