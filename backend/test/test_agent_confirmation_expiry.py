@@ -257,3 +257,4 @@ def test_a_declined_confirmation_is_an_answer_not_a_failed_run(db, run, monkeypa
     assert not any("A tool just failed" in (m.get("content") or "") for m in asked[-1])
     db.expire_all()
     assert db.get(Document, doc.id).status == "extraction_completed"
+    assert db.query(AgentPendingAction).one().description == "อนุมัติเอกสาร starbuck.pdf"

@@ -1278,8 +1278,8 @@ class AgentLoop:
                                 pending = crud_pending.create(
                                     self.db, conversation_id=self.conversation_id, user_id=self.user_id,
                                     tool_name=tool_name, tool_arguments=tool_args,
-                                    description=describe_action(tool_name, tool_args), run_id=self.run_id,
-                                    documents=frozen.documents,
+                                    description=describe_action(tool_name, tool_args, frozen.documents),
+                                    run_id=self.run_id, documents=frozen.documents,
                                 )
                                 yield sse_event(SSEEventType.CONFIRMATION_REQUIRED, {
                                     "pending_action_id": str(pending.id),
@@ -2538,8 +2538,8 @@ __TOOL_CATALOG__
                     pending = crud_pending.create(
                         self.db, conversation_id=self.conversation_id, user_id=self.user_id,
                         tool_name=tool_name, tool_arguments=tool_args,
-                        description=describe_action(tool_name, tool_args), run_id=self.run_id,
-                        documents=frozen.documents,
+                        description=describe_action(tool_name, tool_args, frozen.documents),
+                        run_id=self.run_id, documents=frozen.documents,
                     )
                     yield sse_event(SSEEventType.CONFIRMATION_REQUIRED, {
                         "pending_action_id": str(pending.id),
