@@ -32,7 +32,7 @@ def _jsonb_on_sqlite(element, compiler, **kw):
 
 
 import app.agent.loop as loop_mod  # noqa: E402 — registers every agent tool
-from app.agent.a2ui import CATALOG_ID, PANEL_TOOLS, ShowTable, compare, quote_found  # noqa: E402
+from app.agent.a2ui import CATALOG_ID, DECIMALS, PANEL_TOOLS, ShowTable, compare, quote_found  # noqa: E402
 from app.agent.context import tool_content_for_llm  # noqa: E402
 from app.agent.tools import ui_tools  # noqa: E402
 from app.agent.tools.registry import tool_registry  # noqa: E402
@@ -142,6 +142,19 @@ def test_data_sent_as_a_json_string_cannot_be_expressed(db):
 ])
 def test_compare_computes_direction_sentiment_and_relative_change(value, previous, kind, higher_is, expected):
     assert compare(value, previous, kind, higher_is) == expected
+
+
+@pytest.mark.parametrize("value, previous, kind, expected", [
+    # UAT A3b: 0.04 points used to read "▲ +0 จุด (แย่ลง)"; the chat shows a percent to 1 decimal.
+    (12.54, 12.5, "percent", {"delta": 0.0, "percent": None, "direction": "flat", "sentiment": "neutral"}),
+    (12.56, 12.5, "percent", {"delta": 0.1, "percent": None, "direction": "up", "sentiment": "bad"}),
+    (100.004, 100, "money", {"delta": 0.0, "percent": 0.0, "direction": "flat", "sentiment": "neutral"}),
+    (12.4, 12, "count", {"delta": 0, "percent": 0.0, "direction": "flat", "sentiment": "neutral"}),
+    # The amount moved but the relative change would read +0%: the headline is the amount instead.
+    (1_000_000.5, 1_000_000, "money", {"delta": 0.5, "percent": None, "direction": "up", "sentiment": "bad"}),
+])
+def test_a_change_too_small_to_show_is_flat(value, previous, kind, expected):
+    assert compare(value, previous, kind, "bad") == expected
 
 
 def test_metrics_carry_system_computed_changes(db):
@@ -411,7 +424,9 @@ def _golden_calls(db):
              "previous_label": "ธ.ค. 2568", "higher_is": "bad"},
             {"label": "จำนวนใบแจ้งหนี้", "kind": "count", "value": 12, "previous": 12, "previous_label": "ธ.ค. 2568"},
             {"label": "ส่วนลดเฉลี่ย", "kind": "percent", "value": 4.5, "previous": 6, "previous_label": "ธ.ค. 2568",
-             "higher_is": "good"}]},
+             "higher_is": "good"},
+            {"label": "อัตราเอกสารถูกปฏิเสธ", "kind": "percent", "value": 2.04, "previous": 2, "previous_label": "ธ.ค. 2568",
+             "higher_is": "bad"}]},
         "show_table": {"title": "เทียบยอดตามผู้ขาย", "sources": [jan, dec, office], "columns": [
             {"key": "vendor", "label": "ผู้ขาย", "kind": "text"},
             {"key": "doc", "label": "เอกสาร", "kind": "document"},
@@ -459,3 +474,10 @@ def test_golden_fixtures_match(db, monkeypatch):
             path.write_text(text, encoding="utf-8")
         assert path.exists() and path.read_text(encoding="utf-8") == text, (
             f"{path.name} is out of date; regenerate with A2UI_WRITE_FIXTURES=1 (see this module's docstring)")
+    # The decimals compare() rounds a change to; the frontend formats with the same ones.
+    text = json.dumps(DECIMALS, indent=2) + "\n"
+    path = FIXTURES / "decimals.json"
+    if write:
+        path.write_text(text, encoding="utf-8")
+    assert path.exists() and path.read_text(encoding="utf-8") == text, (
+        f"{path.name} is out of date; regenerate with A2UI_WRITE_FIXTURES=1 (see this module's docstring)")

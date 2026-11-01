@@ -3,10 +3,16 @@
 
 import type { Change, Measure, XKind } from "@/lib/a2ui"
 
-const NUMBER = new Intl.NumberFormat("th-TH", { maximumFractionDigits: 2 })
-const COUNT = new Intl.NumberFormat("th-TH", { maximumFractionDigits: 0 })
-const MONEY = new Intl.NumberFormat("th-TH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })
-const PERCENT = new Intl.NumberFormat("th-TH", { maximumFractionDigits: 1 })
+/** Decimals shown per kind. The backend rounds every change to these (backend/app/agent/a2ui.py DECIMALS), so a
+ * change it calls up or down never reads as 0 here; test/a2ui.test.mjs checks both against the golden fixture. */
+export const MEASURE_DECIMALS = { count: 0, number: 2, money: 2, percent: 1 } as const
+
+const NUMBER = new Intl.NumberFormat("th-TH", { maximumFractionDigits: MEASURE_DECIMALS.number })
+const COUNT = new Intl.NumberFormat("th-TH", { maximumFractionDigits: MEASURE_DECIMALS.count })
+const MONEY = new Intl.NumberFormat("th-TH", {
+    minimumFractionDigits: MEASURE_DECIMALS.money, maximumFractionDigits: MEASURE_DECIMALS.money,
+})
+const PERCENT = new Intl.NumberFormat("th-TH", { maximumFractionDigits: MEASURE_DECIMALS.percent })
 const COMPACT = new Intl.NumberFormat("th-TH", { notation: "compact", maximumFractionDigits: 1 })
 // th-TH uses the Buddhist calendar: 2026-01-31 → "31 ม.ค. 2569", 2026-01 → "ม.ค. 69".
 const DATE = new Intl.DateTimeFormat("th-TH", { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" })

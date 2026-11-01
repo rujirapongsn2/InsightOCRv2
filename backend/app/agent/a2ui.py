@@ -37,6 +37,10 @@ NUMERIC_KINDS: tuple[str, ...] = ("count", "number", "money", "percent")
 HigherIs = Literal["good", "bad", "neutral"]
 RiskLevel = Literal["critical", "high", "medium", "low"]
 DEFAULT_CURRENCY = "THB"
+# The decimals the chat shows a value of each kind with (frontend/lib/a2uiFormat.ts MEASURE_DECIMALS, checked
+# against the golden fixture decimals.json). A change is rounded to them, so its direction is the one the user reads.
+DECIMALS: dict[str, int] = {"count": 0, "number": 2, "money": 2, "percent": 1}
+RELATIVE_DECIMALS = 1
 
 
 def _text(limit: int) -> Any:
@@ -329,16 +333,20 @@ def parse_args(tool: str, model: type[_Args], args: Any) -> Any:
 def compare(value: float, previous: float, kind: str, higher_is: str) -> dict:
     """The change from previous to value: the only place a direction or sentiment is decided.
 
-    delta is in the value's own unit (percentage points for a percent);
-    percent is the relative change, absent for a percent value or a zero previous.
+    delta is in the value's own unit (percentage points for a percent), rounded
+    to the decimals the chat shows (DECIMALS): a change too small to show is
+    flat. percent is the relative change; it is absent for a percent value, a
+    zero previous, or when it would read 0% while the amount moved.
     """
-    delta = round(value - previous, 6)
+    delta = round(value - previous, DECIMALS[kind]) if DECIMALS[kind] else round(value - previous)
     direction = "up" if delta > 0 else "down" if delta < 0 else "flat"
     if direction == "flat" or higher_is == "neutral":
         sentiment = "neutral"
     else:
         sentiment = "good" if (direction == "up") == (higher_is == "good") else "bad"
-    percent = None if kind == "percent" or previous == 0 else round(delta / abs(previous) * 100, 1)
+    percent = None if kind == "percent" or previous == 0 else round(delta / abs(previous) * 100, RELATIVE_DECIMALS)
+    if percent == 0 and direction != "flat":
+        percent = None
     return {"delta": delta, "percent": percent, "direction": direction, "sentiment": sentiment}
 
 
