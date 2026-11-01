@@ -1,3 +1,4 @@
+import uuid
 from typing import Optional
 from uuid import UUID
 
@@ -18,8 +19,10 @@ class CRUDAgentRun:
         user_id: UUID,
         user_message: str,
         ui_action: Optional[dict] = None,
+        run_id: Optional[UUID] = None,
     ) -> AgentRun:
         run = AgentRun(
+            id=run_id or uuid.uuid4(),
             conversation_id=conversation_id,
             user_id=user_id,
             user_message=user_message,

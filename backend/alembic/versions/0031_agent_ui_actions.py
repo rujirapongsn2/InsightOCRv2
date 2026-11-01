@@ -11,7 +11,8 @@ Data (idempotent; a second run changes nothing):
 - Every catalog-v2 panel in a tool result gets an agent_surfaces row. A panel
   is "answered" when a click names it; otherwise a panel with buttons that has
   a newer panel with buttons after it in its conversation is "superseded";
-  otherwise it is "active".
+  otherwise it is "active". A converted click keeps answered_by_run_id empty:
+  which run carried it out is not recorded reliably, so its answer stands.
 """
 from __future__ import annotations
 
@@ -229,6 +230,8 @@ def upgrade():
         sa.Column("status", sa.String(16), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
         sa.Column("answered_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("answered_by_run_id", sa.Uuid(), sa.ForeignKey("agent_runs.id", ondelete="SET NULL"),
+                  nullable=True),
     )
     op.create_index("ix_agent_surfaces_conversation_id", "agent_surfaces", ["conversation_id"])
     upgrade_data(op.get_bind())

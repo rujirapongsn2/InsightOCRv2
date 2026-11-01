@@ -52,15 +52,16 @@ def _canonical_ids(raw_ids: list[str]) -> list[str]:
     return list(dict.fromkeys(ids))
 
 
-def accept(db: Session, conversation_id: UUID, *, surface_id: str, name: str, source_component_id: str,
-           document_ids: list[str]) -> dict:
-    """Check a click against its panel and mark the panel answered (uncommitted); returns the stored action."""
+def accept(db: Session, conversation_id: UUID, run_id: UUID, *, surface_id: str, name: str,
+           source_component_id: str, document_ids: list[str]) -> dict:
+    """Check a click against its panel and mark the panel answered by run_id (uncommitted); returns the stored action."""
     surface = agent_surface.get(db, surface_id)
     if surface is None or surface.conversation_id != conversation_id:
         raise UiActionRefused(404, "ไม่พบแผงนี้ในบทสนทนานี้")
-    if surface.status == "answered":
+    status = agent_surface.status(db, surface)
+    if status == "answered":
         raise UiActionRefused(409, "แผงนี้ส่งคำสั่งไปแล้ว")
-    if surface.status == "superseded":
+    if status == "superseded":
         raise UiActionRefused(409, "แผงนี้ไม่ใช่แผงล่าสุด ใช้ปุ่มในแผงล่าสุดแทน")
     offered = {(action["component_id"], action["name"]) for action in surface.actions or []}
     if (source_component_id, name) not in offered:
@@ -69,7 +70,7 @@ def accept(db: Session, conversation_id: UUID, *, surface_id: str, name: str, so
     shown = set(surface.document_ids or [])
     if outside := [doc_id for doc_id in ids if doc_id not in shown]:
         raise UiActionRefused(422, f"เอกสาร {outside[:_SHOWN_IDS]} ไม่อยู่ในแผงนี้")
-    if not agent_surface.claim(db, surface_id):
+    if not agent_surface.claim(db, surface, run_id):
         raise UiActionRefused(409, "แผงนี้ส่งคำสั่งไปแล้ว")
     return {"surface_id": surface_id, "name": name, "document_ids": ids,
             "source_component_id": source_component_id, "timestamp": datetime.now(timezone.utc).isoformat()}

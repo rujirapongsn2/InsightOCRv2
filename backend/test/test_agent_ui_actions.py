@@ -36,6 +36,7 @@ import app.agent.loop as loop_mod  # noqa: E402 — registers every agent tool
 from app.agent.context import AgentContext  # noqa: E402
 from app.agent.tools.registry import tool_registry  # noqa: E402
 from app.api.v1.endpoints import agent as agent_api  # noqa: E402
+from app.crud.crud_agent_surface import agent_surface  # noqa: E402
 from app.models.agent_conversation import AgentConversation  # noqa: E402
 from app.models.agent_message import AgentMessage  # noqa: E402
 from app.models.agent_pending_action import AgentPendingAction  # noqa: E402
@@ -120,8 +121,9 @@ def _metrics_panel(db, conversation_id, ids):
 
 
 def _status(db, surface_id):
+    """The status the server reports for the panel."""
     db.expire_all()
-    return db.get(AgentSurface, surface_id).status
+    return agent_surface.states(db, db.get(AgentSurface, surface_id).conversation_id)[surface_id]["status"]
 
 
 def _click(api, db, conversation_id, surface_id, ids, name="approve_documents", component="approve"):
@@ -208,11 +210,59 @@ def test_answered_and_superseded_panels_refuse_clicks(api, db):
     code, reason = _refused(api, db, conversation, old, ids[:1])
     assert code == 409 and "ไม่ใช่แผงล่าสุด" in reason
 
-    run = _click(api, db, conversation, current, ids[:1])["run"]
-    db.get(AgentRun, uuid.UUID(run["id"])).status = "succeeded"
-    db.commit()
+    run = uuid.UUID(_click(api, db, conversation, current, ids[:1])["run"]["id"])
+    _finish(db, run, "succeeded", confirmation="confirmed")
     code, reason = _refused(api, db, conversation, current, ids[:1])
     assert code == 409 and "ส่งคำสั่งไปแล้ว" in reason
+
+
+def _finish(db, run_id, status, confirmation=None):
+    """End a click's run, after the user answered (or never answered) the request it made."""
+    run = db.get(AgentRun, run_id)
+    if confirmation is not None:
+        db.add(AgentPendingAction(conversation_id=run.conversation_id, user_id=run.user_id, run_id=run.id,
+                                  tool_name="bulk_approve", tool_arguments={}, status=confirmation))
+    run.status, run.finished_at = status, datetime.now(timezone.utc)
+    db.commit()
+
+
+@pytest.mark.parametrize("status, confirmation", [
+    ("failed", None), ("cancelled", None), ("cancelled", "expired"),
+    ("succeeded", "rejected"), ("succeeded", "expired"), ("succeeded", None),
+])
+def test_a_click_whose_run_did_nothing_reopens_its_panel(api, db, status, confirmation):
+    conversation = _conversation(db)
+    ids = _docs(db, "a.pdf", "b.pdf")
+    panel = _documents_panel(db, conversation, ids)
+    first = uuid.UUID(_click(api, db, conversation, panel, ids)["run"]["id"])
+    assert _status(db, panel) == "answered"
+
+    _finish(db, first, status, confirmation)
+    assert _status(db, panel) == "active"
+    second = uuid.UUID(_click(api, db, conversation, panel, ids[:1])["run"]["id"])
+    assert _status(db, panel) == "answered" and db.get(AgentSurface, panel).answered_by_run_id == second
+
+
+def test_a_click_whose_action_was_confirmed_keeps_its_panel_answered_even_if_the_run_then_failed(api, db):
+    conversation = _conversation(db)
+    ids = _docs(db, "a.pdf")
+    panel = _documents_panel(db, conversation, ids)
+    run = uuid.UUID(_click(api, db, conversation, panel, ids)["run"]["id"])
+    _finish(db, run, "failed", confirmation="confirmed")
+    assert _status(db, panel) == "answered"
+    assert _refused(api, db, conversation, panel, ids)[0] == 409
+
+
+def test_a_reopened_panel_is_superseded_by_a_newer_panel_with_buttons(api, db):
+    conversation = _conversation(db)
+    ids = _docs(db, "a.pdf")
+    panel = _documents_panel(db, conversation, ids)
+    run = uuid.UUID(_click(api, db, conversation, panel, ids)["run"]["id"])
+    _documents_panel(db, conversation, ids)  # the click's run showed a fresh panel, then failed
+    _finish(db, run, "failed")
+    assert _status(db, panel) == "superseded"
+    code, reason = _refused(api, db, conversation, panel, ids)
+    assert code == 409 and "ไม่ใช่แผงล่าสุด" in reason
 
 
 def test_a_click_whose_run_cannot_start_leaves_the_panel_usable(api, db, monkeypatch):

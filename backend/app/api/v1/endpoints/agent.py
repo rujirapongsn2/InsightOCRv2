@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy import func
 from sqlalchemy.orm import Session
-from uuid import UUID
+from uuid import UUID, uuid4
 import os
 import re
 from urllib.parse import quote
@@ -378,14 +378,19 @@ def _idle_conversation(db: Session, conversation_id: UUID, current_user):
 
 
 def _start_run(db: Session, conversation_id: UUID, current_user, user_message: str,
-               ui_action: dict | None = None) -> AgentRun:
-    """Queue a run; commits whatever the caller changed in the same transaction. 503 when the queue is down."""
+               ui_action: dict | None = None, run_id: UUID | None = None) -> AgentRun:
+    """Queue a run; commits whatever the caller changed in the same transaction.
+
+    503 when the queue is down: the run is then failed, which also reopens a
+    panel the turn answered (crud_agent_surface.panel_status).
+    """
     run = crud_run.create(
         db,
         conversation_id=conversation_id,
         user_id=current_user.id,
         user_message=user_message,
         ui_action=ui_action,
+        run_id=run_id,
     )
     try:
         from app.tasks.agent_tasks import run_agent_task
@@ -398,8 +403,6 @@ def _start_run(db: Session, conversation_id: UUID, current_user, user_message: s
         run.status = "failed"
         run.error = "Agent queue is unavailable"
         db.commit()
-        if ui_action:
-            crud_surface.reopen(db, ui_action["surface_id"])
         raise HTTPException(status_code=503, detail="Agent queue is unavailable")
     return run
 
@@ -429,14 +432,15 @@ async def send_agent_ui_action(
     button, and show every named document. Accepting marks the panel answered.
     """
     _idle_conversation(db, conversation_id, current_user)
+    run_id = uuid4()
     try:
-        action = ui_actions.accept(db, conversation_id, surface_id=data.surface_id, name=data.name,
+        action = ui_actions.accept(db, conversation_id, run_id, surface_id=data.surface_id, name=data.name,
                                    source_component_id=data.source_component_id, document_ids=data.document_ids)
     except ui_actions.UiActionRefused as refused:
         db.rollback()
         raise HTTPException(status_code=refused.status_code, detail=refused.reason)
     display = ui_actions.display_text(action["name"], len(action["document_ids"]))
-    run = _start_run(db, conversation_id, current_user, display, ui_action=action)
+    run = _start_run(db, conversation_id, current_user, display, ui_action=action, run_id=run_id)
     return JSONResponse(status_code=202, content={"run": _agent_run_payload(db, run), "display_text": display})
 
 
