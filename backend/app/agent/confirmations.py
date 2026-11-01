@@ -1,3 +1,6 @@
+import json
+from dataclasses import dataclass, field
+
 EXPLICIT_CONFIRMATION_TOOLS = frozenset({"create_skill", "web_search"})
 # How long the loop waits for an answer before the request expires.
 CONFIRMATION_TIMEOUT_S = 300
@@ -13,6 +16,45 @@ def declined_result(tool_name: str, answer: str) -> dict:
         return {"error": "The confirmation request expired: the user did not answer in time, so nothing was done.",
                 "declined": "expired", "tool_name": tool_name}
     return {"error": "User rejected action", "declined": "rejected", "tool_name": tool_name}
+
+
+# A bulk review of a set of documents is the same action as the single-document tool on that set.
+_SAME_ACTION = {"bulk_approve": "approve_document", "bulk_reject": "reject_document"}
+
+
+def _action(tool_name: str, args: dict, documents: list[dict] | None) -> tuple[str, frozenset[str] | str]:
+    """What the user is asked to allow: the tool and its frozen targets (document_tools.freeze_confirmation)."""
+    if documents is not None:
+        return _SAME_ACTION.get(tool_name, tool_name), frozenset(d["id"] for d in documents)
+    return tool_name, json.dumps(args, sort_keys=True, ensure_ascii=False, default=str)
+
+
+@dataclass
+class RunConfirmations:
+    """The user's answers to one run's confirmation requests.
+
+    An expiry means the user is away: the run asks nothing more. A rejection
+    answers that action on those targets for the rest of the run.
+    """
+    expired: bool = False
+    rejected: set[tuple[str, frozenset[str] | str]] = field(default_factory=set)
+
+    def answer_without_asking(self, tool_name: str, args: dict, documents: list[dict] | None) -> dict | None:
+        """The declined result to return instead of opening a request, or None when the user may be asked."""
+        if self.expired:
+            return {"error": "An earlier confirmation request in this run expired: the user is away. "
+                             "No new request was opened and nothing was done. End your answer by "
+                             "telling the user they can ask again.",
+                    "declined": "expired", "tool_name": tool_name}
+        if _action(tool_name, args, documents) in self.rejected:
+            return declined_result(tool_name, "rejected")
+        return None
+
+    def record(self, tool_name: str, args: dict, documents: list[dict] | None, answer: str) -> None:
+        if answer == "expired":
+            self.expired = True
+        elif answer == "rejected":
+            self.rejected.add(_action(tool_name, args, documents))
 
 
 def requires_explicit_confirmation(tool_name: str) -> bool:

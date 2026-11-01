@@ -32,7 +32,9 @@ from app.agent.context import (
     tool_content_for_llm,
 )
 from app.agent.events import sse_event, SSEEventType
-from app.agent.confirmations import CONFIRMATION_TIMEOUT_S, declined_result, describe_action, requires_confirmation
+from app.agent.confirmations import (
+    CONFIRMATION_TIMEOUT_S, RunConfirmations, declined_result, describe_action, requires_confirmation,
+)
 from app.agent.tools.document_tools import freeze_confirmation
 from app.agent.a2ui import PANEL_TOOLS
 from app.agent.ui_actions import user_turn
@@ -960,6 +962,7 @@ class AgentLoop:
         self.context = AgentContext(db=db, user_id=user_id, job_id=job_id, conversation_id=conversation_id, kind=kind)
         # Checked before every tool call: a stopped run must not start another action.
         self.context.run_active_check = self._run_active if run_id is not None else None
+        self.confirmations = RunConfirmations()
 
     def _build_system_prompt(self, user_message: str) -> str:
         prompt = self.system_prompt_override or build_system_prompt(self.context, user_message)
@@ -1272,8 +1275,12 @@ class AgentLoop:
                         elif self._tool_requires_confirmation(tool_name, tool_args):
                             frozen = freeze_confirmation(self.db, self.job_id, tool_name, tool_args)
                             tool_args = frozen.arguments
+                            settled = self.confirmations.answer_without_asking(tool_name, tool_args, frozen.documents)
                             if frozen.error:
                                 result = frozen.error
+                            elif settled:
+                                result = settled
+                                yield sse_event(SSEEventType.TOOL_REJECTED, {"id": tc.id, "name": tool_name, "status": settled["declined"]})
                             else:
                                 pending = crud_pending.create(
                                     self.db, conversation_id=self.conversation_id, user_id=self.user_id,
@@ -1290,6 +1297,7 @@ class AgentLoop:
                                     "arguments": tool_args,
                                 })
                                 answer = await self._wait_for_confirmation(pending.id)
+                                self.confirmations.record(tool_name, tool_args, frozen.documents, answer)
                                 if answer != "confirmed":
                                     result = declined_result(tool_name, answer)
                                     yield sse_event(SSEEventType.TOOL_REJECTED, {"id": tc.id, "name": tool_name, "status": answer})
@@ -2174,7 +2182,12 @@ class AgentLoop:
                 self._last_builder_result = prepared
                 return
             tool_args = prepared["arguments"]
-        if requires_confirmation(tool_name, tool_args):
+        settled = (self.confirmations.answer_without_asking(tool_name, tool_args, None)
+                   if requires_confirmation(tool_name, tool_args) else None)
+        if settled:
+            result = settled
+            yield sse_event(SSEEventType.TOOL_REJECTED, {"id": call_id, "name": tool_name, "status": settled["declined"]})
+        elif requires_confirmation(tool_name, tool_args):
             pending = crud_pending.create(
                 self.db, conversation_id=self.conversation_id, user_id=self.user_id,
                 tool_name=tool_name, tool_arguments=tool_args,
@@ -2198,6 +2211,7 @@ class AgentLoop:
                 await asyncio.sleep(1)
             if answer is None:
                 answer = self._expire_confirmation(pending.id)
+            self.confirmations.record(tool_name, tool_args, None, answer)
             if answer != "confirmed":
                 result = declined_result(tool_name, answer)
                 yield sse_event(SSEEventType.TOOL_REJECTED, {"id": call_id, "name": tool_name, "status": answer})
@@ -2532,8 +2546,12 @@ __TOOL_CATALOG__
             if self._tool_requires_confirmation(tool_name, tool_args):
                 frozen = freeze_confirmation(self.db, self.job_id, tool_name, tool_args)
                 tool_args = frozen.arguments
+                settled = self.confirmations.answer_without_asking(tool_name, tool_args, frozen.documents)
                 if frozen.error:
                     result = frozen.error
+                elif settled:
+                    result = settled
+                    yield sse_event(SSEEventType.TOOL_REJECTED, {"id": call_id, "name": tool_name, "status": settled["declined"]})
                 else:
                     pending = crud_pending.create(
                         self.db, conversation_id=self.conversation_id, user_id=self.user_id,
@@ -2550,6 +2568,7 @@ __TOOL_CATALOG__
                         "arguments": tool_args,
                     })
                     answer = await self._wait_for_confirmation(pending.id)
+                    self.confirmations.record(tool_name, tool_args, frozen.documents, answer)
                     if answer != "confirmed":
                         result = declined_result(tool_name, answer)
                         yield sse_event(SSEEventType.TOOL_REJECTED, {"id": call_id, "name": tool_name, "status": answer})
