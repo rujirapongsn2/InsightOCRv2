@@ -32,7 +32,7 @@ def _jsonb_on_sqlite(element, compiler, **kw):
 
 
 import app.agent.loop as loop_mod  # noqa: E402 — registers every agent tool
-from app.agent.a2ui import CATALOG_ID, PANEL_TOOLS, ShowTable, compare, quote_found  # noqa: E402
+from app.agent.a2ui import CATALOG_ID, DECIMALS, PANEL_TOOLS, ShowTable, compare, quote_found  # noqa: E402
 from app.agent.context import tool_content_for_llm  # noqa: E402
 from app.agent.tools import ui_tools  # noqa: E402
 from app.agent.tools.registry import tool_registry  # noqa: E402
@@ -144,6 +144,19 @@ def test_compare_computes_direction_sentiment_and_relative_change(value, previou
     assert compare(value, previous, kind, higher_is) == expected
 
 
+@pytest.mark.parametrize("value, previous, kind, expected", [
+    # UAT A3b: 0.04 points used to read "▲ +0 จุด (แย่ลง)"; the chat shows a percent to 1 decimal.
+    (12.54, 12.5, "percent", {"delta": 0.0, "percent": None, "direction": "flat", "sentiment": "neutral"}),
+    (12.56, 12.5, "percent", {"delta": 0.1, "percent": None, "direction": "up", "sentiment": "bad"}),
+    (100.004, 100, "money", {"delta": 0.0, "percent": 0.0, "direction": "flat", "sentiment": "neutral"}),
+    (12.4, 12, "count", {"delta": 0, "percent": 0.0, "direction": "flat", "sentiment": "neutral"}),
+    # The amount moved but the relative change would read +0%: the headline is the amount instead.
+    (1_000_000.5, 1_000_000, "money", {"delta": 0.5, "percent": None, "direction": "up", "sentiment": "bad"}),
+])
+def test_a_change_too_small_to_show_is_flat(value, previous, kind, expected):
+    assert compare(value, previous, kind, "bad") == expected
+
+
 def test_metrics_carry_system_computed_changes(db):
     source = _doc(db, "invoice-2569-01.pdf")
     result = _call(db, "show_metrics", {"metrics": [
@@ -223,6 +236,35 @@ def test_change_columns_are_computed_per_row(db):
 ])
 def test_invalid_tables_are_corrective_errors(db, rows, columns, expected):
     _fails(_table(db, rows, columns), "show_table was not shown", expected)
+
+
+DUE = [{"key": "vendor", "label": "ผู้ขาย", "kind": "text"}, {"key": "due", "label": "วันครบกำหนด/หมายเหตุ", "kind": "text"}]
+
+
+@pytest.mark.parametrize("cell, kind, iso", [
+    # UAT A3: the agent folded a remark into a due-date text column, so the date showed as 2026-03-20.
+    ("2026-03-20 (เครดิต 30 วันจากวันที่ออกใบแจ้งหนี้ 2026-02-18)", "date", "2026-03-20"),
+    ("ครบกำหนด 2026-03-20", "date", "2026-03-20"),
+    ("2026-03", "month", "2026-03"),
+])
+def test_a_date_in_a_text_column_is_sent_back_to_its_own_column(db, cell, kind, iso):
+    result = _table(db, [{"vendor": "Thai Golden Foods", "due": cell}], DUE)
+    _fails(result, "show_table was not shown", f'rows[0].due is text holding the {kind} "{iso}"',
+           f'a column of kind "{kind}"', "separate text column")
+
+
+@pytest.mark.parametrize("cell", ["ไม่ระบุในเอกสาร", "INV-2026-01-15", "230906-01-04641", "Valid until 31/01/2026",
+                                  "2026-02-30 ไม่ใช่วันที่", "รอบ 2026-01 ถึง 2026-03"])
+def test_text_that_is_not_a_date_stays_text(db, cell):
+    assert _table(db, [{"vendor": "ก", "due": cell}], DUE)["ok"] is True
+
+
+def test_the_table_schema_says_where_dates_go():
+    schema = next(s["function"]["parameters"] for s in tool_registry.get_openai_schemas()
+                  if s["function"]["name"] == "show_table")
+    kinds = [branch["properties"]["kind"] for branch in schema["properties"]["columns"]["items"]["anyOf"]
+             if "currency" in branch["properties"]]
+    assert "text never holds a date" in kinds[0]["description"]
 
 
 def test_valid_iso_dates_and_months_are_kept_raw(db):
@@ -360,7 +402,8 @@ def test_documents_panel_shows_job_rows_and_reports_dropped_ids(db):
                                                         "context": {"document_ids": {"path": "/selected"}}}
     assert components["reject"]["action"]["event"]["name"] == "reject_documents"
     assert json.loads(tool_content_for_llm(result)) == {
-        "ok": True, "panel_id": result["panel_id"], "shown": [doc], "dropped": [foreign], "note": result["note"]}
+        "ok": True, "panel_id": result["panel_id"], "shown": [doc], "buttons": ["อนุมัติที่เลือก", "ปฏิเสธที่เลือก"],
+        "dropped": [foreign], "note": result["note"]}
     batch = json.loads(tool_content_for_llm([{"tool": "show_documents", "arguments": {}, "result": result}]))
     assert "a2ui" not in batch[0]["result"]
 
@@ -381,6 +424,23 @@ def test_panel_tools_are_offered_without_confirmation():
     names = {schema["function"]["name"] for schema in tool_registry.get_openai_schemas()}
     assert set(PANEL_TOOLS) <= names
     assert not any(requires_confirmation(tool, {}) for tool in PANEL_TOOLS)
+
+
+@pytest.mark.parametrize("tool", PANEL_TOOLS)
+def test_every_panel_tool_tells_the_model_not_to_restate_the_panel(tool):
+    """UAT 1: after show_documents the agent listed all 8 filenames and named buttons "approve/reject"."""
+    description = next(s["function"]["description"] for s in tool_registry.get_openai_schemas()
+                       if s["function"]["name"] == tool)
+    assert description.endswith(ui_tools.SHOWN)
+    assert "do not restate" in ui_tools.SHOWN and "filenames" in ui_tools.SHOWN
+
+
+def test_a_document_panel_tells_the_model_its_button_labels(db):
+    ids = [_doc(db, "a.pdf"), _doc(db, "b.pdf")]
+    result = _call(db, "show_documents", {"documents": [{"document_id": i} for i in ids], "actions": ["approve", "reject"]})
+    assert json.loads(tool_content_for_llm(result))["buttons"] == ["อนุมัติที่เลือก", "ปฏิเสธที่เลือก"]
+    listing = _call(db, "show_documents", {"documents": [{"document_id": ids[0]}]})
+    assert "buttons" not in listing
 
 
 @pytest.mark.parametrize("tool", PANEL_TOOLS)
@@ -411,7 +471,9 @@ def _golden_calls(db):
              "previous_label": "ธ.ค. 2568", "higher_is": "bad"},
             {"label": "จำนวนใบแจ้งหนี้", "kind": "count", "value": 12, "previous": 12, "previous_label": "ธ.ค. 2568"},
             {"label": "ส่วนลดเฉลี่ย", "kind": "percent", "value": 4.5, "previous": 6, "previous_label": "ธ.ค. 2568",
-             "higher_is": "good"}]},
+             "higher_is": "good"},
+            {"label": "อัตราเอกสารถูกปฏิเสธ", "kind": "percent", "value": 2.04, "previous": 2, "previous_label": "ธ.ค. 2568",
+             "higher_is": "bad"}]},
         "show_table": {"title": "เทียบยอดตามผู้ขาย", "sources": [jan, dec, office], "columns": [
             {"key": "vendor", "label": "ผู้ขาย", "kind": "text"},
             {"key": "doc", "label": "เอกสาร", "kind": "document"},
@@ -459,3 +521,10 @@ def test_golden_fixtures_match(db, monkeypatch):
             path.write_text(text, encoding="utf-8")
         assert path.exists() and path.read_text(encoding="utf-8") == text, (
             f"{path.name} is out of date; regenerate with A2UI_WRITE_FIXTURES=1 (see this module's docstring)")
+    # The decimals compare() rounds a change to; the frontend formats with the same ones.
+    text = json.dumps(DECIMALS, indent=2) + "\n"
+    path = FIXTURES / "decimals.json"
+    if write:
+        path.write_text(text, encoding="utf-8")
+    assert path.exists() and path.read_text(encoding="utf-8") == text, (
+        f"{path.name} is out of date; regenerate with A2UI_WRITE_FIXTURES=1 (see this module's docstring)")

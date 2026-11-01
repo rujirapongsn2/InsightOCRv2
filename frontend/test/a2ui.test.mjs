@@ -116,7 +116,24 @@ test("a metric shows the backend's comparison with glyph, sentiment word and col
   assert.match(html, /class="[^"]*text-viz-bad[^"]*"><span aria-hidden="true">▲<\/span><span class="sr-only">เพิ่มขึ้น<\/span>/)
 
   assert.match(around(html, "จำนวนใบแจ้งหนี้", "ส่วนลดเฉลี่ย"), /12▬0%เทียบ ธ\.ค\. 2568: 12/)
-  assert.match(around(html, "ส่วนลดเฉลี่ย", "AI คำนวณ"), /4\.5%▼-1\.5 จุด\(แย่ลง\)/)
+  assert.match(around(html, "ส่วนลดเฉลี่ย", "อัตราเอกสารถูกปฏิเสธ"), /4\.5%▼-1\.5 จุด\(แย่ลง\)/)
+})
+
+test("a change smaller than the shown precision reads flat, never as a signed zero", () => {
+  const html = render(panel("show_metrics"))
+  const tile = around(html, "อัตราเอกสารถูกปฏิเสธ", "AI คำนวณ")
+  assert.match(tile, /2%▬0 จุด/)
+  assert.doesNotMatch(tile, /▲|▼|แย่ลง|ดีขึ้น|\+0/)
+})
+
+test("the frontend shows each kind with the decimals the backend rounds changes to", () => {
+  assert.deepEqual(clone(format.MEASURE_DECIMALS), fixture("decimals"))
+  for (const [kind, decimals] of Object.entries(fixture("decimals"))) {
+    const step = 10 ** -decimals
+    const measure = kind === "money" ? { kind, currency: "THB" } : { kind }
+    const view = format.describeChange({ delta: step, percent: null, direction: "up", sentiment: "bad" }, measure)
+    assert.doesNotMatch(view.amount, /^\+?0(\.0+)?( |%|$)/, `${kind}: the smallest change the backend keeps must not read as 0`)
+  }
 })
 
 test("the direction comes from the backend, not from the model or the renderer", () => {
@@ -315,6 +332,15 @@ test("the confirmation follows the polled request: shown while pending, timed ou
   assert.equal(dialog("confirmed"), null)
   assert.equal(dialog("rejected"), null)
   assert.equal(conversation.shownConfirmation(null), null)
+})
+
+test("the conversation list reloads when a run starts and when it ends, not on every poll", () => {
+  // UAT N6: a new conversation stayed "New conversation" in the list until the page was reloaded.
+  const keys = [null, { id: "r1", status: "queued" }, { id: "r1", status: "running" }, { id: "r1", status: "running" },
+    { id: "r1", status: "succeeded" }, { id: "r2", status: "queued" }, { id: "r2", status: "cancelled" }]
+    .map(conversation.conversationListKey)
+  const reloads = keys.filter((key, index) => key !== null && key !== keys[index - 1])
+  assert.deepEqual(reloads, ["r1:active", "r1:ended", "r2:active", "r2:ended"])
 })
 
 test("a reloaded newest page keeps the earlier pages the user loaded", () => {

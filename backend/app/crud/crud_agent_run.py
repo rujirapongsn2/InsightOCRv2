@@ -20,15 +20,15 @@ class CRUDAgentRun:
         user_id: UUID,
         user_message: str,
         ui_action: Optional[dict] = None,
-        run_id: Optional[UUID] = None,
     ) -> AgentRun:
-        """Queue a run together with the user turn it answers, in one commit.
+        """Insert a queued run together with the user turn it answers; the caller commits.
 
         The turn is in the conversation from the moment the request is
         accepted, so every reload shows it; the worker does not record it again.
+        The rows are flushed, so later statements in the transaction may reference the run.
         """
         run = AgentRun(
-            id=run_id or uuid.uuid4(),
+            id=uuid.uuid4(),
             conversation_id=conversation_id,
             user_id=user_id,
             user_message=user_message,
@@ -37,8 +37,7 @@ class CRUDAgentRun:
         )
         db.add(run)
         agent_message.add_user_turn(db, conversation_id=conversation_id, content=user_message, ui_action=ui_action)
-        db.commit()
-        db.refresh(run)
+        db.flush()
         return run
 
     def get(self, db: Session, run_id: UUID) -> Optional[AgentRun]:

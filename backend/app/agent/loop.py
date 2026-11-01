@@ -380,9 +380,11 @@ def _tool_failed(result: Any) -> bool:
     Several tools, including ``execute_python``, always include an ``error``
     field and set it to ``None`` on success. Checking only for key presence
     incorrectly turned successful calls into failures and caused the model to
-    retry until it hit the iteration cap.
+    retry until it hit the iteration cap. A confirmation the user rejected or
+    let expire (confirmations.declined_result) is their decision, not a failure:
+    it must not fail the run or prompt the model to try again.
     """
-    if not isinstance(result, dict):
+    if not isinstance(result, dict) or result.get("declined"):
         return False
     return bool(result.get("error")) or result.get("ok") is False
 
@@ -1276,8 +1278,8 @@ class AgentLoop:
                                 pending = crud_pending.create(
                                     self.db, conversation_id=self.conversation_id, user_id=self.user_id,
                                     tool_name=tool_name, tool_arguments=tool_args,
-                                    description=describe_action(tool_name, tool_args), run_id=self.run_id,
-                                    documents=frozen.documents,
+                                    description=describe_action(tool_name, tool_args, frozen.documents),
+                                    run_id=self.run_id, documents=frozen.documents,
                                 )
                                 yield sse_event(SSEEventType.CONFIRMATION_REQUIRED, {
                                     "pending_action_id": str(pending.id),
@@ -2536,8 +2538,8 @@ __TOOL_CATALOG__
                     pending = crud_pending.create(
                         self.db, conversation_id=self.conversation_id, user_id=self.user_id,
                         tool_name=tool_name, tool_arguments=tool_args,
-                        description=describe_action(tool_name, tool_args), run_id=self.run_id,
-                        documents=frozen.documents,
+                        description=describe_action(tool_name, tool_args, frozen.documents),
+                        run_id=self.run_id, documents=frozen.documents,
                     )
                     yield sse_event(SSEEventType.CONFIRMATION_REQUIRED, {
                         "pending_action_id": str(pending.id),

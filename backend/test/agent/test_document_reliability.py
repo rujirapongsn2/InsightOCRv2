@@ -84,15 +84,21 @@ async def test_empty_diff_does_not_claim_text_equivalence():
 
 
 @pytest.mark.asyncio
-async def test_history_discards_orphan_and_incomplete_tool_batches():
+async def test_history_drops_orphan_results_and_completes_an_unfinished_batch():
+    calls = [{"id": "a", "function": {"name": "search_documents"}}, {"id": "b", "function": {"name": "approve_document"}}]
     messages = [
         SimpleNamespace(role="tool", tool_call_id="orphan", tool_result={}),
-        SimpleNamespace(role="assistant", content=None, tool_calls=[{"id": "a"}, {"id": "b"}]),
-        SimpleNamespace(role="tool", tool_call_id="a", tool_result={}),
+        SimpleNamespace(role="assistant", content=None, tool_calls=calls),
+        SimpleNamespace(role="tool", tool_call_id="a", tool_result={"count": 0}),
         SimpleNamespace(role="user", kind="text", content="continue"),
     ]
     with patch("app.agent.context.crud_conv.get_recent_turns", return_value=messages):
-        assert await context([]).load_history() == [{"role": "user", "content": "continue"}]
+        history = await context([]).load_history()
+    assert [(m["role"], m.get("tool_call_id")) for m in history] == [
+        ("assistant", None), ("tool", "a"), ("tool", "b"), ("user", None)]
+    assert json.loads(history[1]["content"]) == {"count": 0}
+    unfinished = json.loads(history[2]["content"])
+    assert unfinished["unfinished"] is True and unfinished["error"].startswith("approve_document did not finish")
 
 
 @pytest.mark.asyncio

@@ -30,6 +30,14 @@
         "previous": 6,
         "previous_label": "ธ.ค. 2568",
         "higher_is": "good"
+      },
+      {
+        "label": "อัตราเอกสารถูกปฏิเสธ",
+        "kind": "percent",
+        "value": 2.04,
+        "previous": 2,
+        "previous_label": "ธ.ค. 2568",
+        "higher_is": "bad"
       }
     ]
   },
@@ -49,7 +57,7 @@
       {
         "label": "จำนวนใบแจ้งหนี้",
         "change": {
-          "delta": 0.0,
+          "delta": 0,
           "percent": 0.0,
           "direction": "flat",
           "sentiment": "neutral"
@@ -62,6 +70,15 @@
           "percent": null,
           "direction": "down",
           "sentiment": "bad"
+        }
+      },
+      {
+        "label": "อัตราเอกสารถูกปฏิเสธ",
+        "change": {
+          "delta": 0.0,
+          "percent": null,
+          "direction": "flat",
+          "sentiment": "neutral"
         }
       }
     ],
@@ -100,7 +117,8 @@
               "children": [
                 "metric0",
                 "metric1",
-                "metric2"
+                "metric2",
+                "metric3"
               ]
             },
             {
@@ -140,6 +158,16 @@
               "data": {
                 "path": "/metrics/2"
               }
+            },
+            {
+              "id": "metric3",
+              "component": "Metric",
+              "label": "อัตราเอกสารถูกปฏิเสธ",
+              "kind": "percent",
+              "previous_label": "ธ.ค. 2568",
+              "data": {
+                "path": "/metrics/3"
+              }
             }
           ]
         }
@@ -165,7 +193,7 @@
                 "value": 12.0,
                 "previous": 12.0,
                 "change": {
-                  "delta": 0.0,
+                  "delta": 0,
                   "percent": 0.0,
                   "direction": "flat",
                   "sentiment": "neutral"
@@ -179,6 +207,16 @@
                   "percent": null,
                   "direction": "down",
                   "sentiment": "bad"
+                }
+              },
+              {
+                "value": 2.04,
+                "previous": 2.0,
+                "change": {
+                  "delta": 0.0,
+                  "percent": null,
+                  "direction": "flat",
+                  "sentiment": "neutral"
                 }
               }
             ],
@@ -217,7 +255,7 @@
       {
         "label": "จำนวนใบแจ้งหนี้",
         "change": {
-          "delta": 0.0,
+          "delta": 0,
           "percent": 0.0,
           "direction": "flat",
           "sentiment": "neutral"
@@ -230,6 +268,15 @@
           "percent": null,
           "direction": "down",
           "sentiment": "bad"
+        }
+      },
+      {
+        "label": "อัตราเอกสารถูกปฏิเสธ",
+        "change": {
+          "delta": 0.0,
+          "percent": null,
+          "direction": "flat",
+          "sentiment": "neutral"
         }
       }
     ],

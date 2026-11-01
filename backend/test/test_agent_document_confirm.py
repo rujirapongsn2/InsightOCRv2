@@ -121,6 +121,16 @@ def test_confirmation_freezes_the_set_the_user_sees(db):
     assert (_status(db, sure), _status(db, arrived_later)) == ("reviewed", "extraction_completed")
 
 
+@pytest.mark.parametrize("tool_name, verb", [("approve_document", "อนุมัติ"), ("reject_document", "ปฏิเสธ")])
+def test_a_single_document_confirmation_names_the_file_not_its_id(db, tool_name, verb):
+    """UAT 10: the question read "อนุมัติเอกสาร 1078db78-0155-…" above a list that named the file."""
+    from app.agent.confirmations import describe_action
+
+    doc = _doc(db, "Q25100034-8.pdf")
+    frozen = _freeze(db, tool_name, {"doc_id": doc})
+    assert describe_action(tool_name, frozen.arguments, frozen.documents) == f"{verb}เอกสาร Q25100034-8.pdf"
+
+
 def test_a_frozen_document_no_longer_waiting_is_reported_not_replaced(db):
     first, second = _doc(db, "first.pdf"), _doc(db, "second.pdf")
     frozen = _freeze(db, "bulk_reject", {"doc_ids": [first, second]})

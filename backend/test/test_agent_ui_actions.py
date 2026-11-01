@@ -3,11 +3,21 @@
 Covers: the ui-actions endpoint's checks, the display text in the chat and the
 title, the action the model reads, supersede/answer transitions, message
 paging, and migration 0031's conversion of legacy text-encoded clicks.
+
+Every test that uses the database runs twice: on SQLite, and on a throwaway
+Postgres database built by the migrations (postgres_engine in conftest.py),
+because SQLite does not check the foreign keys, row locks and conditional
+updates the click path relies on. The Postgres runs are skipped when no server
+is reachable, unless REQUIRE_POSTGRES=1. Tests named *_on_postgres run only there.
+
+    docker run --rm -e REQUIRE_POSTGRES=1 -v <repo>:/repo -w /repo/backend --env-file <env> \
+        --network insightocrv2_internal insightocrv2-backend python -m pytest -q test/test_agent_ui_actions.py
 """
 import asyncio
 import importlib.util
 import json
 import pkgutil
+import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -43,6 +53,8 @@ from app.models.agent_pending_action import AgentPendingAction  # noqa: E402
 from app.models.agent_run import AgentRun  # noqa: E402
 from app.models.agent_surface import AgentSurface  # noqa: E402
 from app.models.document import Document  # noqa: E402
+from app.models.job import Job  # noqa: E402
+from app.models.user import User  # noqa: E402
 from app.schemas.agent import AgentUiActionCreate  # noqa: E402
 
 JOB = uuid.UUID("6f1c2d3e-0000-4000-8000-000000000001")
@@ -62,16 +74,24 @@ def _load_migration():
 migration = _load_migration()
 
 
-@pytest.fixture
-def engine():
-    engine = create_engine("sqlite://")
-    Document.metadata.create_all(engine, tables=[model.__table__ for model in TABLES])
+@pytest.fixture(params=["sqlite", "postgres"])
+def engine(request):
+    if request.param == "sqlite":
+        engine = create_engine("sqlite://")
+        Document.metadata.create_all(engine, tables=[model.__table__ for model in TABLES])
+        return engine
+    engine = request.getfixturevalue("postgres_engine")
+    with sessionmaker(bind=engine)() as session:
+        session.add(User(id=USER.id, email="ui-actions@example.com", hashed_password="x"))
+        session.add(Job(id=JOB, user_id=USER.id, name="ui-actions"))
+        session.commit()
     return engine
 
 
 @pytest.fixture
 def db(engine):
-    session = sessionmaker(bind=engine)()
+    # As app.db.session.SessionLocal: nothing reaches the database before an explicit flush or commit.
+    session = sessionmaker(bind=engine, autoflush=False)()
     yield session
     session.close()
 
@@ -277,6 +297,77 @@ def test_a_click_whose_run_cannot_start_leaves_the_panel_usable(api, db, monkeyp
     monkeypatch.setattr(agent_tasks.run_agent_task, "delay", queue_down)
     assert _refused(api, db, conversation, panel, ids)[0] == 503
     assert _status(db, panel) == "active"
+    # The click stays on record, answered by a run that failed before it started, so the panel reopened.
+    run = db.query(AgentRun).one()
+    assert (run.status, run.error) == ("failed", "Agent queue is unavailable")
+    assert db.get(AgentSurface, panel).answered_by_run_id == run.id
+    assert db.query(AgentMessage).filter(AgentMessage.kind == "ui_action").count() == 1
+
+    monkeypatch.setattr(agent_tasks.run_agent_task, "delay", lambda run_id: SimpleNamespace(id=f"task-{run_id}"))
+    retry = uuid.UUID(_click(api, db, conversation, panel, ids)["run"]["id"])
+    assert _status(db, panel) == "answered" and db.get(AgentSurface, panel).answered_by_run_id == retry
+
+
+def test_a_click_commits_its_run_turn_and_answer_together(api, db):
+    conversation = _conversation(db)
+    ids = _docs(db, "a.pdf")
+    panel = _documents_panel(db, conversation, ids)
+
+    response = asyncio.run(api.send_agent_ui_action(
+        conversation, AgentUiActionCreate(surface_id=panel, name="approve_documents", source_component_id="approve",
+                                          document_ids=ids), db=db, current_user=USER))
+    assert response.status_code == 202
+    run_id = uuid.UUID(json.loads(response.body)["run"]["id"])
+    db.close()  # read back what was committed, not what this session holds
+    run = db.get(AgentRun, run_id)
+    assert (run.status, run.task_id, run.user_message) == ("queued", f"task-{run_id}", "อนุมัติเอกสาร 1 รายการที่เลือก")
+    surface = db.get(AgentSurface, panel)
+    assert (surface.status, surface.answered_by_run_id) == ("answered", run_id)
+    turn = db.query(AgentMessage).filter(AgentMessage.role == "user").one()
+    assert (turn.kind, turn.ui_action) == ("ui_action", run.ui_action)
+
+
+@pytest.mark.parametrize("engine", ["postgres"], indirect=True)
+def test_two_clicks_racing_on_a_reopened_panel_cannot_both_win_on_postgres(api, db, engine):
+    """The second click blocks on the panel row until the first commits, then finds it answered."""
+    from app.agent import ui_actions
+
+    conversation = _conversation(db)
+    ids = _docs(db, "a.pdf")
+    panel = _documents_panel(db, conversation, ids)
+    failed = uuid.UUID(_click(api, db, conversation, panel, ids)["run"]["id"])
+    _finish(db, failed, "failed")
+    assert _status(db, panel) == "active"
+
+    first = sessionmaker(bind=engine, autoflush=False)()
+    second = sessionmaker(bind=engine, autoflush=False)()
+    try:
+        winner = ui_actions.accept(first, conversation, USER.id, surface_id=panel, name="approve_documents",
+                                   source_component_id="approve", document_ids=ids).id  # claimed, not yet committed
+        outcome = {}
+
+        def click_again():
+            try:
+                _click(api, second, conversation, panel, ids)
+                outcome["status"] = 202
+            except HTTPException as refused:
+                outcome["status"], outcome["detail"] = refused.status_code, refused.detail
+
+        racer = threading.Thread(target=click_again)
+        racer.start()
+        racer.join(timeout=1)
+        assert racer.is_alive(), "the second click should wait for the first click's transaction"
+        first.commit()
+        racer.join(timeout=10)
+        assert outcome == {"status": 409, "detail": "แผงนี้ส่งคำสั่งไปแล้ว"}
+    finally:
+        first.close()
+        second.close()
+
+    db.expire_all()
+    assert db.get(AgentSurface, panel).answered_by_run_id == winner
+    assert {run.id for run in db.query(AgentRun)} == {failed, winner}  # the loser's run was rolled back
+    assert db.query(AgentMessage).filter(AgentMessage.kind == "ui_action").count() == 2
 
 
 # ── What the chat, the title and the model see ─────────────────────────────

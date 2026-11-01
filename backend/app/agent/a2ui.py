@@ -37,6 +37,10 @@ NUMERIC_KINDS: tuple[str, ...] = ("count", "number", "money", "percent")
 HigherIs = Literal["good", "bad", "neutral"]
 RiskLevel = Literal["critical", "high", "medium", "low"]
 DEFAULT_CURRENCY = "THB"
+# The decimals the chat shows a value of each kind with (frontend/lib/a2uiFormat.ts MEASURE_DECIMALS, checked
+# against the golden fixture decimals.json). A change is rounded to them, so its direction is the one the user reads.
+DECIMALS: dict[str, int] = {"count": 0, "number": 2, "money": 2, "percent": 1}
+RELATIVE_DECIMALS = 1
 
 
 def _text(limit: int) -> Any:
@@ -84,6 +88,24 @@ def _iso_problem(kind: str, value: Any, where: str) -> str | None:
     return f"{where} must be an ISO {kind} like {example}, got {value!r}"
 
 
+# An ISO date or month standing on its own in text, not part of a code like "INV-2026-01-15".
+_ISO_IN_TEXT = re.compile(r"(?<![\w-])(\d{4}-\d{2}-\d{2})(?![\w-])|^\s*(\d{4}-\d{2})\s*$")
+
+
+def _iso_in_text_problem(value: str, where: str) -> str | None:
+    """A text cell that carries an ISO date would show it unformatted (2026-03-20, not 20 มี.ค. 2569)."""
+    for day, month in _ISO_IN_TEXT.findall(value):
+        try:
+            date.fromisoformat(day or f"{month}-01")
+        except ValueError:
+            continue
+        kind, iso = ("date", day) if day else ("month", month)
+        return (f'{where} is text holding the {kind} "{iso}", which would be shown unformatted. Put {kind}s in a '
+                f'column of kind "{kind}" (the raw "{iso}", null where there is none) and any remark in a separate '
+                "text column")
+    return None
+
+
 def value_problem(kind: str, value: Any, where: str) -> str | None:
     """Why value is not a raw value of kind, or None. null is always allowed (shown as a dash)."""
     if value is None:
@@ -98,7 +120,7 @@ def value_problem(kind: str, value: Any, where: str) -> str | None:
         return _iso_problem(kind, value, where)
     if not isinstance(value, str) or not value.strip():
         return f"{where} must be a non-empty string for a {kind} column"
-    return None
+    return _iso_in_text_problem(value, where) if kind == "text" else None
 
 
 def _currency_problem(kind: str, currency: str | None, where: str) -> str | None:
@@ -156,7 +178,9 @@ class ShowMetrics(_Args):
 class ValueColumn(_Args):
     key: Key
     label: Label
-    kind: ValueKind
+    kind: ValueKind = Field(description=(
+        'date / month: raw ISO "2026-01-31" / "2026-01" (null where there is none), shown in Thai. '
+        "text never holds a date: put a remark about a date in its own text column"))
     currency: Currency | None = None
 
 
@@ -329,16 +353,20 @@ def parse_args(tool: str, model: type[_Args], args: Any) -> Any:
 def compare(value: float, previous: float, kind: str, higher_is: str) -> dict:
     """The change from previous to value: the only place a direction or sentiment is decided.
 
-    delta is in the value's own unit (percentage points for a percent);
-    percent is the relative change, absent for a percent value or a zero previous.
+    delta is in the value's own unit (percentage points for a percent), rounded
+    to the decimals the chat shows (DECIMALS): a change too small to show is
+    flat. percent is the relative change; it is absent for a percent value, a
+    zero previous, or when it would read 0% while the amount moved.
     """
-    delta = round(value - previous, 6)
+    delta = round(value - previous, DECIMALS[kind]) if DECIMALS[kind] else round(value - previous)
     direction = "up" if delta > 0 else "down" if delta < 0 else "flat"
     if direction == "flat" or higher_is == "neutral":
         sentiment = "neutral"
     else:
         sentiment = "good" if (direction == "up") == (higher_is == "good") else "bad"
-    percent = None if kind == "percent" or previous == 0 else round(delta / abs(previous) * 100, 1)
+    percent = None if kind == "percent" or previous == 0 else round(delta / abs(previous) * 100, RELATIVE_DECIMALS)
+    if percent == 0 and direction != "flat":
+        percent = None
     return {"delta": delta, "percent": percent, "direction": direction, "sentiment": sentiment}
 
 
@@ -418,7 +446,8 @@ def documents_panel(args: ShowDocuments, rows: list[dict]) -> Panel:
     data = {"documents": rows, **({"selected": []} if selectable else {})}
     shown = [row["document_id"] for row in rows]
     actions = tuple({"component_id": b["id"], "name": b["action"]["event"]["name"]} for b in buttons)
-    return Panel(components, data, {"shown": shown}, actions, tuple(shown) if actions else ())
+    summary = {"shown": shown, **({"buttons": [b["label"] for b in buttons]} if buttons else {})}
+    return Panel(components, data, summary, actions, tuple(shown) if actions else ())
 
 
 def metrics_panel(args: ShowMetrics, sources: list[DocumentRef]) -> Panel:

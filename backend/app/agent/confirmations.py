@@ -4,11 +4,15 @@ CONFIRMATION_TIMEOUT_S = 300
 
 
 def declined_result(tool_name: str, answer: str) -> dict:
-    """The tool result for a request the user rejected or never answered."""
+    """The tool result for a request the user rejected or never answered.
+
+    declined ("rejected" | "expired") marks the user's decision: nothing was
+    done, and nothing failed (app.agent.loop._tool_failed).
+    """
     if answer == "expired":
         return {"error": "The confirmation request expired: the user did not answer in time, so nothing was done.",
-                "expired": True, "tool_name": tool_name}
-    return {"error": "User rejected action", "tool_name": tool_name}
+                "declined": "expired", "tool_name": tool_name}
+    return {"error": "User rejected action", "declined": "rejected", "tool_name": tool_name}
 
 
 def requires_explicit_confirmation(tool_name: str) -> bool:
@@ -32,9 +36,15 @@ def requires_confirmation(tool_name: str, args: dict) -> bool:
     return False
 
 
-def describe_action(tool_name: str, args: dict) -> str:
+def describe_action(tool_name: str, args: dict, documents: list[dict] | None = None) -> str:
+    """What the confirmation asks, in the user's words.
+
+    documents are the frozen targets (document_tools.freeze_confirmation): a
+    single document is named by the filename the list under the question shows.
+    """
+    document = documents[0]["filename"] if documents and len(documents) == 1 else args.get("doc_id")
     if tool_name == "approve_document":
-        return f"อนุมัติเอกสาร {args.get('doc_id')}"
+        return f"อนุมัติเอกสาร {document}"
     if tool_name in ("bulk_approve", "bulk_reject"):
         # The loop freezes args["doc_ids"] to the eligible documents before asking.
         verb = "อนุมัติ" if tool_name == "bulk_approve" else "ปฏิเสธ"
@@ -43,7 +53,7 @@ def describe_action(tool_name: str, args: dict) -> str:
         threshold = f" (ความมั่นใจ ≥ {args['min_confidence']})" if args.get("min_confidence") else ""
         return f"{verb}เอกสารที่รอตรวจ {count}{threshold}"
     if tool_name == "reject_document":
-        return f"ปฏิเสธเอกสาร {args.get('doc_id')}"
+        return f"ปฏิเสธเอกสาร {document}"
     if tool_name == "update_document_field":
         return f"แก้ไข field '{args.get('field')}' ของเอกสาร {args.get('doc_id')}"
     if tool_name == "forget_memory":
