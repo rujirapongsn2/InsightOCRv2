@@ -40,7 +40,7 @@ async def _consume_agent_run(
     completed: dict | None = None
     error: str | None = None
     checked_at = asyncio.get_running_loop().time()
-    stream = loop.run(user_message, ui_action)
+    stream = loop.run(user_message, ui_action, turn_recorded=True)
     try:
         async for event in stream:
             now = asyncio.get_running_loop().time()

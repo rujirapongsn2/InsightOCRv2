@@ -379,7 +379,7 @@ def _idle_conversation(db: Session, conversation_id: UUID, current_user):
 
 def _start_run(db: Session, conversation_id: UUID, current_user, user_message: str,
                ui_action: dict | None = None, run_id: UUID | None = None) -> AgentRun:
-    """Queue a run; commits whatever the caller changed in the same transaction.
+    """Queue a run with its user turn; commits whatever the caller changed in the same transaction.
 
     503 when the queue is down: the run is then failed, which also reopens a
     panel the turn answered (crud_agent_surface.panel_status).
@@ -429,7 +429,8 @@ async def send_agent_ui_action(
     """A click on a panel button: checked against the panel, then answered by a run.
 
     The panel must belong to this conversation and still be active, offer this
-    button, and show every named document. Accepting marks the panel answered.
+    button, and show every named document. Accepting marks the panel answered
+    by the run it starts, and records the click in the conversation.
     """
     _idle_conversation(db, conversation_id, current_user)
     run_id = uuid4()
@@ -441,7 +442,7 @@ async def send_agent_ui_action(
         raise HTTPException(status_code=refused.status_code, detail=refused.reason)
     display = ui_actions.display_text(action["name"], len(action["document_ids"]))
     run = _start_run(db, conversation_id, current_user, display, ui_action=action, run_id=run_id)
-    return JSONResponse(status_code=202, content={"run": _agent_run_payload(db, run), "display_text": display})
+    return JSONResponse(status_code=202, content={"run": _agent_run_payload(db, run)})
 
 
 @router.get("/conversations/{conversation_id}/runs/active")

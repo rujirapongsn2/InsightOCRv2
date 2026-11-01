@@ -153,7 +153,6 @@ class TestAgentLoopWithMockLLM:
 
             # Mock CRUD operations
             with patch("app.agent.loop.crud_msg") as mock_msg, \
-                 patch("app.agent.loop.crud_conv") as mock_conv, \
                  patch("app.agent.loop.crud_pending") as mock_pending:
 
                 loop = AgentLoop(
@@ -198,7 +197,6 @@ class TestAgentLoopWithMockLLM:
             mock_openai.return_value = mock_client
 
             with patch("app.agent.loop.crud_msg"), \
-                 patch("app.agent.loop.crud_conv"), \
                  patch("app.agent.loop.crud_pending"):
                 # Mock list_documents to return data
                 with patch("app.agent.loop.tool_registry.execute") as mock_exec:
@@ -246,8 +244,7 @@ class TestAgentLoopWithMockLLM:
             mock_client.chat.completions.create = AsyncMock(return_value=tool_response)
             mock_openai.return_value = mock_client
 
-            with patch("app.agent.loop.crud_msg"), \
-                 patch("app.agent.loop.crud_conv"):
+            with patch("app.agent.loop.crud_msg"):
 
                 with patch("app.agent.loop.crud_pending") as mock_pending, \
                      patch.object(AgentLoop, "_wait_for_confirmation") as mock_wait:
@@ -296,7 +293,6 @@ class TestAgentLoopWithMockLLM:
             mock_openai.return_value = mock_client
 
             with patch("app.agent.loop.crud_msg"), \
-                 patch("app.agent.loop.crud_conv"), \
                  patch("app.agent.loop.crud_pending") as mock_pending, \
                  patch.object(AgentLoop, "_wait_for_confirmation") as mock_wait:
 
@@ -336,7 +332,6 @@ class TestAgentLoopWithMockLLM:
             mock_openai.return_value = mock_client
 
             with patch("app.agent.loop.crud_msg"), \
-                 patch("app.agent.loop.crud_conv"), \
                  patch("app.agent.loop.crud_pending"), \
                  patch("app.agent.loop.tool_registry.execute") as mock_exec:
                 mock_exec.return_value = {"count": 1, "documents": []}
@@ -368,8 +363,7 @@ class TestAgentLoopWithMockLLM:
             mock_client.chat.completions.create = AsyncMock(side_effect=Exception("API key invalid"))
             mock_openai.return_value = mock_client
 
-            with patch("app.agent.loop.crud_msg"), \
-                 patch("app.agent.loop.crud_conv"):
+            with patch("app.agent.loop.crud_msg"):
 
                 loop = AgentLoop(
                     db=db, conversation_id=ids["conv_id"],
@@ -402,8 +396,7 @@ class TestAgentLoopWithMockLLM:
             mock_client.chat.completions.create = AsyncMock(return_value=final_response)
             mock_openai.return_value = mock_client
 
-            with patch("app.agent.loop.crud_msg") as mock_msg, \
-                 patch("app.agent.loop.crud_conv") as mock_conv:
+            with patch("app.agent.loop.crud_msg") as mock_msg:
 
                 loop = AgentLoop(
                     db=db, conversation_id=ids["conv_id"],
@@ -415,12 +408,9 @@ class TestAgentLoopWithMockLLM:
                 async for _ in loop.run("Do something"):
                     pass
 
-        # Verify user message saved
-        user_msg_calls = [
-            c for c in mock_msg.add.call_args_list
-            if c.kwargs.get("role") == "user"
-        ]
-        assert len(user_msg_calls) == 1
+        # Verify the user turn saved (it also titles the conversation)
+        mock_msg.add_user_turn.assert_called_once()
+        assert mock_msg.add_user_turn.call_args.kwargs["content"] == "Do something"
 
         # Verify assistant message saved
         asst_msg_calls = [
@@ -429,5 +419,3 @@ class TestAgentLoopWithMockLLM:
         ]
         assert len(asst_msg_calls) == 1
 
-        # Verify conversation title was updated
-        mock_conv.update_title.assert_called_once()

@@ -7,7 +7,7 @@ class _FakeLoop:
     def __init__(self, events: list[str]):
         self.events = events
 
-    async def run(self, _message: str, _ui_action=None):
+    async def run(self, _message: str, _ui_action=None, *, turn_recorded=False):
         for event in self.events:
             yield event
 

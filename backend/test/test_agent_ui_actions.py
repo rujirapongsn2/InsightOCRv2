@@ -168,7 +168,6 @@ def test_an_accepted_click_answers_its_panel_and_runs_with_the_structured_action
     panel = _documents_panel(db, conversation, ids)
 
     body = _click(api, db, conversation, panel, [ids[1].upper(), ids[0], ids[1]])
-    assert body["display_text"] == "อนุมัติเอกสาร 2 รายการที่เลือก"
     run = db.get(AgentRun, uuid.UUID(body["run"]["id"]))
     assert run.user_message == "อนุมัติเอกสาร 2 รายการที่เลือก"
     assert {k: run.ui_action[k] for k in ("surface_id", "name", "document_ids", "source_component_id")} == {
@@ -307,6 +306,38 @@ def test_the_chat_and_title_show_display_text_and_the_model_reads_the_action(db)
     assert seen.startswith("[ui_action] ")
     assert json.loads(seen.removeprefix("[ui_action] ")) == {
         "surface_id": "jobs-abc", "name": "reject_documents", "document_ids": ids}
+
+
+def test_a_turn_is_in_the_conversation_once_accepted_and_the_worker_does_not_record_it_again(api, db):
+    from app.schemas.agent import AgentMessageCreate
+    from app.tasks.agent_tasks import _consume_agent_run
+
+    conversation = _conversation(db)
+    ids = _docs(db, "a.pdf", "b.pdf")
+    panel = _documents_panel(db, conversation, ids)
+    run = db.get(AgentRun, uuid.UUID(_click(api, db, conversation, panel, ids)["run"]["id"]))
+
+    def user_turns():
+        body = asyncio.run(api.get_agent_conversation(conversation, before=None, limit=50, db=db, current_user=USER))
+        return [(m["kind"], m["content"], m["ui_action"]) for m in body["messages"] if m["role"] == "user"], \
+            body["conversation"]["title"]
+
+    turns, title = user_turns()  # before any worker ran
+    assert turns == [("ui_action", "อนุมัติเอกสาร 2 รายการที่เลือก", run.ui_action)]
+    assert title == "อนุมัติเอกสาร 2 รายการที่เลือก"
+
+    loop = loop_mod.AgentLoop(db=db, conversation_id=conversation, user_id=USER.id, job_id=JOB, llm_config={},
+                              skip_planning=True)
+    asyncio.run(_consume_agent_run(loop, run.user_message, None, run.ui_action))  # no API key: stops at once
+    assert user_turns()[0] == turns
+
+    _finish(db, run.id, "succeeded", confirmation="confirmed")
+    asyncio.run(api.send_agent_message(conversation, AgentMessageCreate(content="สรุปยอดรวม"), db=db,
+                                       current_user=USER))
+    after, title = user_turns()
+    # SQLite stamps both turns in the same second, so their order here is not the point.
+    assert sorted(after, key=str) == sorted(turns + [("text", "สรุปยอดรวม", None)], key=str)
+    assert title == "สรุปยอดรวม"
 
 
 # ── Paging ─────────────────────────────────────────────────────────────────

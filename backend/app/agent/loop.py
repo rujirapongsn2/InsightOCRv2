@@ -40,7 +40,6 @@ from app.agent.tools.registry import tool_registry
 from app.agent.tools import document_tools, integration_tools, memory_tools, code_tools, skill_tools, filesystem_tools, web_search_tools, workflow_tools, ui_tools  # noqa: F401 — side-effect: registers tools
 from app.crud.crud_agent_message import agent_message as crud_msg
 from app.crud.crud_agent_pending import agent_pending as crud_pending
-from app.crud.crud_agent_conversation import agent_conversation as crud_conv
 from app.models.agent_message import AgentMessage
 from app.utils.activity_logger import log_activity
 
@@ -971,9 +970,13 @@ class AgentLoop:
         # allowlist blocks confirmation-gated tools in ToolRegistry instead.
         return False if self.autonomous else requires_confirmation(tool_name, tool_args)
 
-    async def run(self, user_message: str, ui_action: dict | None = None) -> AsyncGenerator[str, None]:
-        """Answer one user turn. With ui_action (a checked panel click) user_message is its display text."""
-        iterator = self._run_inner(user_message, ui_action)
+    async def run(self, user_message: str, ui_action: dict | None = None, *,
+                  turn_recorded: bool = False) -> AsyncGenerator[str, None]:
+        """Answer one user turn. With ui_action (a checked panel click) user_message is its display text.
+
+        turn_recorded: the caller already stored the turn (crud_agent_run.create does for queued runs).
+        """
+        iterator = self._run_inner(user_message, ui_action, turn_recorded)
         deadline = asyncio.get_running_loop().time() + AGENT_MAX_RUNTIME_S
         try:
             while True:
@@ -998,10 +1001,12 @@ class AgentLoop:
         finally:
             await iterator.aclose()
 
-    async def _run_inner(self, user_message: str, ui_action: dict | None = None) -> AsyncGenerator[str, None]:
-        crud_msg.add(self.db, conversation_id=self.conversation_id, role="user", content=user_message, iteration=0,
-                     kind="ui_action" if ui_action else "text", ui_action=ui_action)
-        crud_conv.update_title(self.db, self.conversation_id, user_message[:60])
+    async def _run_inner(self, user_message: str, ui_action: dict | None = None,
+                         turn_recorded: bool = False) -> AsyncGenerator[str, None]:
+        if not turn_recorded:
+            crud_msg.add_user_turn(self.db, conversation_id=self.conversation_id, content=user_message,
+                                   ui_action=ui_action)
+            self.db.commit()
         self.context.clear_active_skill_tool_policy()
         if self.initial_allowed_tools is not None:
             self.context.activate_skill_tool_policy(

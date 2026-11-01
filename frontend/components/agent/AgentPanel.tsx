@@ -443,10 +443,6 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay", onOpenDoc
                 await reloadActiveMessages()
                 return
             }
-            setMessages(prev => [...prev, {
-                id: crypto.randomUUID(), role: "user", kind: "ui_action", content: data.display_text,
-                created_at: new Date().toISOString(),
-            }])
             setActiveRun(data.run as AgentRun)
             await reloadActiveMessages()
         } catch (e) {

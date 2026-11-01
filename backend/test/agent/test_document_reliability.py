@@ -99,7 +99,7 @@ async def test_history_discards_orphan_and_incomplete_tool_batches():
 async def test_runtime_limit_interrupts_silent_provider_and_closes_iterator():
     closed = []
 
-    async def stalled(_message, _ui_action=None):
+    async def stalled(_message, _ui_action=None, _turn_recorded=False):
         try:
             await asyncio.sleep(10)
             yield "never"

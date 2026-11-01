@@ -1,6 +1,7 @@
 from typing import Optional, Any
 from uuid import UUID
 from sqlalchemy.orm import Session
+from app.models.agent_conversation import AgentConversation
 from app.models.agent_message import AgentMessage
 
 
@@ -20,6 +21,21 @@ class CRUDAgentMessage:
         db.add(msg)
         db.commit()
         db.refresh(msg)
+        return msg
+
+    def add_user_turn(self, db: Session, *, conversation_id: UUID, content: str,
+                      ui_action: Optional[dict] = None) -> AgentMessage:
+        """Record a user turn and title the conversation after it; the caller commits.
+
+        content is what the chat shows; for a panel click it is the display text
+        and ui_action is the action the model reads (app.agent.ui_actions).
+        """
+        msg = AgentMessage(conversation_id=conversation_id, role="user", kind="ui_action" if ui_action else "text",
+                           content=content, ui_action=ui_action, iteration=0)
+        db.add(msg)
+        conversation = db.get(AgentConversation, conversation_id)
+        if conversation is not None:
+            conversation.title = content[:60]
         return msg
 
 

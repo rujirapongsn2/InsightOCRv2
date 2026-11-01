@@ -73,11 +73,5 @@ class CRUDAgentConversation:
         db.commit()
         return True
 
-    def update_title(self, db: Session, conversation_id: UUID, title: str) -> None:
-        conv = self.get(db, conversation_id)
-        if conv:
-            conv.title = title
-            db.commit()
-
 
 agent_conversation = CRUDAgentConversation()
