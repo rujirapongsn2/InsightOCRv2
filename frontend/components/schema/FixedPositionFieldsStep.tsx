@@ -1,7 +1,7 @@
 "use client"
 
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type PointerEvent, type KeyboardEvent } from "react"
-import { Document, Page, pdfjs } from "react-pdf"
+import { Document, Page } from "react-pdf"
 import { AlertCircle, ChevronDown, ChevronLeft, ChevronRight, FileText, Loader2, LocateFixed, Plus, ScanLine, Sparkles, SquareDashed, Trash2, X, ZoomIn, ZoomOut } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { useSchemaWizard } from "@/contexts/SchemaWizardContext"
@@ -9,10 +9,9 @@ import type { ArrayColumn, ArrayConfig, BboxLocator, FixedFieldCreationMode, Sch
 import { getApiBaseUrl } from "@/lib/api"
 import { isValidFieldName } from "@/lib/schema-validation"
 import { evidenceSearchTexts, findTextBox, findWordBox, type Box, type PageWord, type TextItemLike } from "@/lib/evidence-search"
+import "@/lib/pdf-worker"
 import "react-pdf/dist/Page/AnnotationLayer.css"
 import "react-pdf/dist/Page/TextLayer.css"
-
-pdfjs.GlobalWorkerOptions.workerSrc = `//unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`
 
 const genId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
 const BASE_PAGE_WIDTH = 760
