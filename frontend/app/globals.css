@@ -384,3 +384,28 @@ body {
 /* Code viewer selection (dark surface): white on primary blue. */
 .code-viewer::selection { background: var(--softnix-blue); color: #ffffff; }
 .code-viewer *::selection { background: var(--softnix-blue); color: #ffffff; }
+
+/* Agent tool chips: ChatToolCalls (this @astryxdesign/core version) has no
+   neutral status. A call that ended without effect (stopped, declined) is
+   passed as "complete" with a data-tool-state badge; its status icon, and the
+   collapsed group header that shows it, become a grey stop mark instead of a
+   green check. */
+[data-agent-tool-calls] div:has(> span > [data-tool-state]) > span:first-child,
+[data-agent-tool-calls]:is([data-tool-group-state="stopped"], [data-tool-group-state="rejected"], [data-tool-group-state="expired"])
+  > div > div[aria-expanded="false"] > span:first-child {
+  color: var(--mute-gray);
+}
+[data-agent-tool-calls] div:has(> span > [data-tool-state]) > span:first-child svg,
+[data-agent-tool-calls]:is([data-tool-group-state="stopped"], [data-tool-group-state="rejected"], [data-tool-group-state="expired"])
+  > div > div[aria-expanded="false"] > span:first-child svg {
+  visibility: hidden;
+}
+[data-agent-tool-calls] div:has(> span > [data-tool-state]) > span:first-child > span:last-child::after,
+[data-agent-tool-calls]:is([data-tool-group-state="stopped"], [data-tool-group-state="rejected"], [data-tool-group-state="expired"])
+  > div > div[aria-expanded="false"] > span:first-child > span:last-child::after {
+  content: "";
+  position: absolute;
+  inset: 30%;
+  border-radius: 1px;
+  background: currentColor;
+}

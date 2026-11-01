@@ -506,10 +506,11 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay", onOpenDoc
         states: surfaceStates,
         runActive: streaming || (activeRun !== null && ["queued", "running"].includes(activeRun.status)),
     }
-    const surfaceProps = {
+    const toolCallProps = {
         onSurfaceAction: (action: UiActionRequest) => { void sendUiAction(action) },
         surfaceConversation,
         onOpenDocument,
+        runActive: surfaceConversation.runActive,
     }
 
     const parseToolArguments = (value: any) => {
@@ -572,7 +573,7 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay", onOpenDoc
                     calls={calls}
                     results={persistedToolResultsMap}
                     conversationId={activeConversation || undefined}
-                    {...surfaceProps}
+                    {...toolCallProps}
                 />
             )
         }
@@ -602,7 +603,7 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay", onOpenDoc
                     calls={pendingCalls}
                     results={persistedToolResultsMap}
                     conversationId={activeConversation || undefined}
-                    {...surfaceProps}
+                    {...toolCallProps}
                 />,
             )
             pendingCalls = []
@@ -999,7 +1000,7 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay", onOpenDoc
                         results={toolResultsMap}
                         conversationId={activeConversation || undefined}
                         autoConfirmedIds={autoConfirmedIds}
-                        {...surfaceProps}
+                        {...toolCallProps}
                     />
                 )}
                 {streaming && !streamText && events.filter(e => e.type === "tool_call").length === 0 && (
