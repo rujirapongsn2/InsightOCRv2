@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy import func
 from sqlalchemy.orm import Session
-from uuid import UUID, uuid4
+from uuid import UUID
 import os
 import re
 from urllib.parse import quote
@@ -377,21 +377,13 @@ def _idle_conversation(db: Session, conversation_id: UUID, current_user):
     return conv
 
 
-def _start_run(db: Session, conversation_id: UUID, current_user, user_message: str,
-               ui_action: dict | None = None, run_id: UUID | None = None) -> AgentRun:
-    """Queue a run with its user turn; commits whatever the caller changed in the same transaction.
+def _enqueue(db: Session, run: AgentRun) -> AgentRun:
+    """Commit the queued run with whatever the caller changed in the same transaction, then hand it to a worker.
 
     503 when the queue is down: the run is then failed, which also reopens a
     panel the turn answered (crud_agent_surface.panel_status).
     """
-    run = crud_run.create(
-        db,
-        conversation_id=conversation_id,
-        user_id=current_user.id,
-        user_message=user_message,
-        ui_action=ui_action,
-        run_id=run_id,
-    )
+    db.commit()
     try:
         from app.tasks.agent_tasks import run_agent_task
 
@@ -415,7 +407,8 @@ async def send_agent_message(
     current_user=Depends(deps.get_current_user),
 ):
     _idle_conversation(db, conversation_id, current_user)
-    run = _start_run(db, conversation_id, current_user, data.content)
+    run = crud_run.create(db, conversation_id=conversation_id, user_id=current_user.id, user_message=data.content)
+    run = _enqueue(db, run)
     return JSONResponse(status_code=202, content={"run": _agent_run_payload(db, run)})
 
 
@@ -429,19 +422,18 @@ async def send_agent_ui_action(
     """A click on a panel button: checked against the panel, then answered by a run.
 
     The panel must belong to this conversation and still be active, offer this
-    button, and show every named document. Accepting marks the panel answered
-    by the run it starts, and records the click in the conversation.
+    button, and show every named document. Accepting queues the run, records
+    the click in the conversation and marks the panel answered by that run,
+    all in one commit.
     """
     _idle_conversation(db, conversation_id, current_user)
-    run_id = uuid4()
     try:
-        action = ui_actions.accept(db, conversation_id, run_id, surface_id=data.surface_id, name=data.name,
-                                   source_component_id=data.source_component_id, document_ids=data.document_ids)
+        run = ui_actions.accept(db, conversation_id, current_user.id, surface_id=data.surface_id, name=data.name,
+                                source_component_id=data.source_component_id, document_ids=data.document_ids)
     except ui_actions.UiActionRefused as refused:
         db.rollback()
         raise HTTPException(status_code=refused.status_code, detail=refused.reason)
-    display = ui_actions.display_text(action["name"], len(action["document_ids"]))
-    run = _start_run(db, conversation_id, current_user, display, ui_action=action, run_id=run_id)
+    run = _enqueue(db, run)
     return JSONResponse(status_code=202, content={"run": _agent_run_payload(db, run)})
 
 

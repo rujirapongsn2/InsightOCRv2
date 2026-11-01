@@ -16,7 +16,9 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session
 
+from app.crud.crud_agent_run import agent_run
 from app.crud.crud_agent_surface import agent_surface
+from app.models.agent_run import AgentRun
 
 UiActionName = Literal["approve_documents", "reject_documents"]
 _VERBS: dict[str, str] = {"approve_documents": "อนุมัติ", "reject_documents": "ปฏิเสธ"}
@@ -57,9 +59,16 @@ def _canonical_ids(raw_ids: list[str]) -> list[str]:
     return list(dict.fromkeys(ids))
 
 
-def accept(db: Session, conversation_id: UUID, run_id: UUID, *, surface_id: str, name: str,
-           source_component_id: str, document_ids: list[str]) -> dict:
-    """Check a click against its panel and mark the panel answered by run_id (uncommitted); returns the stored action."""
+def accept(db: Session, conversation_id: UUID, user_id: UUID, *, surface_id: str, name: str,
+           source_component_id: str, document_ids: list[str]) -> AgentRun:
+    """Check a click against its panel, queue the run that answers it, and mark the panel answered by that run.
+
+    Nothing is committed; the caller commits the run, its user turn and the
+    claim together. The run is inserted before the claim names it
+    (agent_surfaces.answered_by_run_id references agent_runs). The claim is a
+    conditional update, so of two concurrent clicks on one panel the second
+    waits on the panel row, then finds it answered and is refused here.
+    """
     surface = agent_surface.get(db, surface_id)
     if surface is None or surface.conversation_id != conversation_id:
         raise UiActionRefused(404, "ไม่พบแผงนี้ในบทสนทนานี้")
@@ -75,7 +84,10 @@ def accept(db: Session, conversation_id: UUID, run_id: UUID, *, surface_id: str,
     shown = set(surface.document_ids or [])
     if outside := [doc_id for doc_id in ids if doc_id not in shown]:
         raise UiActionRefused(422, f"เอกสาร {outside[:_SHOWN_IDS]} ไม่อยู่ในแผงนี้")
-    if not agent_surface.claim(db, surface, run_id):
+    action = {"surface_id": surface_id, "name": name, "document_ids": ids,
+              "source_component_id": source_component_id, "timestamp": datetime.now(timezone.utc).isoformat()}
+    run = agent_run.create(db, conversation_id=conversation_id, user_id=user_id,
+                           user_message=display_text(name, len(ids)), ui_action=action)
+    if not agent_surface.claim(db, surface, run.id):
         raise UiActionRefused(409, "แผงนี้ส่งคำสั่งไปแล้ว")
-    return {"surface_id": surface_id, "name": name, "document_ids": ids,
-            "source_component_id": source_component_id, "timestamp": datetime.now(timezone.utc).isoformat()}
+    return run
