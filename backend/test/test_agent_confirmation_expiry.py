@@ -3,7 +3,7 @@ import asyncio
 import importlib
 import pkgutil
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -164,3 +164,25 @@ def test_metrics_count_expired_requests_apart_from_rejections(db, run):
     body = asyncio.run(agent_metrics(days=0, db=db, current_user=SimpleNamespace(role="admin")))
     assert body["confirmations"] == {"pending": 1, "confirmed": 1, "rejected": 1, "expired": 2,
                                      "rejection_rate": 0.5}
+
+
+def test_a_request_without_a_run_belongs_only_to_the_run_whose_span_holds_it(db, run):
+    start = datetime(2026, 10, 31, 7, 0, tzinfo=timezone.utc)
+    run.created_at, run.status = start, "succeeded"
+    later = AgentRun(id=uuid.uuid4(), conversation_id=run.conversation_id, user_id=USER, user_message="ต่อ",
+                     status="running", created_at=start + timedelta(minutes=10))
+    db.add(later)
+    db.commit()
+
+    def unattributed(minutes):
+        action = AgentPendingAction(conversation_id=run.conversation_id, user_id=USER, tool_name="request_credential",
+                                    tool_arguments={}, status="pending", created_at=start + timedelta(minutes=minutes))
+        db.add(action)
+        db.commit()
+        return str(action.id)
+
+    own = unattributed(5)
+    assert _agent_run_payload(db, run)["pending_action"]["pending_action_id"] == own
+    later_request = unattributed(15)
+    assert _agent_run_payload(db, run)["pending_action"]["pending_action_id"] == own
+    assert _agent_run_payload(db, later)["pending_action"]["pending_action_id"] == later_request

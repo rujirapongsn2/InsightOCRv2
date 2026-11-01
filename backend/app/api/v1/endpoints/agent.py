@@ -159,18 +159,24 @@ def _run_pending_action(db: Session, run: AgentRun) -> AgentPendingAction | None
     Only this run's: an older run's leftover request must never be shown (or
     auto-approved) as if the current run were waiting for it.
     """
-    from sqlalchemy import or_
-    # Requests carry the run that made them; older rows without one fall back to time.
+    from sqlalchemy import and_, or_
+    # Requests carry the run that made them. A row without one (older rows, and
+    # credential requests) belongs to the run whose time span holds it: from
+    # this run's creation until the next run of the conversation was created.
+    unattributed = [AgentPendingAction.run_id.is_(None)]
+    if run.created_at is not None:
+        unattributed.append(AgentPendingAction.created_at >= run.created_at)
+        next_run_at = (db.query(func.min(AgentRun.created_at))
+                       .filter(AgentRun.conversation_id == run.conversation_id, AgentRun.created_at > run.created_at)
+                       .scalar())
+        if next_run_at is not None:
+            unattributed.append(AgentPendingAction.created_at < next_run_at)
     return (
         db.query(AgentPendingAction)
         .filter(
             AgentPendingAction.conversation_id == run.conversation_id,
             AgentPendingAction.user_id == run.user_id,
-            or_(
-                AgentPendingAction.run_id == run.id,
-                AgentPendingAction.run_id.is_(None) & (AgentPendingAction.created_at >= run.created_at)
-                if run.created_at is not None else AgentPendingAction.run_id.is_(None),
-            ),
+            or_(AgentPendingAction.run_id == run.id, and_(*unattributed)),
         )
         .order_by(AgentPendingAction.created_at.desc())
         .first()
