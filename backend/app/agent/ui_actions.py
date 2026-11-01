@@ -66,7 +66,8 @@ def accept(db: Session, conversation_id: UUID, *, surface_id: str, name: str, so
     if (source_component_id, name) not in offered:
         raise UiActionRefused(422, f"แผงนี้ไม่มีปุ่ม {name}")
     ids = _canonical_ids(document_ids)
-    if outside := [doc_id for doc_id in ids if doc_id not in set(surface.document_ids or [])]:
+    shown = set(surface.document_ids or [])
+    if outside := [doc_id for doc_id in ids if doc_id not in shown]:
         raise UiActionRefused(422, f"เอกสาร {outside[:_SHOWN_IDS]} ไม่อยู่ในแผงนี้")
     if not agent_surface.claim(db, surface_id):
         raise UiActionRefused(409, "แผงนี้ส่งคำสั่งไปแล้ว")
