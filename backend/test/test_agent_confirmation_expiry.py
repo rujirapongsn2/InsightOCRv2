@@ -356,3 +356,35 @@ def test_a_rejected_action_is_not_asked_again_but_another_action_is(db, run, mon
                                     "tool_name": "bulk_approve"}
     assert _succeeded(events)
     assert {d.status for d in db.query(Document).all()} == {"extraction_completed"}
+
+
+def test_the_completion_provider_path_also_asks_nothing_more_after_an_expiry(db, run, monkeypatch):
+    (quote,) = _documents(db, "Q25100034-8.pdf")
+    approve = {"type": "tool_call", "tool": "approve_document", "arguments": {"doc_id": str(quote.id)}}
+    replies = [approve, approve, {"type": "final", "answer": "ยังไม่ได้อนุมัติ"}]
+    prompts, waits = [], []
+
+    async def complete(self, prompt, system_prompt, tool_results):
+        prompts.append(prompt)
+        return json.dumps(replies[len(prompts) - 1])
+
+    async def expired(self, pending_id, timeout_s=0):
+        waits.append(pending_id)
+        agent_pending.resolve(self.db, pending_id, "expired")
+        return "expired"
+
+    monkeypatch.setattr(loop_module, "build_system_prompt", lambda context, request: "sys")
+    monkeypatch.setattr(loop_module.AgentLoop, "_call_completion_provider", complete)
+    monkeypatch.setattr(loop_module.AgentLoop, "_wait_for_confirmation", expired)
+    loop = loop_module.AgentLoop(db=db, conversation_id=run.conversation_id, user_id=USER, job_id=JOB,
+                                 llm_config={"provider": "completion_messages", "model": "m"})
+
+    async def drain():
+        return [event async for event in loop.run("อนุมัติเอกสาร")]
+
+    events = [json.loads(event[6:]) for event in asyncio.run(drain()) if event.startswith("data: ")]
+    assert len(waits) == 1
+    db.expire_all()
+    assert [a.status for a in db.query(AgentPendingAction).all()] == ["expired"]
+    assert "user is away" in prompts[-1]
+    assert next(event for event in events if event["type"] == "done")["success"] is True
