@@ -334,6 +334,15 @@ test("the confirmation follows the polled request: shown while pending, timed ou
   assert.equal(conversation.shownConfirmation(null), null)
 })
 
+test("the conversation list reloads when a run starts and when it ends, not on every poll", () => {
+  // UAT N6: a new conversation stayed "New conversation" in the list until the page was reloaded.
+  const keys = [null, { id: "r1", status: "queued" }, { id: "r1", status: "running" }, { id: "r1", status: "running" },
+    { id: "r1", status: "succeeded" }, { id: "r2", status: "queued" }, { id: "r2", status: "cancelled" }]
+    .map(conversation.conversationListKey)
+  const reloads = keys.filter((key, index) => key !== null && key !== keys[index - 1])
+  assert.deepEqual(reloads, ["r1:active", "r1:ended", "r2:active", "r2:ended"])
+})
+
 test("a reloaded newest page keeps the earlier pages the user loaded", () => {
   const ids = (list) => clone(list.map((m) => m.id))
   const m = (id) => ({ id })

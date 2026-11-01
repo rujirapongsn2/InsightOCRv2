@@ -4,7 +4,7 @@ import { useState, useEffect, useRef, useCallback, type KeyboardEvent, type Reac
 import { X, Plus, Trash2, Bot, ChevronDown, AlertTriangle, Loader2, Brain, Library, Sparkles, ListChecks, Check, Circle, ShieldCheck, ShieldAlert, FileText, GitCompare, CheckCircle2, Send, ArrowUpRight } from "lucide-react"
 import { getApiBaseUrl } from "@/lib/api"
 import { parseSurfaceStates, type SurfaceConversation, type SurfaceState, type UiActionRequest } from "@/lib/a2ui"
-import { mergeNewestPage, shownConfirmation, type PendingAction } from "@/lib/agentConversation"
+import { conversationListKey, mergeNewestPage, shownConfirmation, type PendingAction } from "@/lib/agentConversation"
 import AgentMessage from "./AgentMessage"
 import AgentToolCalls from "./AgentToolCalls"
 import ConfirmationDialog from "./ConfirmationDialog"
@@ -149,20 +149,24 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay", onOpenDoc
         messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
     }, [messages, streamText, events])
 
-    useEffect(() => {
-        const load = async () => {
-            setLoading(true)
-            try {
-                const res = await fetch(`${apiBase}/agent/conversations?job_id=${jobId}`, { headers: headers() })
-                if (res.ok) {
-                    const data: Conversation[] = await res.json()
-                    setConversations(data)
-                    if (data.length > 0) setActiveConversation(data[0].id)
-                }
-            } catch { } finally { setLoading(false) }
+    const loadConversations = useCallback(async (): Promise<Conversation[] | null> => {
+        try {
+            const res = await fetch(`${apiBase}/agent/conversations?job_id=${jobId}`, { headers: headers() })
+            if (!res.ok) return null
+            const data: Conversation[] = await res.json()
+            setConversations(data)
+            return data
+        } catch {
+            return null
         }
-        load()
     }, [apiBase, jobId, headers])
+
+    useEffect(() => {
+        setLoading(true)
+        loadConversations()
+            .then(data => { if (data && data.length > 0) setActiveConversation(data[0].id) })
+            .finally(() => setLoading(false))
+    }, [loadConversations])
 
     const reloadActiveMessages = useCallback(async () => {
         if (!activeConversation) return
@@ -259,6 +263,12 @@ export default function AgentPanel({ jobId, onClose, mode = "overlay", onOpenDoc
         reloadActiveMessages()
         restoreActiveRun(activeConversation)
     }, [activeConversation, reloadActiveMessages, restoreActiveRun])
+
+    // A new run retitles its conversation; an ended one reorders the list.
+    const listKey = conversationListKey(activeRun)
+    useEffect(() => {
+        if (listKey) loadConversations()
+    }, [listKey, loadConversations])
 
     useEffect(() => {
         if (!activeRun || !activeConversation || !["queued", "running"].includes(activeRun.status)) return

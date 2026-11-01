@@ -33,6 +33,16 @@ export function shownConfirmation(action: PendingAction | null | undefined): Pen
 }
 
 /**
+ * The moments the conversation list can change: a run is accepted (the server
+ * titles the conversation after its user turn) and a run ends. The list is
+ * reloaded whenever this key changes; null while no run is known.
+ */
+export function conversationListKey(run: { id: string; status: string } | null | undefined): string | null {
+    if (!run) return null
+    return `${run.id}:${run.status === "queued" || run.status === "running" ? "active" : "ended"}`
+}
+
+/**
  * Put a freshly loaded newest page in place. It replaces the messages it
  * overlaps; older pages the user loaded stay in front of it while it connects
  * to them. Otherwise the page stands alone and its own has_more applies.
