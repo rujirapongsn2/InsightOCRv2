@@ -1604,3 +1604,40 @@ Date: 2026-06-30
   that database: a failed run reopens its panel, and a confirmed action
   keeps the panel answered.
 - Not yet checked in the running app or against a live model.
+
+### UAT fix round (2026-11-01)
+
+Fixes for the live UAT of the Jobs AI Agent (`TEST_UAT.md`, conversation
+`d7dac20a`).
+
+- Panel clicks (B1). `POST /agent/conversations/{id}/ui-actions` returned 500
+  on Postgres for every click, because the panel claim named a run that was
+  inserted afterwards. Click a panel button: the response is 202, a run row
+  exists, and `agent_surfaces.answered_by_run_id` names it.
+- Postgres tests. `test/conftest.py` creates a throwaway database
+  `insightocr_test_<random>` on the server that `DATABASE_URL` names, and
+  drops it after the session. The panel, confirmation-expiry and history
+  tests run on SQLite and on that database. Run them through the backend
+  image, with `REQUIRE_POSTGRES=1` so that a skip becomes a failure:
+
+  ```
+  docker run --rm -e REQUIRE_POSTGRES=1 -v <repo>:/repo -w /repo/backend --env-file <env> \
+    --network insightocrv2_internal insightocrv2-backend python -m pytest -q test
+  ```
+
+  `alembic upgrade head` cannot build an empty database (0010 adds a column
+  that the baseline already created), so the fixture uses
+  `Base.metadata.create_all`.
+- Stop, then a new request (B2). Ask to approve one document, press Stop
+  while the confirmation waits, then ask to approve another document. The
+  new confirmation names the new document. The UAT history was replayed
+  against the agent model. The old history repeated the stopped approval in
+  7 of 10 first steps, and the new history in 0 of 10.
+- Reject or expiry (B3). The run ends `succeeded` and the chat shows no red
+  error. A clicked panel still reopens.
+- A change below the display precision (B4) reads `▬ 0 จุด` and has no
+  sentiment.
+- The confirmation for one document shows its filename (M4). The
+  conversation list updates its title when a run starts (M3). A date in a
+  text table column is sent back to the model (M2). Every panel tool tells
+  the model not to restate the panel (M1).
