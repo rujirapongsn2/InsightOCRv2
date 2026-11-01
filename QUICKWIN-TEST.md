@@ -1641,3 +1641,40 @@ Fixes for the live UAT of the Jobs AI Agent (`TEST_UAT.md`, conversation
   conversation list updates its title when a run starts (M3). A date in a
   text table column is sent back to the model (M2). Every panel tool tells
   the model not to restate the panel (M1).
+
+### Stopped tool calls no longer spin (UAT round 2 N4, 2026-11-01)
+
+- Stop while a confirmation waits. Ask to approve one document and press
+  Stop while the confirmation waits. After the run ends, and after a reload,
+  the `approve_document` chip shows a grey stop mark and `หยุดแล้ว`, and a
+  collapsed group that ends with it does too. The database has one
+  `role='tool'` row for that call, with `tool_result.unfinished = true`.
+- Reject or let a confirmation expire. The chip shows `ผู้ใช้ไม่ยืนยัน` or
+  `หมดเวลายืนยัน` with the grey mark, not a red X.
+- Backend tests: `test/test_agent_unfinished_calls.py` (SQLite and
+  Postgres). They cover Stop while waiting, a worker crash and the runtime
+  limit mid-call, a normal finish, Stop during an approved call (only the
+  real result is kept), maintenance, and migration 0032 run twice.
+  Frontend: `node --test test/agentToolStatus.test.mjs`.
+- Migration 0032 backfills calls of ended runs. Check what it would store,
+  read-only, with this query:
+
+  ```sql
+  BEGIN READ ONLY;
+  WITH ended AS (
+    SELECT r.id, r.conversation_id, r.created_at AS s,
+           (SELECT min(n.created_at) FROM agent_runs n
+             WHERE n.conversation_id = r.conversation_id AND n.created_at > r.created_at) AS e
+    FROM agent_runs r
+    WHERE r.status NOT IN ('queued', 'running') AND (r.status <> 'cancelled' OR r.finished_at IS NOT NULL))
+  SELECT e.id, c->>'id', c->'function'->>'name'
+  FROM ended e JOIN agent_messages m ON m.conversation_id = e.conversation_id AND m.role = 'assistant'
+    AND m.tool_calls IS NOT NULL AND m.created_at >= e.s AND (e.e IS NULL OR m.created_at < e.e)
+  CROSS JOIN LATERAL jsonb_array_elements(m.tool_calls) c
+  WHERE NOT EXISTS (SELECT 1 FROM agent_messages t WHERE t.conversation_id = e.conversation_id
+    AND t.role = 'tool' AND t.tool_call_id = c->>'id' AND t.created_at >= e.s AND (e.e IS NULL OR t.created_at < e.e));
+  ROLLBACK;
+  ```
+
+  On 2026-11-01 it listed 5 calls (4 `approve_document`, 1 `bulk_approve`),
+  and an upgrade of a copy of that database stored exactly those 5.
