@@ -13,6 +13,7 @@ import { useAuth } from "@/components/auth-provider"
 import LlmResultRenderer from "@/components/LlmResultRenderer"
 import AgentPanel from "@/components/agent/AgentPanel"
 import { type MappingReport } from "@/components/document/MappingPanel"
+import { ThinkingGlow } from "@/components/document/ThinkingGlow"
 import { evidenceSearchTexts, pageWordsFrom, type Highlight, type PageWord } from "@/lib/evidence-search"
 import { generateExportHtml, generateExportText } from "@/lib/exportReportHtml"
 
@@ -1693,7 +1694,7 @@ export default function JobDetailPage() {
                                     const canManuallyRetryOcr = doc.status === "failed" && supportsManualOcrRetry(doc)
 
                                     return (
-                                        <div key={doc.id} className="p-4 border rounded-md bg-slate-50">
+                                        <div key={doc.id} className="processing-glow p-4 border rounded-md bg-slate-50" data-active={isProcessing || undefined}>
                                             <div className="mb-3 flex items-center gap-3">
                                                 <FileText className="h-5 w-5 shrink-0 text-slate-500" />
                                                 <span className="min-w-0 flex-1 truncate text-sm font-medium">{doc.filename}</span>
@@ -1891,6 +1892,10 @@ export default function JobDetailPage() {
                         <div className="grid flex-1 min-h-0 grid-cols-1 gap-4 overflow-y-auto p-4 lg:grid-cols-[minmax(0,1.15fr)_minmax(30rem,42rem)] lg:overflow-hidden">
                             {/* Left Column - Document Viewer (PDF or Image) */}
                             <div className={`min-h-[22rem] overflow-hidden rounded-lg bg-slate-50 lg:block lg:min-h-0 ${mobileView === "pdf" ? "block" : "hidden"}`}>
+                                <ThinkingGlow
+                                    active={mappingBusy || fieldRetryBusy !== null}
+                                    label={mappingBusy ? "AI กำลังจับคู่ฟิลด์ใหม่…" : fieldRetryBusy ? `AI กำลังหา ${fieldRetryBusy}…` : undefined}
+                                >
                                 {(() => {
                                     const fileExt = reviewDoc.filename.toLowerCase().split('.').pop() || ''
                                     const imageExtensions = previewImageExtensions
@@ -1926,6 +1931,7 @@ export default function JobDetailPage() {
                                         )
                                     }
                                 })()}
+                                </ThinkingGlow>
                             </div>
 
                             {/* Right Column - Editable extraction */}

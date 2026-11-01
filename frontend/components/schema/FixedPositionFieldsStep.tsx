@@ -10,6 +10,7 @@ import { getApiBaseUrl } from "@/lib/api"
 import { isValidFieldName } from "@/lib/schema-validation"
 import { evidenceSearchTexts, findTextBox, findWordBox, type Box, type PageWord, type TextItemLike } from "@/lib/evidence-search"
 import "@/lib/pdf-worker"
+import { ThinkingGlow } from "@/components/document/ThinkingGlow"
 import "react-pdf/dist/Page/AnnotationLayer.css"
 import "react-pdf/dist/Page/TextLayer.css"
 
@@ -635,6 +636,7 @@ export function FixedPositionFieldsStep() {
                 <span>{creationMode === "draw" ? selection ? "Box selected" : "Draw a box" : creationMode === "search" ? "Find text to place box" : "Enter coordinates"}</span>
                 <button type="button" aria-label="Cancel new field" title="Cancel new field" disabled={finding} onClick={cancelCreation}><X className="h-4 w-4" /></button>
               </div>}
+              <ThinkingGlow active={reading} label="AI กำลังอ่านค่าตามตำแหน่ง…">
               <div ref={pageContainerRef} className="max-h-[68vh] min-h-[32rem] overflow-auto p-5">
                 <div className="flex min-w-full justify-center">
                 <div
@@ -711,6 +713,7 @@ export function FixedPositionFieldsStep() {
                 </div>
               </div>
               </div>
+              </ThinkingGlow>
             </section>
 
             <section ref={sidebarRef} className="min-w-0 space-y-2 lg:max-h-[68vh] lg:overflow-y-auto lg:pr-1">

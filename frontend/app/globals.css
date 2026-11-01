@@ -409,3 +409,152 @@ body {
   border-radius: 1px;
   background: currentColor;
 }
+
+/* ─── ThinkingGlow: colour glow around a document while the AI works ─────
+   Two counter-rotating blurred conic gradients plus orbiting blobs, masked
+   so only the edges glow and the document stays readable. */
+.thinking-glow {
+  position: relative;
+  height: 100%;
+  isolation: isolate;
+}
+.thinking-glow-cloud {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  overflow: hidden;
+  border-radius: inherit;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.35s cubic-bezier(0.22, 1, 0.36, 1);
+  -webkit-mask-image: radial-gradient(ellipse 72% 70% at 50% 50%, transparent 46%, #000 88%);
+  mask-image: radial-gradient(ellipse 72% 70% at 50% 50%, transparent 46%, #000 88%);
+}
+.thinking-glow[data-active] .thinking-glow-cloud { opacity: 1; }
+.thinking-glow-cloud::before,
+.thinking-glow-cloud::after {
+  content: "";
+  position: absolute;
+  left: -20%;
+  top: -15%;
+  width: 140%;
+  height: 130%;
+  border-radius: 50%;
+  filter: blur(28px);
+}
+.thinking-glow-cloud::before {
+  background: conic-gradient(from 0deg, #ff6900, #ff3d81, #a855f7, #3b82f6, #22d3ee, #34d399, #facc15, #ff6900);
+  opacity: 0.55;
+}
+.thinking-glow-cloud::after {
+  background: conic-gradient(from 180deg, #22d3ee, #34d399, #facc15, #ff6900, #ff3d81, #a855f7, #3b82f6, #22d3ee);
+  opacity: 0.4;
+}
+.thinking-glow-cloud i {
+  position: absolute;
+  width: 30%;
+  height: 32%;
+  border-radius: 50%;
+  filter: blur(18px);
+  mix-blend-mode: multiply;
+  opacity: 0.35;
+}
+.thinking-glow-cloud i:nth-child(1) { background: radial-gradient(circle, rgba(255, 105, 0, 0.9), transparent 70%); }
+.thinking-glow-cloud i:nth-child(2) { background: radial-gradient(circle, rgba(168, 85, 247, 0.85), transparent 70%); }
+.thinking-glow-cloud i:nth-child(3) { background: radial-gradient(circle, rgba(34, 211, 238, 0.85), transparent 70%); }
+.thinking-glow-cloud i:nth-child(4) { width: 24%; height: 28%; background: radial-gradient(circle, rgba(52, 211, 153, 0.8), transparent 70%); }
+.thinking-glow-cloud i:nth-child(5) { width: 24%; height: 28%; background: radial-gradient(circle, rgba(250, 204, 21, 0.75), transparent 70%); }
+/* Animate only while active, so an idle preview costs nothing. */
+.thinking-glow[data-active] .thinking-glow-cloud::before { animation: thinking-glow-spin 1.6s linear infinite; }
+.thinking-glow[data-active] .thinking-glow-cloud::after { animation: thinking-glow-spin 1.2s linear infinite reverse; }
+.thinking-glow[data-active] .thinking-glow-cloud i:nth-child(-n + 3) { animation: thinking-glow-orbit 2s linear infinite; }
+.thinking-glow[data-active] .thinking-glow-cloud i:nth-child(2) { animation-delay: -0.66s; }
+.thinking-glow[data-active] .thinking-glow-cloud i:nth-child(3) { animation-delay: -1.33s; }
+.thinking-glow[data-active] .thinking-glow-cloud i:nth-child(n + 4) { animation: thinking-glow-orbit 1.6s linear infinite reverse; }
+.thinking-glow[data-active] .thinking-glow-cloud i:nth-child(5) { animation-delay: -0.8s; }
+.thinking-glow-pulse {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  z-index: 6;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  pointer-events: none;
+  background: radial-gradient(circle, rgba(255, 105, 0, 0.4), transparent 70%);
+  animation: thinking-glow-expand 0.7s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+.thinking-glow-label {
+  position: absolute;
+  left: 50%;
+  bottom: 14px;
+  z-index: 7;
+  transform: translateX(-50%);
+  padding: 4px 12px;
+  border-radius: 9999px;
+  background: rgba(15, 23, 42, 0.78);
+  color: #fff;
+  font-size: 12px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+@keyframes thinking-glow-spin { to { transform: rotate(360deg); } }
+@keyframes thinking-glow-orbit {
+  0% { transform: translate(2%, 2%); }
+  25% { transform: translate(230%, 0); }
+  50% { transform: translate(232%, 210%); }
+  75% { transform: translate(4%, 214%); }
+  100% { transform: translate(2%, 2%); }
+}
+@keyframes thinking-glow-expand {
+  from { transform: translate(-50%, -50%) scale(0); opacity: 1; }
+  to { transform: translate(-50%, -50%) scale(70); opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .thinking-glow .thinking-glow-cloud::before,
+  .thinking-glow .thinking-glow-cloud::after,
+  .thinking-glow .thinking-glow-cloud i,
+  .thinking-glow-pulse { animation: none !important; }
+}
+
+/* ─── processing-glow: a colour ring running round a card while its document
+   is processed. The ring is a rotating conic gradient cut to the border by a
+   mask; a wider blurred ring around it is the soft glow. */
+@property --processing-glow-angle {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+.processing-glow {
+  position: relative;
+}
+.processing-glow[data-active]::before,
+.processing-glow[data-active]::after {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  pointer-events: none;
+  background: conic-gradient(from var(--processing-glow-angle), #ff6900, #ff3d81, #a855f7, #3b82f6, #22d3ee, #34d399, #facc15, #ff6900);
+  animation: processing-glow-turn 2.4s linear infinite;
+}
+.processing-glow[data-active]::before,
+.processing-glow[data-active]::after {
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0);
+}
+.processing-glow[data-active]::before { padding: 2px; }
+.processing-glow[data-active]::after {
+  inset: -6px;
+  padding: 6px;
+  filter: blur(6px);
+  opacity: 0.5;
+}
+@keyframes processing-glow-turn {
+  to { --processing-glow-angle: 360deg; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .processing-glow[data-active]::before,
+  .processing-glow[data-active]::after { animation: none; }
+}
